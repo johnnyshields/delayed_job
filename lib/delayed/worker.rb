@@ -104,6 +104,14 @@ module Delayed
       defined?(ActionDispatch::Reloader) && Rails.application.config.cache_classes == false
     end
 
+    def self.delay_job?(job)
+      if delay_jobs.is_a?(Proc)
+        delay_jobs.arity == 1 ? delay_jobs.call(job) : delay_jobs.call
+      else
+        delay_jobs
+      end
+    end
+
     def initialize(options = {})
       @quiet = options.key?(:quiet) ? options[:quiet] : true
       @failed_reserve_count = 0
@@ -209,7 +217,7 @@ module Delayed
     rescue DeserializationError => error
       job.last_error = "#{error.message}\n#{error.backtrace.join("\n")}"
       failed(job)
-    rescue => error
+    rescue Exception => error # rubocop:disable RescueException
       self.class.lifecycle.run_callbacks(:error, self, job) { handle_failed_job(job, error) }
       return false  # work failed
     end

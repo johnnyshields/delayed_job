@@ -32,7 +32,7 @@ module Delayed
           new(options).tap do |job|
             Delayed::Worker.lifecycle.run_callbacks(:enqueue, job) do
               job.hook(:enqueue)
-              Delayed::Worker.delay_jobs ? job.save : job.invoke_job
+              Delayed::Worker.delay_job?(job) ? job.save : job.invoke_job
             end
           end
         end
@@ -93,7 +93,7 @@ module Delayed
             hook :before
             payload_object.perform
             hook :success
-          rescue => e
+          rescue Exception => e # rubocop:disable RescueException
             hook :error, e
             raise e
           ensure

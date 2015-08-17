@@ -58,14 +58,30 @@ running the following command:
     rails generate delayed_job:active_record
     rake db:migrate
 
+For Rails 4.2, see [below](#rails-42)
+
 Development
 ===========
 In development mode, if you are using Rails 3.1+, your application code will automatically reload every 100 jobs or when the queue finishes.
 You no longer need to restart Delayed Job every time you update your code in development.
 
-Rails 4
-=======
-If you are using the protected_attributes gem, it must appear before delayed_job in your gemfile.
+Rails 4.2
+=========
+Set the queue_adapter in config/application.rb
+
+```ruby
+config.active_job.queue_adapter = :delayed_job
+```
+
+See the [rails guide](http://guides.rubyonrails.org/active_job_basics.html#setting-the-backend) for more details.
+
+Rails 4.x
+=========
+If you are using the protected_attributes gem, it must appear before delayed_job in your gemfile. If your jobs are failing with:
+
+     ActiveRecord::StatementInvalid: PG::NotNullViolation: ERROR:  null value in column "handler" violates not-null constraint
+
+then this is the fix you're looking for.
 
 Upgrading from 2.x to 3.0.0 on Active Record
 ============================================
@@ -282,6 +298,20 @@ NewsletterJob = Struct.new(:text, :emails) do
 end
 ```
 
+To set a per-job default for destroying failed jobs that overrides the Delayed::Worker.destroy_failed_jobs you can define a destroy_failed_jobs? method on the job
+
+```ruby
+NewsletterJob = Struct.new(:text, :emails) do
+  def perform
+    emails.each { |e| NewsletterMailer.deliver_text_to_email(text, e) }
+  end
+
+  def destroy_failed_jobs?
+    false
+  end
+end
+```
+
 To set a default queue name for a custom job that overrides Delayed::Worker.default_queue_name, you can define a queue_name method on the job
 
 ```ruby
@@ -383,6 +413,14 @@ The default behavior is to read 5 jobs from the queue when finding an available 
 By default all jobs will be queued without a named queue. A default named queue can be specified by using `Delayed::Worker.default_queue_name`.
 
 It is possible to disable delayed jobs for testing purposes. Set `Delayed::Worker.delay_jobs = false` to execute all jobs realtime.
+
+Or `Delayed::Worker.delay_jobs` can be a Proc that decides whether to execute jobs inline on a per-job basis:
+
+```ruby
+Delayed::Worker.delay_jobs = ->(job) {
+  job.queue != 'inline'
+}
+```
 
 You may need to raise exceptions on SIGTERM signals, `Delayed::Worker.raise_signal_exceptions = :term` will cause the worker to raise a `SignalException` causing the running job to abort and be unlocked, which makes the job available to other workers. The default for this option is false.
 
