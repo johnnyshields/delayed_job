@@ -47,12 +47,18 @@ module Delayed
         end
       end
 
+      attr_reader :error
+      def error=(error)
+        @error = error
+        self.last_error = "#{error.message}\n#{error.backtrace.join("\n")}" if self.respond_to?(:last_error=)
+      end
+
       def failed?
         !!failed_at
       end
       alias_method :failed, :failed?
 
-      ParseObjectFromYaml = %r{\!ruby/\w+\:([^\s]+)} # rubocop:disable ConstantName
+      ParseObjectFromYaml = /\!ruby\/\w+\:([^\s]+)/ # rubocop:disable ConstantName
 
       def name
         @name ||= payload_object.respond_to?(:display_name) ? payload_object.display_name : payload_object.class.name
@@ -121,6 +127,12 @@ module Delayed
         else
           run_time
         end
+      end
+
+      def destroy_failed_jobs?
+        payload_object.respond_to?(:destroy_failed_jobs?) ? payload_object.destroy_failed_jobs? : Delayed::Worker.destroy_failed_jobs
+      rescue DeserializationError
+        Delayed::Worker.destroy_failed_jobs
       end
 
       def fail!
