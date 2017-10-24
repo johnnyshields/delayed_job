@@ -44,7 +44,7 @@ module Delayed
       self.queue_attributes  = DEFAULT_QUEUE_ATTRIBUTES
       self.read_ahead        = DEFAULT_READ_AHEAD
       self.fail_if_payload_not_found = DEFAULT_FAIL_IF_PAYLOAD_NOT_FOUND
-      @lifecycle             = nil
+      @lifecycle = nil
     end
 
     # Add or remove plugins in this list before the worker is instantiated
