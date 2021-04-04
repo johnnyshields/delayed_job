@@ -27,7 +27,7 @@ module Delayed
     end
 
     def daemonize
-      @launch_strategy = :daemon
+      @launch_strategy ||= :daemon
       launch
     end
 
@@ -39,10 +39,10 @@ module Delayed
 
     def launcher_class
       case @launch_strategy
-      when :fork
-        Delayed::Launcher::Forking
-      else
+      when :daemon
         Delayed::Launcher::Daemonized
+      else
+        Delayed::Launcher::Forking
       end
     end
 
@@ -56,8 +56,12 @@ module Delayed
         opt.on('-e', '--environment=NAME', 'Specifies the environment to run this delayed jobs under (test/development/production).') do |_e|
           STDERR.puts 'The -e/--environment option has been deprecated and has no effect. Use RAILS_ENV and see http://github.com/collectiveidea/delayed_job/issues/7'
         end
-        opt.on('-d', '--daemon', 'Launch in daemon mode') do |_fork|
+        opt.on('-d', '--daemonize', 'Launch in daemon mode') do |_fork|
           @launch_strategy ||= :daemon
+        end
+        opt.on('--daemon-options a, b, c', Array, 'options to be passed through to daemons gem') do |daemon_options|
+          @launch_strategy ||= :daemon
+          @daemon_options = daemon_options
         end
         opt.on('--fork', 'Launch in forking mode') do |_fork|
           @launch_strategy ||= :fork
@@ -113,9 +117,6 @@ module Delayed
         end
         opt.on('-x', '--exit-on-complete', 'Exit when no more jobs are available to run. This will exit if all jobs are scheduled to run in the future.') do
           @options[:exit_on_complete] = true
-        end
-        opt.on('--daemon-options a, b, c', Array, 'options to be passed through to daemons gem') do |daemon_options|
-          @daemon_options = daemon_options
         end
       end
     end

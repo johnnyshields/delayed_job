@@ -16,17 +16,29 @@ describe Delayed::Command do
     command.launch
   end
 
-  describe 'launch strategy' do
-    it 'should use daemon mode by default' do
-      expect_any_instance_of(Delayed::Launcher::Daemonized).to receive(:launch)
-      expect_any_instance_of(Delayed::Launcher::Forking).to_not receive(:launch)
+  describe '#launch' do
+    it 'should use fork mode by default' do
+      expect_any_instance_of(Delayed::Launcher::Daemonized).to_not receive(:launch)
+      expect_any_instance_of(Delayed::Launcher::Forking).to receive(:launch)
       Delayed::Command.new([]).launch
     end
 
-    it 'should allow forking mode' do
+    it 'should use fork mode if --fork set' do
       expect_any_instance_of(Delayed::Launcher::Daemonized).to_not receive(:launch)
       expect_any_instance_of(Delayed::Launcher::Forking).to receive(:launch)
       Delayed::Command.new(%w[--fork]).launch
+    end
+
+    it 'should use daemon mode if -d set' do
+      expect_any_instance_of(Delayed::Launcher::Daemonized).to receive(:launch)
+      expect_any_instance_of(Delayed::Launcher::Forking).to_not receive(:launch)
+      Delayed::Command.new(%w[-d]).launch
+    end
+
+    it 'should use daemon mode if --daemonize set' do
+      expect_any_instance_of(Delayed::Launcher::Daemonized).to receive(:launch)
+      expect_any_instance_of(Delayed::Launcher::Forking).to_not receive(:launch)
+      Delayed::Command.new(%w[--daemonize]).launch
     end
 
     it 'using multiple switches should use first one' do
@@ -34,11 +46,37 @@ describe Delayed::Command do
       expect_any_instance_of(Delayed::Launcher::Forking).to_not receive(:launch)
       Delayed::Command.new(%w[-d --fork]).launch
     end
+  end
 
-    it '#daemonize method should always launch in daemon mode' do
+  describe '#daemonize' do
+    it 'should use daemon mode by default' do
       expect_any_instance_of(Delayed::Launcher::Daemonized).to receive(:launch)
       expect_any_instance_of(Delayed::Launcher::Forking).to_not receive(:launch)
+      Delayed::Command.new([]).daemonize
+    end
+
+    it 'should use fork mode if --fork set' do
+      expect_any_instance_of(Delayed::Launcher::Daemonized).to_not receive(:launch)
+      expect_any_instance_of(Delayed::Launcher::Forking).to receive(:launch)
       Delayed::Command.new(%w[--fork]).daemonize
+    end
+
+    it 'should use daemon mode if -d set' do
+      expect_any_instance_of(Delayed::Launcher::Daemonized).to receive(:launch)
+      expect_any_instance_of(Delayed::Launcher::Forking).to_not receive(:launch)
+      Delayed::Command.new(%w[-d]).daemonize
+    end
+
+    it 'should use daemon mode if --daemonize set' do
+      expect_any_instance_of(Delayed::Launcher::Daemonized).to receive(:launch)
+      expect_any_instance_of(Delayed::Launcher::Forking).to_not receive(:launch)
+      Delayed::Command.new(%w[--daemonize]).daemonize
+    end
+
+    it 'using multiple switches should use first one' do
+      expect_any_instance_of(Delayed::Launcher::Daemonized).to_not receive(:launch)
+      expect_any_instance_of(Delayed::Launcher::Forking).to receive(:launch)
+      Delayed::Command.new(%w[--fork -d]).daemonize
     end
   end
 
@@ -379,11 +417,17 @@ describe Delayed::Command do
     context 'not set' do
       let(:options) { [] }
       it { expect(output_options[:exit_on_complete]).to eq nil }
+      it 'does not affect launch_strategy' do
+        expect(subject.instance_variable_get(:'@launch_strategy')).to eq nil
+      end
     end
 
     context 'set' do
       let(:options) { %w[--daemon-options a,b,c] }
       it { expect(subject.instance_variable_get(:'@daemon_options')).to eq %w[a b c] }
+      it 'coerces launch_strategy to :daemon' do
+        expect(subject.instance_variable_get(:'@launch_strategy')).to eq :daemon
+      end
     end
   end
 
