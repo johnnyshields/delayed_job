@@ -6,24 +6,41 @@ namespace :jobs do
 
   desc 'Start a delayed_job worker.'
   task :work => :environment_options do
-    Delayed::Worker.new(@worker_options).start
+    Delayed::Launcher::Forking.new(@options).launch
   end
 
   desc 'Start a delayed_job worker and exit when all available jobs are complete.'
   task :workoff => :environment_options do
-    Delayed::Worker.new(@worker_options.merge(:exit_on_complete => true)).start
+    Delayed::Launcher::Forking.new(@options.merge(:exit_on_complete => true)).launch
   end
 
   task :environment_options => :environment do
-    @worker_options = {
+    require 'delayed/launcher/forking'
+    require 'delayed/pool_parser'
+
+    @options = {
+      :worker_count => ENV['NUM_WORKERS'] || 1,
       :min_priority => ENV['MIN_PRIORITY'],
       :max_priority => ENV['MAX_PRIORITY'],
-      :queues => (ENV['QUEUES'] || ENV['QUEUE'] || '').split(','),
       :quiet => ENV['QUIET']
     }
 
-    @worker_options[:sleep_delay] = ENV['SLEEP_DELAY'].to_i if ENV['SLEEP_DELAY']
-    @worker_options[:read_ahead] = ENV['READ_AHEAD'].to_i if ENV['READ_AHEAD']
+    queues = (ENV['QUEUES'] || ENV['QUEUE'] || '').split(',')
+    @options[:queues] = queues unless queues.empty?
+
+    pools = PoolParser.new.add(ENV['POOLS'] || ENV['POOL'] || '').pools
+    @options[:pools] = pools unless pools.empty?
+
+    if ENV['NUM_WORKERS'] && pools
+      raise ArgumentError, 'Cannot specify both NUM_WORKERS and POOLS'
+    end
+
+    if queues && pools
+      raise ArgumentError, 'Cannot specify both QUEUES and POOLS'
+    end
+
+    @options[:sleep_delay] = Integer(ENV['SLEEP_DELAY']) if ENV['SLEEP_DELAY']
+    @options[:read_ahead] = Integer(ENV['READ_AHEAD']) if ENV['READ_AHEAD']
   end
 
   desc "Exit with error status if any jobs older than max_age seconds haven't been attempted yet."

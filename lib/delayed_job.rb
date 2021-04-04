@@ -1,4 +1,5 @@
 require 'active_support'
+require 'delayed/util'
 require 'delayed/compatibility'
 require 'delayed/exceptions'
 require 'delayed/message_sending'
