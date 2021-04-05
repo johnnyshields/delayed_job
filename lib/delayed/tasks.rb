@@ -28,14 +28,14 @@ namespace :jobs do
     queues = (ENV['QUEUES'] || ENV['QUEUE'] || '').split(',')
     @options[:queues] = queues unless queues.empty?
 
-    pools = PoolParser.new.add(ENV['POOLS'] || ENV['POOL'] || '').pools
+    pools = Delayed::PoolParser.new.add(ENV['POOLS'] || ENV['POOL'] || '').pools
     @options[:pools] = pools unless pools.empty?
 
-    if ENV['NUM_WORKERS'] && pools
+    if ENV['NUM_WORKERS'] && @options[:pools]
       raise ArgumentError, 'Cannot specify both NUM_WORKERS and POOLS'
     end
 
-    if queues && pools
+    if @options[:queues] && @options[:pools]
       raise ArgumentError, 'Cannot specify both QUEUES and POOLS'
     end
 

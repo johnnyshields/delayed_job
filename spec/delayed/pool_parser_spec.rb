@@ -45,5 +45,9 @@ describe Delayed::PoolParser do
       subject.add('mailers')
       expect(subject.pools).to eq [[['mailers'], 1]]
     end
+
+    it '#add should return self' do
+      expect(subject.add('mailers:2|*:4')).to eq subject
+    end
   end
 end

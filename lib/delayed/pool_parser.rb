@@ -7,6 +7,7 @@ module Delayed
         worker_count = (worker_count || 1).to_i rescue 1
         pools << [queues, worker_count]
       end
+      self
     end
 
     def pools
