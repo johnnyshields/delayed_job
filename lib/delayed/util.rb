@@ -1,5 +1,3 @@
-require 'fileutils'
-
 module Delayed
   def self.program_name
     File.basename($PROGRAM_NAME)

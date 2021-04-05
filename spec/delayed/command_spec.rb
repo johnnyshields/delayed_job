@@ -1,4 +1,5 @@
 require 'helper'
+require 'delayed/command'
 
 describe Delayed::Command do
   let(:options) { [] }

@@ -1,6 +1,4 @@
-require 'fileutils'
 require 'optparse'
-require 'pathname'
 
 module Delayed
   class Command # rubocop:disable ClassLength

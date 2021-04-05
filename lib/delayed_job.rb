@@ -1,4 +1,6 @@
 require 'active_support'
+require 'fileutils'
+require 'pathname'
 require 'delayed/util'
 require 'delayed/compatibility'
 require 'delayed/exceptions'
