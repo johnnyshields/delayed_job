@@ -1,6 +1,7 @@
 shared_examples_for 'launcher shared examples' do
   let(:options) { {} }
   subject { described_class.new(options) }
+  before { allow(FileUtils).to receive(:mkdir_p) }
 
   describe 'run_worker' do
     let(:logger) { double('Logger') }
