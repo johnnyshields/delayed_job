@@ -1,9 +1,6 @@
 require 'fileutils'
 require 'optparse'
 require 'pathname'
-require 'delayed/pool_parser'
-require 'delayed/launcher/daemonized'
-require 'delayed/launcher/forking'
 
 module Delayed
   class Command # rubocop:disable ClassLength

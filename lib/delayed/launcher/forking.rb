@@ -1,5 +1,3 @@
-require 'delayed/launcher/base'
-
 module Delayed
   module Launcher
     class Forking < Base

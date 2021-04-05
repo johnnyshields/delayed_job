@@ -1,6 +1,5 @@
 require_relative '../../helper'
 require_relative 'shared_examples'
-require 'delayed/launcher/daemonized'
 
 describe Delayed::Launcher::Daemonized do
   def verify_worker_processes

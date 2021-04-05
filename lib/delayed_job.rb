@@ -11,6 +11,11 @@ require 'delayed/plugins/clear_locks'
 require 'delayed/backend/base'
 require 'delayed/backend/job_preparer'
 require 'delayed/worker'
+require 'delayed/launcher/base'
+require 'delayed/launcher/daemonized'
+require 'delayed/launcher/forking'
+require 'delayed/pool_parser'
+require 'delayed/command'
 require 'delayed/deserialization_error'
 require 'delayed/railtie' if defined?(Rails::Railtie)
 

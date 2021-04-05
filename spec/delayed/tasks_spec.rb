@@ -1,6 +1,5 @@
 require 'helper'
 require 'rake'
-require 'delayed/launcher/forking'
 
 describe 'Rake tasks' do
   let(:env) { {} }

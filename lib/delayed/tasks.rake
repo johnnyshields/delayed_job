@@ -15,9 +15,6 @@ namespace :jobs do
   end
 
   task :environment_options => :environment do
-    require 'delayed/launcher/forking'
-    require 'delayed/pool_parser'
-
     @options = {
       :worker_count => ENV['NUM_WORKERS'] ? Integer(ENV['NUM_WORKERS']) : 1,
       :quiet => !!ENV['QUIET'] && ENV['QUIET'] !~ /\A(?:0|f|false)\z/i

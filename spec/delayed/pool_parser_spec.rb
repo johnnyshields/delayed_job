@@ -1,5 +1,4 @@
 require 'helper'
-require 'delayed/pool_parser'
 
 describe Delayed::PoolParser do
   subject { described_class.new }

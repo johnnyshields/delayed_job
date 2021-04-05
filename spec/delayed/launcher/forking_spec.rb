@@ -1,6 +1,5 @@
 require_relative '../../helper'
 require_relative 'shared_examples'
-require 'delayed/launcher/forking'
 
 describe Delayed::Launcher::Forking do
   before do
