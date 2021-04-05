@@ -127,6 +127,7 @@ module Delayed
 
     def validate_options!
       validate_worker_count!
+      validate_priority!
       validate_identifier!
       validate_workers_and_pools!
       validate_queues_and_pools!
@@ -135,6 +136,11 @@ module Delayed
     def validate_worker_count!
       return unless @options[:worker_count] < 1
       STDERR.puts 'WARNING: --num-workers must be 1 or greater. This will raise an ArgumentError in the next major version.'
+    end
+
+    def validate_priority!
+      return unless @options[:min_priority] && @options[:max_priority] && @options[:min_priority] > @options[:max_priority]
+      STDERR.puts 'WARNING: --min-priority must be less than or equal to --max-priority. This will raise an ArgumentError in the next major version.'
     end
 
     def validate_identifier!

@@ -462,6 +462,24 @@ describe Delayed::Command do
       Delayed::Command.new(%w[-d --num-workers=0]).launch
     end
 
+    it 'not warn if min-priority is less than max-priority' do
+      expect_any_instance_of(Delayed::Launcher::Daemonized).to receive(:launch)
+      expect(STDERR).to_not receive(:puts)
+      Delayed::Command.new(%w[-d --min-priority=-5 --max-priority=0]).launch
+    end
+
+    it 'not warn if min-priority equals max-priority' do
+      expect_any_instance_of(Delayed::Launcher::Daemonized).to receive(:launch)
+      expect(STDERR).to_not receive(:puts)
+      Delayed::Command.new(%w[-d --min-priority=-5 --max-priority=-5]).launch
+    end
+
+    it 'warn if min-priority is greater than max-priority' do
+      expect_any_instance_of(Delayed::Launcher::Daemonized).to receive(:launch)
+      expect(STDERR).to receive(:puts)
+      Delayed::Command.new(%w[-d --min-priority=-4 --max-priority=-5]).launch
+    end
+
     it 'warn if both queues and pools are present' do
       expect_any_instance_of(Delayed::Launcher::Daemonized).to receive(:launch)
       expect(STDERR).to receive(:puts)

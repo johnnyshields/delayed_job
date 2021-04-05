@@ -20,7 +20,7 @@ namespace :jobs do
 
     @options = {
       :worker_count => ENV['NUM_WORKERS'] ? Integer(ENV['NUM_WORKERS']) : 1,
-      :quiet => ENV['QUIET'] ? ENV['QUIET'] !~ /\A(?:0|f|false)\z/i : true
+      :quiet => !!ENV['QUIET'] && ENV['QUIET'] !~ /\A(?:0|f|false)\z/i
     }
     @options[:min_priority] = Integer(ENV['MIN_PRIORITY']) if ENV['MIN_PRIORITY']
     @options[:max_priority] = Integer(ENV['MAX_PRIORITY']) if ENV['MAX_PRIORITY']
@@ -32,6 +32,14 @@ namespace :jobs do
 
     pools = Delayed::PoolParser.new.add(ENV['POOLS'] || ENV['POOL'] || '').pools
     @options[:pools] = pools unless pools.empty?
+
+    if @options[:worker_count] < 1
+      raise ArgumentError, 'NUM_WORKERS must be 1 or greater'
+    end
+
+    if @options[:min_priority] && @options[:max_priority] && @options[:min_priority] > @options[:max_priority]
+      raise ArgumentError, 'MIN_PRIORITY must be less than or equal to MAX_PRIORITY'
+    end
 
     if ENV['NUM_WORKERS'] && @options[:pools]
       raise ArgumentError, 'Cannot specify both NUM_WORKERS and POOLS'
