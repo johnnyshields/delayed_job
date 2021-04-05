@@ -19,11 +19,13 @@ namespace :jobs do
     require 'delayed/pool_parser'
 
     @options = {
-      :worker_count => ENV['NUM_WORKERS'] || 1,
-      :min_priority => ENV['MIN_PRIORITY'],
-      :max_priority => ENV['MAX_PRIORITY'],
-      :quiet => ENV['QUIET']
+      :worker_count => ENV['NUM_WORKERS'] ? Integer(ENV['NUM_WORKERS']) : 1,
+      :quiet => ENV['QUIET'] ? ENV['QUIET'] !~ /\A(?:0|f|false)\z/i : true
     }
+    @options[:min_priority] = Integer(ENV['MIN_PRIORITY']) if ENV['MIN_PRIORITY']
+    @options[:max_priority] = Integer(ENV['MAX_PRIORITY']) if ENV['MAX_PRIORITY']
+    @options[:sleep_delay] = Integer(ENV['SLEEP_DELAY']) if ENV['SLEEP_DELAY']
+    @options[:read_ahead] = Integer(ENV['READ_AHEAD']) if ENV['READ_AHEAD']
 
     queues = (ENV['QUEUES'] || ENV['QUEUE'] || '').split(',')
     @options[:queues] = queues unless queues.empty?
@@ -38,9 +40,6 @@ namespace :jobs do
     if @options[:queues] && @options[:pools]
       raise ArgumentError, 'Cannot specify both QUEUES and POOLS'
     end
-
-    @options[:sleep_delay] = Integer(ENV['SLEEP_DELAY']) if ENV['SLEEP_DELAY']
-    @options[:read_ahead] = Integer(ENV['READ_AHEAD']) if ENV['READ_AHEAD']
   end
 
   desc "Exit with error status if any jobs older than max_age seconds haven't been attempted yet."
