@@ -58,16 +58,19 @@ jobs:
     steps:
     - uses: actions/checkout@v2
     - uses: ruby/setup-ruby@v1
+      continue-on-error: ${{ matrix.experimental || false }}
       env:
         RAILS_VERSION: ${{ matrix.rails_version }}
       with:
         ruby-version: ${{ matrix.ruby }}
         bundler-cache: true # runs 'bundle install' and caches installed gems automatically
     - name: Run tests
+      continue-on-error: ${{ matrix.experimental || false }}
       env:
         RAILS_VERSION: ${{ matrix.rails_version }}
       run: bundle exec rspec
     - name: Coveralls Parallel
+      continue-on-error: ${{ matrix.experimental || false }}
       uses: coverallsapp/github-action@master
       with:
         github-token: ${{ secrets.github_token }}
