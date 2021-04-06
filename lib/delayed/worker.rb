@@ -81,18 +81,26 @@ module Delayed
     end
 
     def self.before_fork
-      unless @files_to_reopen
-        @files_to_reopen = []
-        ObjectSpace.each_object(File) do |file|
-          @files_to_reopen << file unless file.closed?
-        end
-      end
-
+      store_file_handles
       backend.before_fork
     end
 
     def self.after_fork
-      # Re-open file handles
+      reopen_file_handles
+      backend.after_fork
+    end
+
+    def self.store_file_handles
+      return if @files_to_reopen || !object_space_usable?
+      @files_to_reopen = []
+      ObjectSpace.each_object(File) do |file|
+        @files_to_reopen << file unless file.closed?
+      end
+    end
+    private self.store_file_handles
+
+    def self.reopen_file_handles
+      return unless @files_to_reopen
       @files_to_reopen.each do |file|
         begin
           file.reopen file.path, 'a+'
@@ -100,8 +108,8 @@ module Delayed
         rescue ::Exception # rubocop:disable HandleExceptions, RescueException
         end
       end
-      backend.after_fork
     end
+    private self.reopen_file_handles
 
     def self.lifecycle
       # In case a worker has not been set up, job enqueueing needs a lifecycle.
