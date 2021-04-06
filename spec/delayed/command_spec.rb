@@ -136,7 +136,7 @@ describe Delayed::Command do
     end
 
     context '--num-workers not a number' do
-      let(:options) { %w[--num_workers hippo] }
+      let(:options) { %w[--num-workers hippo] }
       it { expect(output_options[:worker_count]).to eq 1 }
     end
 
@@ -148,7 +148,7 @@ describe Delayed::Command do
       end
     end
 
-    context '--number-of-workers not a number' do
+    context '--number_of_workers not a number' do
       let(:options) { %w[--number_of_workers rhino] }
       it do
         expect(STDERR).to receive(:puts)

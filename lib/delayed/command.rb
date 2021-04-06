@@ -70,8 +70,8 @@ module Delayed
         opt.on('-n', '--num-workers=workers', 'Number of child workers to spawn') do |n|
           @options[:worker_count] = Integer(n) rescue 1
         end
-        opt.on('--number-of-workers=workers', 'Number of child workers to spawn') do |n|
-          STDERR.puts 'DEPRECATED: Use -n or --num-workers instead of --number-of-workers. This will be removed in the next major version.'
+        opt.on('--number_of_workers=workers', 'Number of child workers to spawn') do |n|
+          STDERR.puts 'DEPRECATED: Use -n or --num-workers instead of --number_of_workers. This will be removed in the next major version.'
           @options[:worker_count] = Integer(n) rescue 1
         end
         opt.on('--pid-dir=DIR', 'Specifies an alternate directory in which to store the process ids.') do |dir|
