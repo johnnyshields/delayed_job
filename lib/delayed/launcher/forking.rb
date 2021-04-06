@@ -39,7 +39,7 @@ module Delayed
         worker_pid = fork_worker(worker_name, options)
 
         queues = options[:queues]
-        queue_msg = " queues=#{queues.join(',')}" unless queues.nil? || queues.empty?
+        queue_msg = " queues=#{queues.empty? ? '*' : queues.join(',')}" if queues
         logger.info "Worker #{worker_name} started - pid #{worker_pid}#{queue_msg}"
 
         workers[worker_pid] = [worker_name, queues]
