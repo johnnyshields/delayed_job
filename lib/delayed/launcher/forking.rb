@@ -53,6 +53,7 @@ module Delayed
       def run_loop
         loop do
           worker_pid = Process.wait
+          next unless workers.key?(worker_pid)
           worker_name, queues = workers.delete(worker_pid)
           logger.info "Worker #{worker_name} exited - #{$?}"
           break if @stop && workers.empty?
