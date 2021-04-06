@@ -9,7 +9,7 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    continue-on-error: ${{ matrix.experimental }}
+    continue-on-error: ${{ matrix.experimental || false }}
     strategy:
       fail-fast: false
       matrix:
@@ -22,7 +22,6 @@ jobs:
         rails_version:
           - '6.0'
           - '6.1'
-        experimental: [false]
         include:
           # Older Rails
           - ruby: '2.2'
