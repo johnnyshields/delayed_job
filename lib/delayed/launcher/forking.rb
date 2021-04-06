@@ -50,7 +50,7 @@ module Delayed
         fork { run_worker(worker_name, options) }
       end
 
-      def run_loop
+      def run_loop # rubocop:disable CyclomaticComplexity
         loop do
           worker_pid = Process.wait
           next unless workers.key?(worker_pid)
@@ -58,8 +58,8 @@ module Delayed
           logger.info "Worker #{worker_name} exited - #{$?}"
           break if @stop && workers.empty?
           next if @stop
-          options = @options.merge(:queues => queues)
-          options.delete(:queues) unless queues
+          options = @options
+          options = options.merge(:queues => queues) if queues
           add_worker(options)
         end
       rescue Errno::ECHILD
