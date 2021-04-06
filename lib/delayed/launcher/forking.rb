@@ -58,6 +58,7 @@ module Delayed
           break if @stop && workers.empty?
           next if @stop
           options = @options.merge(:queues => queues)
+          options.delete(:queues) unless queues
           add_worker(options)
         end
       rescue Errno::ECHILD
