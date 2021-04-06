@@ -1,16 +1,21 @@
 shared_examples_for 'launcher shared examples' do
   let(:options) { {} }
   subject { described_class.new(options) }
-  before { allow(FileUtils).to receive(:mkdir_p) }
+
+  before do
+    # stub I/O methods
+    allow(ObjectSpace).to receive(:each_object)
+    allow(FileUtils).to receive(:mkdir_p)
+    allow(Dir).to receive(:chdir)
+  end
 
   describe 'run_worker' do
     let(:logger) { double('Logger') }
 
     before do
       allow(Delayed::Worker).to receive(:after_fork)
-      allow(Dir).to receive(:chdir)
-      allow(Logger).to receive(:new).and_return(logger)
       allow_any_instance_of(Delayed::Worker).to receive(:start)
+      allow(Logger).to receive(:new).and_return(logger)
       allow(Delayed::Worker).to receive(:logger=)
       allow(Delayed::Worker).to receive(:logger).and_return(nil, logger)
     end
