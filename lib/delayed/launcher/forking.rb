@@ -17,7 +17,7 @@ module Delayed
       def shutdown(timeout = nil)
         @stopped = true
         message = " with #{timeout} second grace period" if timeout
-        logger.info "Shutdown invoked#{message}..."
+        logger.info "Shutdown invoked#{message}"
         signal_workers('TERM')
         schedule_kill(timeout) if timeout
       end
@@ -26,7 +26,7 @@ module Delayed
         @stopped = true
         @killed = true
         message = " #{message}" if message
-        logger.warn "Kill invoked#{message}..."
+        logger.warn "Kill invoked#{message}"
         signal_workers('KILL')
         logger.warn "#{parent_name} exited forcefully#{message} - pid #{$$}"
         exit(exit_status)
@@ -111,7 +111,7 @@ module Delayed
 
       def signal_workers(signal)
         workers.each do |pid, (worker_name, _)|
-          logger.warn "Sending SIG#{signal} to worker #{worker_name}..."
+          logger.info "Sent SIG#{signal} to worker #{worker_name}"
           Process.kill(signal, pid)
         end
       end
