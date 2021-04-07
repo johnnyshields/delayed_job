@@ -85,7 +85,7 @@ module Delayed
           # If any child was SIGKILL'ed, we must shutdown all children.
           # This first will attempt a graceful SIGTERM of the children,
           # followed by a SIGKILL after a timeout period.
-          if child_status.include?('SIGKILL') && !@killed
+          if child_status.termsig == 9 && !@killed
             @killed = true
             logger.warn "Worker #{worker_name} SIGKILL detected. #{parent_name} shutting down..."
             shutdown(KILL_TIMEOUT)
