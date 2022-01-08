@@ -22,13 +22,14 @@ module Delayed
         @process_prefix = options.delete(:prefix)
         @process_identifier = options.delete(:identifier)
         @args = options.delete(:args)
+        options[:daemonized] = true
 
         @options = options
         @options[:pid_dir] ||= "#{Delayed.root}/tmp/pids"
         @options[:log_dir] ||= "#{Delayed.root}/log"
       end
 
-      def launch
+      def run
         require_daemons!
         create_pid_dir
         setup_workers

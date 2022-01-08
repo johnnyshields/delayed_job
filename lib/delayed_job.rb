@@ -19,6 +19,7 @@ require 'delayed/launcher/forking'
 require 'delayed/pool_parser'
 require 'delayed/command'
 require 'delayed/deserialization_error'
+require 'delayed/version'
 require 'delayed/railtie' if defined?(Rails::Railtie)
 
 ActiveSupport.on_load(:action_mailer) do
