@@ -541,3 +541,7 @@ You can invoke `rake jobs:clear` to delete all jobs in the queue.
 Good places to get help are:
 * [Google Groups](http://groups.google.com/group/delayed_job) where you can join our mailing list.
 * [StackOverflow](http://stackoverflow.com/questions/tagged/delayed-job)
+
+### License
+
+Some code related to worker clustering is lovingly borrowed from the Puma webserver (puma.io)

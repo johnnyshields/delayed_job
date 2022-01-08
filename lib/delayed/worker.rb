@@ -166,6 +166,50 @@ module Delayed
         raise SignalException, 'INT' if self.class.raise_signal_exceptions && self.class.raise_signal_exceptions != :term
       end
 
+      if @check_pipe
+        Thread.new do
+          Delayed.set_thread_name "wrkr check"
+          @check_pipe.wait_readable
+          log "! Detected parent died, dying"
+          exit! 1
+        end
+      end
+
+
+      restart_server = Queue.new << true << false
+
+      fork_worker = @options[:fork_worker] && index == 0
+
+      if fork_worker
+        restart_server.clear
+        worker_pids = []
+        Signal.trap "SIGCHLD" do
+          wakeup! if worker_pids.reject! do |p|
+            Process.wait(p, Process::WNOHANG) rescue true
+          end
+        end
+
+        Thread.new do
+          Delayed.set_thread_name "wrkr fork"
+          while (idx = @fork_pipe.gets)
+            idx = idx.to_i
+            if idx == -1 # stop server
+              if restart_server.length > 0
+                restart_server.clear
+                server.begin_restart(true)
+                # @launcher.config.run_hooks :before_refork, nil, @launcher.events
+                Puma::Util.nakayoshi_gc @events if @options[:nakayoshi_fork]
+              end
+            elsif idx == 0 # restart server
+              restart_server << true << false
+            else # fork worker
+              worker_pids << pid = spawn_worker(idx)
+              @worker_write << "f#{pid}:#{idx}\n" rescue nil
+            end
+          end
+        end
+      end
+
       say 'Starting job worker'
 
       self.class.lifecycle.run_callbacks(:execute, self) do
