@@ -162,6 +162,13 @@ module Delayed
           logger.info "+ Gemfile in context: #{File.expand_path('gems.rb')}"
         end
       end
+
+      def wakeup!
+        return if !@wakeup || @wakeup.closed?
+        @wakeup.write('!')
+      rescue SystemCallError, IOError
+        Delayed.purge_interrupt_queue
+      end
     end
   end
 end

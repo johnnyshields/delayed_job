@@ -12,7 +12,10 @@ module Delayed
     class Forking
       include Loggable
 
-      KILL_TIMEOUT = 30
+      DEFAULT_FORK_WORKER_SECONDS = 3600
+      DEFAULT_WORKER_CHECK_INTERVAL = 5
+      DEFAULT_WORKER_TIMEOUT = 60
+      DEFAULT_WORKER_SHUTDOWN_TIMEOUT = 30
 
       attr_reader :events
 
@@ -24,6 +27,10 @@ module Delayed
         options.delete(:args)
 
         # Set default options
+        options[:worker_check_interval]   ||= DEFAULT_WORKER_CHECK_INTERVAL
+        options[:worker_timeout]          ||= DEFAULT_WORKER_TIMEOUT
+        options[:worker_boot_timeout]     ||= DEFAULT_WORKER_TIMEOUT
+        options[:worker_shutdown_timeout] ||= DEFAULT_WORKER_SHUTDOWN_TIMEOUT
         options[:worker_count] ||= 1
         options.delete(:pools) if options[:pools] == []
         options[:pid_dir] ||= "#{Delayed.root}/tmp/pids"

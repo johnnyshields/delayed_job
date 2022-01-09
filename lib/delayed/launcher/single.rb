@@ -12,8 +12,8 @@ module Delayed
         worker
       end
 
-      def stop(timeout = nil)
-        schedule_halt(timeout)
+      def stop
+        schedule_halt
         stop_worker
         logger.info "#{process_name} exited gracefully - pid #{$$}"
         exit(0)
@@ -41,7 +41,8 @@ module Delayed
         @worker.stop
       end
 
-      def schedule_halt(timeout)
+      def schedule_halt
+        timeout = @options[:worker_shutdown_timeout]
         return unless timeout
         Thread.new do
           sleep(timeout)

@@ -5,35 +5,34 @@ module Delayed
 
 
     # This class is instantiated by the `Puma::Launcher` and used
-    # to boot and serve a Ruby application when puma "workers" are needed
+    # to boot and serve a Ruby application when puma "childs" are needed
     # i.e. when using multi-processes. For example `$ puma -w 5`
     #
     # An instance of this class will spawn the number of processes passed in
-    # via the `spawn_workers` method call. Each worker will have it's own
+    # via the `spawn_childs` method call. Each child will have it's own
     # instance of a `Puma::Server`.
 
 
     # Some code in this class is lovingly borrowed from Puma (puma.io)
     class Cluster < Runner
-      attr_accessor :worker_count
+      attr_accessor :child_count
 
-      DEFAULT_FORK_WORKER_JOBS = 1000
-      DEFAULT_FORK_WORKER_SECONDS = 3600
+      # DEFAULT_FORK_WORKER_JOBS = 1000
 
       def initialize(launcher, options)
         check_fork_supported!
 
         @started_at = Time.now
-        @workers = []
-        @worker_index = 0
-        @worker_count = options.delete(:worker_count) || raise(':worker_count required')
+        @child_handles = []
+        @child_index = 0
+        @child_count = options.delete(:worker_count) || raise(':worker_count required')
         @next_check = Time.now
-
         @phase = 0
         @phased_restart = false
         @last_phased_restart = @started_at
-        @fork_after_jobs = (options.delete(:fork_after_jobs) || DEFAULT_FORK_WORKER_JOBS).to_i
-        @fork_after_jobs = nil if @fork_after_jobs <= 0
+
+        # @fork_after_jobs = (options.delete(:fork_after_jobs) || DEFAULT_FORK_WORKER_JOBS).to_i
+        # @fork_after_jobs = nil if @fork_after_jobs <= 0
         @fork_after_seconds = (options.delete(:fork_after_seconds) || DEFAULT_FORK_WORKER_SECONDS).to_i
         @fork_after_seconds = nil if @fork_after_seconds <= 0
 
@@ -52,11 +51,9 @@ module Delayed
         wakeup!
       end
 
-      def stop(timeout = nil)
+      def stop
         @status = :stop
         wakeup!
-        # TODO: add this
-        schedule_halt(timeout)
       end
 
       def halt
@@ -70,13 +67,13 @@ module Delayed
         output_header(mode)
 
         # This is aligned with Runner#output_header
-        logger.info "*      Workers: #{@worker_count}"
+        logger.info "*      Workers: #{@child_count}"
         # logger.info "*     Restarts: (\u2714) hot (\u2714) phased"
 
         setup_pipes
         setup_signals
         setup_auto_fork_once
-        spawn_workers
+        spawn_childs
         run_loop
       end
 
@@ -89,7 +86,7 @@ module Delayed
       def run_loop
         booted = false
         in_phased_restart = false
-        workers_not_booted = @worker_count
+        childs_not_booted = @child_count
 
         while @status == :run
           begin
@@ -97,10 +94,10 @@ module Delayed
               start_phased_restart
               @phased_restart = false
               in_phased_restart = true
-              workers_not_booted = @worker_count
+              childs_not_booted = @child_count
             end
 
-            check_workers
+            check_childs
 
             if read.wait_readable([0, @next_check - Time.now].max)
               req = read.read_nonblock(1)
@@ -113,36 +110,36 @@ module Delayed
 
               if req == 'b' || req == 'f'
                 pid, idx = result.split(':').map(&:to_i)
-                w = @workers.find {|x| x.index == idx}
-                w.pid = pid if w.pid.nil?
+                handle = @child_handles.find { |h| h.index == idx }
+                handle.pid = pid if handle.pid.nil?
               end
 
-              if w = @workers.find { |x| x.pid == pid }
+              if handle = @child_handles.find { |h| h.pid == pid }
                 case req
                 when 'b'
-                  w.boot!
-                  logger.info "- Worker #{w.index} (PID: #{pid}) booted in #{w.uptime.round(2)}s, phase: #{w.phase}"
+                  handle.boot!
+                  logger.info "- Worker #{handle.index} (PID: #{pid}) booted in #{handle.uptime.round(2)}s, phase: #{handle.phase}"
                   @next_check = Time.now
-                  workers_not_booted -= 1
+                  childs_not_booted -= 1
                 when 'e'
-                  # external term, see worker method, Signal.trap "SIGTERM"
-                  w.instance_variable_set(:@term, true)
+                  # external term, see child method, Signal.trap "SIGTERM"
+                  handle.instance_variable_set(:@term, true)
                 when 't'
-                  w.term unless w.term?
+                  handle.term unless handle.term?
                 when 'p'
-                  w.ping!(result.sub(/^\d+/,'').chomp)
+                  handle.ping!(result.sub(/^\d+/,'').chomp)
                   events.fire(:ping, w)
-                  if !booted && @workers.none? {|worker| worker.last_status.empty?}
+                  if !booted && @child_handles.all? { |h| h.last_status == :ok }
                     events.fire(:on_booted)
                     booted = true
                   end
                 end
               else
-                logger.info "! Out-of-sync worker list, no #{pid} worker"
+                logger.info "! Out-of-sync child list, no #{pid} child"
               end
             end
 
-            if in_phased_restart && workers_not_booted.zero?
+            if in_phased_restart && childs_not_booted.zero?
               events.fire(:on_booted)
               in_phased_restart = false
             end
@@ -152,7 +149,7 @@ module Delayed
           end
         end
 
-        stop_workers unless @status == :halt
+        stop_childs unless @status == :halt
       ensure
         @check_pipe.close
         @suicide_pipe.close
@@ -173,14 +170,14 @@ module Delayed
         Dir.chdir dir
       end
 
-      def stop_workers
+      def stop_childs
         logger.info '- Gracefully shutting down workers...'
-        @workers.each { |x| x.term }
+        @child_handles.each(&:term)
 
         begin
           loop do
-            wait_workers
-            break if @workers.reject {|w| w.pid.nil?}.empty?
+            wait_childs
+            break if @child_handles.reject { |h| h.pid.nil? }.empty?
             sleep 0.2
           end
         rescue Interrupt
@@ -195,23 +192,24 @@ module Delayed
         Delayed.purge_interrupt_queue
       end
 
-      def fork_worker!
-        if (worker = @workers.find { |w| w.index == 0 })
-          worker.phase += 1
+      def fork_child_zero!
+        if (handle = @child_handles.find { |h| h.index == 0 })
+          handle.phase += 1
         end
         phased_restart
       end
 
       def setup_pipes
-        @parent_read, @wakeup = IO.pipe
+        @parent_read, @child_write = IO.pipe
+        @wakeup = @child_write
 
-        # Used by the workers to detect if the parent process dies.
+        # Used by the childs to detect if the parent process dies.
         # If select says that @check_pipe is ready, it's because the
         # parent has exited and @suicide_pipe has been automatically closed.
         @check_pipe, @suicide_pipe = IO.pipe
 
-        # Separate pipe used by worker 0 to receive commands to
-        # fork new worker processes.
+        # Separate pipe used by child 0 to receive commands to
+        # fork new child processes.
         @fork_pipe, @fork_writer = IO.pipe
       end
 
@@ -221,7 +219,7 @@ module Delayed
         setup_signal_wakeup
         setup_signal_increment
         setup_signal_decrement
-        setup_signal_fork_worker
+        setup_signal_fork_child_zero
         logger.info 'Use Ctrl-C to stop'
       end
 
@@ -231,124 +229,115 @@ module Delayed
 
       def setup_signal_increment
         Signal.trap('TTIN') do
-          increment_worker_count
+          increment_child_count
           wakeup!
         end
       end
 
       def setup_signal_decrement
         Signal.trap('TTOU') do
-          decrement_worker_count
+          decrement_child_count
           wakeup!
         end
       end
 
-      def setup_signal_fork_worker
-        Signal.trap('SIGURG') { fork_worker! }
+      def setup_signal_fork_child_zero
+        Signal.trap('SIGURG') { fork_child_zero! }
       end
 
-      # Trapped signals are forwarded worker processes.
-      # Hence it is not necessary to explicitly shutdown workers;
+      # Trapped signals are forwarded child processes.
+      # Hence it is not necessary to explicitly shutdown childs;
       # we only need to stop the run loop.
       def setup_signal_shutdown(signal)
         parent_pid = Process.pid
 
         Signal.trap(signal) do
-          # The worker installs their own SIGTERM when booted.
-          # Until then, this is run by the worker and the worker
+          # The child installs their own SIGTERM when booted.
+          # Until then, this is run by the child and the child
           # should just exit if they get it.
           if Process.pid != parent_pid
             logger.info 'Early termination of worker'
             exit! 0
           else
-            stop_workers
+            stop_childs
             stop
             events.fire(:on_stopped)
             raise(SignalException, signal) if (signal == 'SIGTERM' ? raise_sigterm : raise_sigint)
-            exit 0 # Clean exit, workers were stopped
+            exit 0 # Clean exit, childs were stopped
           end
         end
       end
 
-      def increment_worker_count
-        @worker_count += 1
+      def increment_child_count
+        @child_count += 1
       end
 
-      def decrement_worker_count
-        @worker_count -= 1 if @worker_count >= 2
+      def decrement_child_count
+        @child_count -= 1 if @child_count >= 2
       end
 
       def setup_auto_fork_once
         return unless @fork_after_seconds # || @fork_after_jobs
-        events.register(:ping) do |w|
-          break unless w.index == 0 && w.phase == 0
+        events.register(:ping) do |handle|
+          break unless handle.index == 0 && handle.phase == 0
           time_exceeded = @fork_after_seconds && Time.now.to_i > @last_phased_restart + @fork_after_seconds
-          # jobs_exceeded = @fork_after_jobs && w.last_status[:jobs_count] >= @fork_after_jobs
+          # jobs_exceeded = @fork_after_jobs && handle.last_status[:jobs_count] >= @fork_after_jobs
           break unless time_exceeded # || jobs_exceeded
-          fork_worker!
+          fork_child_zero!
         end
       end
 
-      # TODO: add this
-      def schedule_halt(timeout)
-        return unless timeout
-        Thread.new do
-          sleep(timeout)
-          halt(1, "after #{timeout} second timeout")
-        end
+      def all_childs_booted?
+        @child_handles.count { |h| !h.booted? } == 0
       end
 
-      def all_workers_booted?
-        @workers.count { |w| !w.booted? } == 0
-      end
-
-      def check_workers
+      def check_childs
         return if @next_check >= Time.now
 
         @next_check = Time.now + @options[:worker_check_interval]
 
-        timeout_workers
-        wait_workers
-        cull_workers
-        spawn_workers
-        phase_out_workers
+        timeout_childs
+        wait_childs
+        cull_childs
+        spawn_childs
+        phase_out_childs
 
         @next_check = [
-          @workers.reject(&:term?).map(&:ping_timeout).min,
+          @child_handles.reject(&:term?).map(&:ping_timeout).min,
           @next_check
         ].compact.min
       end
 
-      def timeout_workers
-        @workers.each do |w|
-          next unless !w.term? && w.ping_timeout <= Time.now
-          details = if w.booted?
+      def timeout_childs
+        @child_handles.each do |handle|
+          next unless !handle.term? && handle.ping_timeout <= Time.now
+          details = if handle.booted?
                       "(worker failed to check in within #{@options[:worker_timeout]} seconds)"
                     else
                       "(worker failed to boot within #{@options[:worker_boot_timeout]} seconds)"
                     end
-          logger.info "! Terminating timed out worker #{details}: #{w.pid}"
-          w.kill
+          logger.info "! Terminating timed out worker #{details}: #{handle.pid}"
+          handle.kill
         end
       end
 
-      # loops thru @workers, removing workers that exited,
+      # loops thru @child_handles, removing childs that exited,
       # and calling `#term` if needed
-      def wait_workers
-        @workers.reject! do |w|
+      def wait_childs
+        @child_handles.reject! do |handle|
           begin
-            next false if w.pid.nil?
-            if Process.wait(w.pid, Process::WNOHANG)
+            next false if handle.pid.nil?
+            if Process.wait(handle.pid, Process::WNOHANG)
               true
             else
-              w.term if w.term?
+              handle.term if handle.term?
               nil
             end
           rescue Errno::ECHILD
             begin
-              Process.kill(0, w.pid)
-              # child still alive but has another parent (e.g., using fork_worker)
-              w.term if w.term?
+              Process.kill(0, handle.pid)
+              # child still alive but has another parent (e.g., using fork_child)
+              handle.term if handle.term?
               false
             rescue Errno::ESRCH, Errno::EPERM
               true # child is already terminated
@@ -357,58 +346,58 @@ module Delayed
         end
       end
 
-      def cull_workers
-        diff = @workers.size - @worker_count
+      def cull_childs
+        diff = @child_handles.size - @child_count
         return if diff < 1
 
         logger.debug "Culling #{diff.inspect} workers"
 
-        workers_to_cull = @workers[-diff, diff]
-        logger.debug "Workers to cull: #{workers_to_cull.inspect}"
+        handles_to_cull = @child_handles[-diff, diff]
+        logger.debug "Workers to cull: #{handles_to_cull.inspect}"
 
-        workers_to_cull.each do |worker|
-          logger.info "- Worker #{worker.index} (PID: #{worker.pid}) terminating"
-          worker.term
+        handles_to_cull.each do |handle|
+          logger.info "- Worker #{handle.index} (PID: #{handle.pid}) terminating"
+          handle.term
         end
       end
 
-      def spawn_workers
-        diff = @worker_count - @workers.size
+      def spawn_childs
+        diff = @child_count - @child_handles.size
         return if diff < 1
 
         parent = Process.pid
         @fork_writer << "-1\n"
 
         diff.times do
-          idx = next_worker_index
+          idx = next_child_index
 
           if idx != 0
             @fork_writer << "#{idx}\n"
             pid = nil
           else
-            pid = spawn_worker(idx, parent)
+            pid = spawn_child(idx, parent)
           end
 
           logger.debug "Spawned worker: #{pid}"
-          @workers << WorkerHandle.new(idx, pid, @phase, @options)
+          @child_handles << ChildHandle.new(idx, pid, @phase, @options)
         end
 
-        if @workers.all? { |x| x.phase == @phase }
+        if @child_handles.all? { |h| h.phase == @phase }
           @fork_writer << "0\n"
         end
       end
 
-      def next_worker_index
-        all_positions = 0...@worker_count
-        occupied_positions = @workers.map { |w| w.index }
+      def next_child_index
+        all_positions = 0...@child_count
+        occupied_positions = @child_handles.map(&:index)
         available_positions = all_positions.to_a - occupied_positions
         available_positions.first
       end
 
-      def spawn_worker(idx, parent)
+      def spawn_child(idx, parent)
         Delayed::Worker.before_fork
 
-        pid = fork { worker(idx, parent) }
+        pid = fork { create_child(idx, parent) }
         unless pid
           logger.info '! Complete inability to spawn new child processses detected'
           logger.info '! Seppuku is the only choice.'
@@ -419,40 +408,40 @@ module Delayed
         pid
       end
 
-      def worker(index, parent)
-        @workers = []
+      def create_child(index, parent)
+        @child_handles = []
 
         @parent_read.close
         @suicide_pipe.close
         @fork_writer.close
 
         pipes = { check_pipe: @check_pipe,
-                  child_write: @wakeup,
+                  child_write: @child_write,
                   fork_pipe: @fork_pipe,
                   wakeup: @wakeup }
 
-        new_worker = ChildProcess.new(index,
-                                      parent,
-                                      @options,
-                                      pipes,
-                                      nil)
-        new_worker.run
+        new_child = ChildProcess.new(index,
+                                     parent,
+                                     @options,
+                                     pipes,
+                                     nil)
+        new_child.run
       end
 
       # If we're running at proper capacity, check to see if
-      # we need to phase any workers out (which will restart
+      # we need to phase any childs out (which will restart
       # in the right phase).
-      def phase_out_workers
-        return unless all_workers_booted?
+      def phase_out_childs
+        return unless all_childs_booted?
 
-        w = @workers.find { |x| x.phase != @phase }
-        return unless w
+        handle = @child_handles.find { |h| h.phase != @phase }
+        return unless handle
 
-        logger.info "- Stopping #{w.pid} for phased upgrade..."
+        logger.info "- Stopping #{handle.pid} for phased upgrade..."
 
-        return if w.term?
-        w.term
-        logger.info "- #{w.signal} sent to #{w.pid}..."
+        return if handle.term?
+        handle.term
+        logger.info "- #{handle.signal} sent to #{handle.pid}..."
       end
     end
   end
@@ -478,7 +467,7 @@ end
 #   @stopped = true
 #   message = " with #{timeout} second grace period" if timeout
 #   logger.info "Shutdown invoked#{message}"
-#   @workers.reject(&:term?).each do |worker|
+#   @child_handles.reject(&:term?).each do |worker|
 #     logger.info "Sending SIGTERM to worker #{worker.name}"
 #     worker.term
 #   end
@@ -491,7 +480,7 @@ end
 #   @killed = true
 #   message = " #{message}" if message
 #   logger.warn "Kill invoked#{message}"
-#   @workers.each do |worker|
+#   @child_handles.each do |worker|
 #     logger.info "Sending SIGKILL to worker #{worker.name}"
 #     worker.kill
 #   end
@@ -521,28 +510,28 @@ end
 #   Dir.chdir dir
 # end
 
-# Inside of a child process, this will return all zeroes, as @workers is only populated in
+# Inside of a child process, this will return all zeroes, as @child_handles is only populated in
 # the parent process.
 # @!attribute [r] stats
 # def stats
-#   old_worker_count = @workers.count { |w| w.phase != @phase }
-#   worker_status = @workers.map do |w|
+#   old_worker_count = @child_handles.count { |handle| handle.phase != @phase }
+#   worker_status = @child_handles.map do |handle|
 #     {
-#       started_at: w.started_at.utc.iso8601,
-#       pid: w.pid,
-#       index: w.index,
-#       phase: w.phase,
-#       booted: w.booted?,
-#       last_checkin: w.last_checkin.utc.iso8601,
-#       last_status: w.last_status,
+#       started_at: handle.started_at.utc.iso8601,
+#       pid: handle.pid,
+#       index: handle.index,
+#       phase: handle.phase,
+#       booted: handle.booted?,
+#       last_checkin: handle.last_checkin.utc.iso8601,
+#       last_status: handle.last_status,
 #     }
 #   end
 #
 #   {
 #     started_at: @started_at.utc.iso8601,
-#     workers: @workers.size,
+#     workers: @child_handles.size,
 #     phase: @phase,
-#     booted_workers: worker_status.count { |w| w[:booted] },
+#     booted_workers: worker_status.count { |handle| w[:booted] },
 #     old_workers: old_worker_count,
 #     worker_status: worker_status,
 #   }
@@ -559,7 +548,7 @@ end
 #   queue_msg = " queues=#{queues.empty? ? '*' : queues.join(',')}" if queues
 #   logger.info "Worker #{worker_name} started - pid #{worker_pid}#{queue_msg}"
 #
-#   @workers << WorkerHandle.new(@worker_index, worker_pid, worker_name, queues)
+#   @child_handles << ChildHandle.new(@worker_index, worker_pid, worker_name, queues)
 #   @worker_index += 1
 # end
 #
