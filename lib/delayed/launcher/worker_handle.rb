@@ -58,7 +58,7 @@ module Delayed
 
       def ping!(status)
         @last_checkin = Time.now
-        captures = status.match(/{ "backlog":(?<backlog>\d*), "running":(?<running>\d*), "pool_capacity":(?<pool_capacity>\d*), "max_threads": (?<max_threads>\d*), "requests_count": (?<requests_count>\d*) }/)
+        captures = status.match(/{ "backlog":(?<backlog>\d*), "running":(?<running>\d*), "pool_capacity":(?<pool_capacity>\d*), "max_threads": (?<max_threads>\d*), "jobs_count": (?<jobs_count>\d*) }/)
         @last_status = captures.names.inject({}) do |hash, key|
           hash[key.to_sym] = captures[key].to_i
           hash

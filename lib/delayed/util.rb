@@ -30,4 +30,14 @@ module Delayed
     return unless Thread.current.respond_to?(:purge_interrupt_queue)
     Thread.current.purge_interrupt_queue
   end
+
+  def nakayoshi_gc(logger)
+    logger.info '! Promoting existing objects to old generation...'
+    4.times { GC.start(full_mark: false) }
+    if GC.respond_to?(:compact)
+      logger.info '! Compacting...'
+      GC.compact
+    end
+    logger.info '! Friendly fork preparation complete.'
+  end
 end

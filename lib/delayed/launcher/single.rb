@@ -7,7 +7,9 @@ module Delayed
 
       def run
         set_process_name(get_name(process_identifier))
-        start_worker
+        worker = start_worker
+        events.fire(:on_booted)
+        worker
       end
 
       def stop(timeout = nil)
@@ -17,12 +19,12 @@ module Delayed
         exit(0)
       end
 
-      def restart
-        logger.info "#{process_name} restarting... - pid #{$$}"
-        stop_worker
-        start_worker
-        logger.info "#{process_name} restarted - pid #{$$}"
-      end
+      # def restart
+      #   logger.info "#{process_name} restarting... - pid #{$$}"
+      #   stop_worker
+      #   start_worker
+      #   logger.info "#{process_name} restarted - pid #{$$}"
+      # end
 
       def halt(exit_status = 0, message = nil)
         logger.warn "#{process_name} exited forcefully #{message} - pid #{$$}"

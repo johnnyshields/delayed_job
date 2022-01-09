@@ -4,7 +4,8 @@ module Delayed
     class Runner
       include Loggable
 
-      attr_reader :process_prefix,
+      attr_reader :launcher,
+                  :process_prefix,
                   :process_identifier
 
       def initialize(launcher, options)
@@ -15,6 +16,8 @@ module Delayed
       end
 
     private
+
+      delegate :events, to: :launcher
 
       def check_fork_supported!
         return if Process.respond_to?(:fork)
@@ -54,6 +57,14 @@ module Delayed
 
       def get_name(label)
         "delayed_job#{".#{label}" if label}"
+      end
+
+      def raise_sigterm
+        Delayed::Worker.raise_signal_exceptions
+      end
+
+      def raise_sigint
+        Delayed::Worker.raise_signal_exceptions && Delayed::Worker.raise_signal_exceptions != :term
       end
     end
   end
