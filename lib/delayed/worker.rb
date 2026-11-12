@@ -23,11 +23,17 @@ module Delayed
     DEFAULT_QUEUES           = [].freeze
     DEFAULT_QUEUE_ATTRIBUTES = HashWithIndifferentAccess.new.freeze
     DEFAULT_READ_AHEAD       = 5
+    DEFAULT_SHUTDOWN_TIMEOUT = nil
 
     cattr_accessor :min_priority, :max_priority, :max_attempts, :max_run_time,
                    :default_priority, :sleep_delay, :logger, :delay_jobs, :queues,
                    :read_ahead, :plugins, :destroy_failed_jobs, :exit_on_complete,
                    :default_log_level
+
+    # Seconds a stopping worker waits for running jobs to finish before
+    # interrupting them (see Delayed::ShutdownInterrupt). nil, the default,
+    # waits for as long as they take.
+    cattr_accessor :shutdown_timeout
 
     # Named queue into which jobs are enqueued by default
     cattr_accessor :default_queue_name
@@ -55,6 +61,7 @@ module Delayed
       self.queues            = DEFAULT_QUEUES
       self.queue_attributes  = DEFAULT_QUEUE_ATTRIBUTES
       self.read_ahead        = DEFAULT_READ_AHEAD
+      self.shutdown_timeout  = DEFAULT_SHUTDOWN_TIMEOUT
       @lifecycle             = nil
     end
 
@@ -189,7 +196,7 @@ module Delayed
     def initialize(options = {})
       @quiet = options.key?(:quiet) ? options[:quiet] : true
 
-      [:min_priority, :max_priority, :sleep_delay, :read_ahead, :queues, :exit_on_complete].each do |option|
+      [:min_priority, :max_priority, :sleep_delay, :read_ahead, :queues, :exit_on_complete, :shutdown_timeout].each do |option|
         self.class.send("#{option}=", options[option]) if options.key?(option)
       end
 
@@ -243,6 +250,8 @@ module Delayed
       runtime = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
       job_say job, format('COMPLETED after %.4f', runtime)
       return true # did work
+    rescue ShutdownInterrupt
+      raise # the job didn't fail; Delayed::Dispatcher releases it
     rescue DeserializationError => error
       job_say job, "FAILED permanently with #{error.class.name}: #{error.message}", 'error'
 

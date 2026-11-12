@@ -265,6 +265,38 @@ describe Delayed::Command do
     end
   end
 
+  describe '--shutdown-timeout arg' do
+    context 'not set' do
+      let(:options) { [] }
+      it { expect(output_options).not_to have_key(:shutdown_timeout) }
+    end
+
+    context 'set to whole seconds' do
+      let(:options) { %w[--shutdown-timeout 25] }
+      it { expect(output_options[:shutdown_timeout]).to eq 25.0 }
+    end
+
+    context 'set to fractional seconds' do
+      let(:options) { %w[--shutdown-timeout=2.5] }
+      it { expect(output_options[:shutdown_timeout]).to eq 2.5 }
+    end
+
+    context 'set to 0' do
+      let(:options) { %w[--shutdown-timeout 0] }
+      it { expect(output_options[:shutdown_timeout]).to eq 0.0 }
+    end
+
+    context 'negative' do
+      let(:options) { %w[--shutdown-timeout -1] }
+      it { expect { output_options }.to raise_error(ArgumentError, /--shutdown-timeout/) }
+    end
+
+    context 'not a number' do
+      let(:options) { %w[--shutdown-timeout soon] }
+      it { expect { output_options }.to raise_error(ArgumentError, /--shutdown-timeout/) }
+    end
+  end
+
   describe '--sleep-delay arg' do
     context 'not set' do
       let(:options) { [] }

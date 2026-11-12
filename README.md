@@ -343,6 +343,37 @@ RAILS_ENV=production script/delayed_job --fork --pool=mailers,tasks:2 --pool=*:2
 
 Forking mode does not yet support the `restart`, `stop`, etc. script commands.
 Use `SIGTERM` or `SIGINT` to allow workers to finish their current job then gracefully shutdown.
+The parent forwards these signals to its worker processes, so sending them to the
+parent alone (as `docker stop`, Kubernetes and systemd do) stops every worker.
+
+#### Shutdown timeout and SIGQUIT
+
+By default a stopping worker waits for its running jobs, however long they take.
+Set a shutdown timeout to bound that, e.g. below your orchestrator's grace period
+(Kubernetes' `terminationGracePeriodSeconds`, 30 seconds by default):
+
+```
+RAILS_ENV=production script/delayed_job --fork -n2 --shutdown-timeout=20 start
+SHUTDOWN_TIMEOUT=20 rake jobs:work
+# or in an initializer
+Delayed::Worker.shutdown_timeout = 20
+```
+
+Jobs still running when it expires are interrupted with `Delayed::ShutdownInterrupt`
+and released: unlocked, with their attempts and `run_at` unchanged, for another
+worker to run right away. `SIGQUIT` does the same immediately. The forking parent
+SIGKILLs any worker process still running 10 seconds after that.
+
+`Delayed::ShutdownInterrupt` is not a `StandardError`, so `rescue => e` in a job
+doesn't catch it. A released job runs again from the start, so jobs should be
+safe to retry.
+
+#### When the parent process dies
+
+If the forking parent is killed (e.g. with `SIGKILL`), its worker processes
+notice within a second, stop polling, finish their running jobs (or interrupt
+and release them after the shutdown timeout) and exit, instead of running on as
+orphans.
 
 #### Worker processes that die
 

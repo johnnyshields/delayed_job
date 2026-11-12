@@ -104,19 +104,26 @@ module Delayed
         raise NotImplementedError, '#add_worker must be implemented in subclass'
       end
 
-      def run_worker(worker_name, options)
+      def run_worker(worker_name, options, pending_signals = [])
         Dir.chdir(Delayed.root)
         set_process_name(worker_name)
         Delayed::Worker.after_fork
         setup_logger
-        dispatcher = Delayed::Dispatcher.new(options)
+        dispatcher = Delayed::Dispatcher.new(options.merge(:supervisor_pid => supervisor_pid))
         dispatcher.name_prefix = "#{worker_name} "
-        dispatcher.start
+        dispatcher.start(pending_signals)
       rescue => e
         STDERR.puts e.message
         STDERR.puts e.backtrace
         logger.fatal(e)
         exit_with_error_status
+      end
+
+      # The pid of the process supervising worker processes started by
+      # #run_worker: the forking launcher, which is their parent. Daemonized
+      # workers are detached from their parent, so nobody supervises them.
+      def supervisor_pid
+        nil
       end
 
       # Number of threads each worker process runs.

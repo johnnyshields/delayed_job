@@ -111,6 +111,25 @@ describe 'Rake tasks' do
       it { expect { run_task }.to raise_error(ArgumentError) }
     end
 
+    context 'SHUTDOWN_TIMEOUT=30' do
+      let(:env) { {'SHUTDOWN_TIMEOUT' => '30'} }
+      let(:exp_args) { {:quiet => false, :processes => 1, :shutdown_timeout => 30.0} }
+      it do
+        expect_success
+        run_task
+      end
+    end
+
+    context 'SHUTDOWN_TIMEOUT negative' do
+      let(:env) { {'SHUTDOWN_TIMEOUT' => '-5'} }
+      it { expect { run_task }.to raise_error(ArgumentError, /SHUTDOWN_TIMEOUT/) }
+    end
+
+    context 'SHUTDOWN_TIMEOUT not a number' do
+      let(:env) { {'SHUTDOWN_TIMEOUT' => 'later'} }
+      it { expect { run_task }.to raise_error(ArgumentError) }
+    end
+
     context 'SLEEP_DELAY=5' do
       let(:env) { {'SLEEP_DELAY' => '5'} }
       let(:exp_args) { {:quiet => false, :sleep_delay => 5, :processes => 1} }

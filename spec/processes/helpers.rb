@@ -59,10 +59,24 @@ module ProcessHelpers
       Process.waitpid(pid)
       raise "launcher did not exit within #{timeout}s. Output:\n#{output}"
     end
-    output << read_available(reader) << read_available(reader)
+    output << read_to_eof(reader)
     [status, output]
   ensure
     reader.close unless reader.closed?
+  end
+
+  # Reads what the launcher and its worker processes wrote before exiting.
+  # Stops at EOF, or after a few seconds if something still holds the pipe.
+  def read_to_eof(reader, timeout = 5)
+    output = +''
+    deadline = Time.now + timeout
+    while Time.now < deadline
+      break unless reader.wait_readable(deadline - Time.now)
+      output << reader.read_nonblock(65_536)
+    end
+    output
+  rescue EOFError, IOError
+    output
   end
 
   def read_available(reader)

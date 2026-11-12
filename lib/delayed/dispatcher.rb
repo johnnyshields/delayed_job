@@ -28,23 +28,40 @@ module Delayed
     # Log throughput at least this often while the queue stays busy.
     REPORT_EVERY = 100
 
+    # Seconds to wait for interrupted jobs to stop before giving up on them.
+    INTERRUPT_GRACE = 5
+
+    # How often (in seconds) a supervised worker checks that its parent
+    # process is still alive, even while all its threads are busy.
+    SUPERVISOR_CHECK_INTERVAL = 1
+
     attr_reader :workers, :name_prefix
+
+    # Pid of the parent process supervising this one (the forking launcher),
+    # or nil. A supervised dispatcher stops when its parent goes away, e.g.
+    # when the launcher is SIGKILLed, instead of running on as an orphan.
+    attr_accessor :supervisor_pid
 
     # Options are those of Delayed::Worker, plus:
     # * :threads - number of workers (threads) to run (default 1)
     # * :workers - run these workers instead of building new ones
+    # * :supervisor_pid - see #supervisor_pid
     def initialize(options = {})
       @quiet = options.key?(:quiet) ? options[:quiet] : true
       @workers = options[:workers] || build_workers(options)
       raise ArgumentError, 'threads must be 1 or greater' if @workers.empty?
       @workers.each { |worker| worker.dispatcher = self }
+      @supervisor_pid = options[:supervisor_pid]
       @stopped = false
+      @quit = false
+      @stop_requested_at = nil
 
       @mutex = Mutex.new
       @cond = ConditionVariable.new
       @idle = []
       @inboxes = {}
       @threads = []
+      @running = {} # thread => job it is running
       @in_flight = 0
       @events = 0
       @thread_error = nil
@@ -65,8 +82,12 @@ module Delayed
       workers.each { |worker| worker.name_prefix = prefix }
     end
 
-    def start
+    # Installs signal traps and runs until stopped. `pending_signals` are
+    # signals the process received before it could install them (see
+    # Launcher::Forking#fork_worker); they are handled first.
+    def start(pending_signals = [])
       trap_signals
+      pending_signals.each { |signal| handle_pending_signal(signal) }
       run
     end
 
@@ -102,13 +123,29 @@ module Delayed
       [success, failure]
     end
 
+    # Stops polling. Running jobs are allowed to finish, for at most
+    # Worker.shutdown_timeout seconds if set; then they are interrupted and
+    # released (see #quit). Safe to call from a signal trap.
     def stop
+      @stop_requested_at ||= monotonic_now
       @stopped = true
       wake_up
     end
 
     def stop?
       @stopped
+    end
+
+    # Stops at once: interrupts running jobs with Delayed::ShutdownInterrupt
+    # and releases them, unlocked and with their attempts unchanged, for
+    # another worker to run. Safe to call from a signal trap.
+    def quit
+      @quit = true
+      stop
+    end
+
+    def quit?
+      @quit
     end
 
   private
@@ -122,25 +159,42 @@ module Delayed
       end
     end
 
-    # Signals INT and TERM stop the dispatcher once running jobs finish, or raise
-    # a SignalException, see Worker.raise_signal_exceptions.
+    # Signals INT and TERM stop the dispatcher once running jobs finish (or
+    # Worker.shutdown_timeout passes), or raise a SignalException, see
+    # Worker.raise_signal_exceptions. QUIT stops it at once, see #quit.
     def trap_signals
       trap('TERM') do
-        Thread.new { say 'Exiting...' }
+        first = !stop?
+        Thread.new { say 'Exiting...' } if first
         stop
-        raise SignalException, 'TERM' if Worker.raise_signal_exceptions
+        raise SignalException, 'TERM' if first && Worker.raise_signal_exceptions
       end
 
       trap('INT') do
-        Thread.new { say 'Exiting...' }
+        first = !stop?
+        Thread.new { say 'Exiting...' } if first
         stop
-        raise SignalException, 'INT' if Worker.raise_signal_exceptions && Worker.raise_signal_exceptions != :term
+        raise SignalException, 'INT' if first && Worker.raise_signal_exceptions && Worker.raise_signal_exceptions != :term
       end
+
+      return unless Signal.list.key?('QUIT')
+      trap('QUIT') do
+        Thread.new { say 'Received SIGQUIT: interrupting running jobs and exiting...' }
+        quit
+      end
+    end
+
+    # Acts on a signal received before the traps were installed, as its trap
+    # would, except that no SignalException is raised: nothing is running yet.
+    def handle_pending_signal(signal)
+      say "Received SIG#{signal} while starting", 'warn'
+      signal == 'QUIT' ? quit : stop
     end
 
     def poll_loop # rubocop:disable CyclomaticComplexity, PerceivedComplexity
       until stop?
         raise_thread_error
+        break if supervisor_gone?
         idle, seen = snapshot
         reserved = idle.empty? ? [] : poll(idle)
         reserved.each { |worker, job| dispatch(worker, job) }
@@ -157,9 +211,28 @@ module Delayed
 
         # Wait for a worker to free up. If the queue ran dry, poll again
         # after sleep_delay so that newly enqueued jobs get picked up.
-        wait_for_event(seen, reserved.size < idle.size ? Worker.sleep_delay : nil)
+        wait_for_event(seen, poll_wait(reserved.size < idle.size))
       end
       raise_thread_error
+    end
+
+    # How long to wait before the next poll: until a worker frees up, or
+    # sleep_delay when the queue ran dry - and no longer than
+    # SUPERVISOR_CHECK_INTERVAL when supervised.
+    def poll_wait(queue_dry)
+      timeout = queue_dry ? Worker.sleep_delay : nil
+      return timeout unless supervisor_pid
+      [timeout, SUPERVISOR_CHECK_INTERVAL].compact.min
+    end
+
+    # Whether the parent process went away (this process was re-parented).
+    # Stops the dispatcher gracefully if so: running jobs finish (or are
+    # interrupted after Worker.shutdown_timeout), then the process exits.
+    def supervisor_gone?
+      return false unless supervisor_pid && Process.ppid != supervisor_pid
+      say "Parent process #{supervisor_pid} is gone; stopping", 'warn'
+      stop
+      true
     end
 
     def poll(idle)
@@ -196,27 +269,81 @@ module Delayed
     # Body of each worker thread: runs the jobs it is handed until told to stop.
     def work(worker, inbox)
       Worker.lifecycle.run_callbacks(:execute, worker) do
-        until (job = inbox.pop).equal?(STOP)
-          result = with_reloader { worker.perform_job(job) }
-          job_finished(worker, result)
+        begin
+          until (job = inbox.pop).equal?(STOP)
+            synchronize { @running[Thread.current] = job }
+            result = with_reloader { worker.perform_job(job) }
+            synchronize { @running.delete(Thread.current) }
+            job_finished(worker, result)
+          end
+        rescue ShutdownInterrupt
+          release_interrupted(worker, synchronize { @running.delete(Thread.current) })
         end
       end
     rescue Exception => error # rubocop:disable RescueException
       synchronize do
+        @running.delete(Thread.current)
         @thread_error ||= error
         signal_event
       end
     end
 
-    # Lets running jobs finish, then waits for every thread to exit. If the
-    # dispatcher is exiting because of a signal exception (see
-    # Worker.raise_signal_exceptions), it is raised in running jobs as well.
+    # Lets running jobs finish, then waits for every thread to exit. Jobs
+    # still running at the shutdown deadline (see #shutdown_deadline) are
+    # interrupted and released. If the dispatcher is exiting because of a
+    # signal exception (see Worker.raise_signal_exceptions), it is raised in
+    # running jobs as well.
     def stop_threads(error)
+      @stop_requested_at ||= monotonic_now
       @inboxes.each_value { |inbox| inbox << STOP }
       if error.is_a?(SignalException)
         @threads.each { |thread| thread.raise(error.class, error.message) if thread.alive? }
       end
-      @threads.each(&:join)
+      wait_for_threads
+      interrupt_threads(synchronize { @running.keys.select(&:alive?) }) if shutdown_deadline
+    end
+
+    # Waits until every thread exits or the shutdown deadline passes. The
+    # deadline is checked again on each wait, so #quit takes effect at once.
+    def wait_for_threads
+      loop do
+        busy = @threads.find(&:alive?)
+        break unless busy
+        deadline = shutdown_deadline
+        remaining = deadline && deadline - monotonic_now
+        break if remaining && remaining <= 0
+        busy.join(remaining ? [remaining, 0.1].min : 0.1)
+      end
+    end
+
+    def interrupt_threads(busy)
+      return if busy.empty?
+      reason = quit? ? 'Quitting' : format('Shutdown timeout of %gs exceeded', Worker.shutdown_timeout)
+      say "#{reason}: interrupting #{busy.size} running job(s)", 'warn'
+      busy.each { |thread| thread.raise(ShutdownInterrupt, reason) }
+      deadline = monotonic_now + INTERRUPT_GRACE
+      busy.each { |thread| thread.join([deadline - monotonic_now, 0].max) }
+      stuck = busy.count(&:alive?)
+      return if stuck.zero?
+      say format('%d job(s) did not stop within %gs of being interrupted; ', stuck, INTERRUPT_GRACE) +
+          'leaving them locked until max_run_time expires', 'error'
+    end
+
+    # When running jobs are interrupted: at once after #quit, else
+    # Worker.shutdown_timeout seconds after #stop, else never (nil).
+    def shutdown_deadline
+      return monotonic_now if quit?
+      timeout = Worker.shutdown_timeout
+      @stop_requested_at + timeout if timeout
+    end
+
+    # Releases a job interrupted by shutdown for another worker to run: its
+    # lock is cleared, its attempts and run_at are left as they were.
+    def release_interrupted(worker, job)
+      worker.job_say(job, 'interrupted by shutdown; released for another worker', 'warn') if job
+      Delayed::Job.clear_locks!(worker.name)
+    rescue StandardError => error
+      say "Could not release the jobs of #{worker.name}: #{error.class}: #{error.message}", 'error'
     end
 
     def dispatch(worker, job)

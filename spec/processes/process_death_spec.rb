@@ -52,9 +52,19 @@ describe 'A worker process dying while running jobs', :processes do
       job = enqueue_process_job(ProcessJobs::ExitJob.new('exit', 3), :attempts => 1)
       pid, reader = spawn_launcher(:processes => 1, :pools => [[[], 1]],
                                    :worker => worker_settings.merge(:max_attempts => 2, :destroy_failed_jobs => false))
-      wait_for { reload_job(job).failed_at }
+      # The lock is cleared just after failed_at is saved; the parent then
+      # forks a replacement worker. Stop once it has started, so the TERM
+      # isn't racing the fork (that case is covered in shutdown_spec.rb).
+      output = +''
+      wait_for do
+        output << read_available(reader)
+        output =~ /Worker delayed_job\.1 started/ && (j = reload_job(job)).failed_at && j.locked_by.nil?
+      end
       Process.kill('TERM', -pid) # the process group, as a terminal or init system does
-      _status, output = wait_for_launcher(pid, reader)
+      status, rest = wait_for_launcher(pid, reader)
+      output << rest
+
+      expect(status).to be_success
 
       expect(output).to include 'Recovered 1 job(s)'
       job = reload_job(job)

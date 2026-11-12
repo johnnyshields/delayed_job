@@ -96,6 +96,9 @@ module Delayed
         opt.on('-m', '--monitor', 'Start monitor process.') do
           @options[:monitor] = true
         end
+        opt.on('--shutdown-timeout N', 'Seconds to let running jobs finish when stopping before interrupting and releasing them (default: wait for them)') do |n|
+          @options[:shutdown_timeout] = Float(n) rescue -1
+        end
         opt.on('--sleep-delay N', 'Amount of time to sleep when no jobs are found') do |n|
           @options[:sleep_delay] = Integer(n) rescue nil
         end
@@ -130,6 +133,7 @@ module Delayed
     def validate_options!
       validate_process_count!
       validate_thread_count!
+      validate_shutdown_timeout!
       validate_priority!
       validate_identifier!
       validate_processes_and_pools!
@@ -144,6 +148,11 @@ module Delayed
     def validate_thread_count!
       return unless @options[:threads] && @options[:threads] < 1
       raise ArgumentError, '--threads must be 1 or greater'
+    end
+
+    def validate_shutdown_timeout!
+      return unless @options.key?(:shutdown_timeout) && @options[:shutdown_timeout] < 0
+      raise ArgumentError, '--shutdown-timeout must be a number of seconds, 0 or greater'
     end
 
     def validate_priority!

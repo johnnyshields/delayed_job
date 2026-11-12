@@ -3,12 +3,18 @@ module Delayed
     class Forking < Base
       KILL_TIMEOUT = 30
 
+      # Extra seconds the parent gives workers past their shutdown timeout
+      # (or after QUIT) before it SIGKILLs them: they need time to interrupt
+      # and release their jobs (see Delayed::Dispatcher::INTERRUPT_GRACE).
+      SHUTDOWN_GRACE = Delayed::Dispatcher::INTERRUPT_GRACE + 5
+
       def launch
         @stopped = !!@options[:exit_on_complete]
         @killed = false
         setup_logger
         trap_signals
         if forking?
+          supervisor_pid
           prepare_for_fork
           Delayed::Worker.before_fork
         end
@@ -42,16 +48,48 @@ module Delayed
       def trap_signals
         trap_shutdown_signal('INT')
         trap_shutdown_signal('TERM')
+        trap_quit_signal if Signal.list.key?('QUIT')
       end
 
-      # Trapped signals are forwarded worker processes.
-      # Hence it is not necessary to explicitly shutdown workers;
-      # we only need to stop the run loop.
+      # Stops the run loop and forwards the signal to the worker processes:
+      # a signal sent to the parent alone (docker stop, Kubernetes, systemd
+      # with KillMode=process) must still reach them. Workers stop after
+      # their current jobs, or after shutdown_timeout; the parent SIGKILLs
+      # any still running SHUTDOWN_GRACE seconds after that.
       def trap_shutdown_signal(signal)
         Signal.trap(signal) do
           Thread.new { logger.info("Received SIG#{signal}. Waiting for workers to finish current job...") }
           @stopped = true
+          forward_signal(signal)
+          timeout = shutdown_timeout
+          schedule_kill(timeout + SHUTDOWN_GRACE) if timeout
         end
+      end
+
+      # Workers interrupt and release their running jobs, then exit; the
+      # parent SIGKILLs any still running after SHUTDOWN_GRACE seconds.
+      def trap_quit_signal
+        Signal.trap('QUIT') do
+          Thread.new { logger.info('Received SIGQUIT. Interrupting running jobs...') }
+          @stopped = true
+          forward_signal('QUIT')
+          schedule_kill(SHUTDOWN_GRACE)
+        end
+      end
+
+      # Signal-trap safe: doesn't log.
+      def forward_signal(signal)
+        workers.each_key do |pid|
+          begin
+            Process.kill(signal, pid)
+          rescue Errno::ESRCH
+            nil
+          end
+        end
+      end
+
+      def shutdown_timeout
+        @options.fetch(:shutdown_timeout, Delayed::Worker.shutdown_timeout)
       end
 
       def workers
@@ -77,7 +115,32 @@ module Delayed
       end
 
       def fork_worker(worker_name, options)
-        fork { run_worker(worker_name, options) }
+        fork do
+          pending_signals = capture_signals
+          run_worker(worker_name, options, pending_signals)
+        end
+      end
+
+      # Called first thing in a forked worker process, which inherits this
+      # (the parent's) signal traps: they would forward signals to sibling
+      # workers and even SIGKILL them. Replaces them with traps that only
+      # record the signal; the worker handles the recorded signals once it
+      # has installed its own traps (see Delayed::Dispatcher#start), so a
+      # signal arriving while the worker starts up isn't lost.
+      def capture_signals
+        pending = []
+        %w[TERM INT QUIT].each do |signal|
+          next unless Signal.list.key?(signal)
+          # A signal can arrive twice: sent to the process group, and
+          # forwarded by the parent.
+          Signal.trap(signal) { pending << signal unless pending.include?(signal) }
+        end
+        pending
+      end
+
+      # Forked workers stop if this process (their parent) goes away.
+      def supervisor_pid
+        @supervisor_pid ||= Process.pid
       end
 
       def run_loop # rubocop:disable CyclomaticComplexity, PerceivedComplexity
@@ -145,7 +208,12 @@ module Delayed
         logger.error "Could not disconnect from the database: #{error.class}: #{error.message}"
       end
 
+      # Kills the remaining workers after `timeout` seconds, unless a kill is
+      # already scheduled sooner. Signal-trap safe.
       def schedule_kill(timeout)
+        at = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
+        return if @kill_at && @kill_at <= at
+        @kill_at = at
         Thread.new do
           sleep(timeout)
           kill(1, "after #{timeout} second timeout")

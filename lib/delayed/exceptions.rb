@@ -10,6 +10,14 @@ module Delayed
 
   class FatalBackendError < RuntimeError; end
 
+  # Raised in a job's thread to interrupt it when the worker shuts down and
+  # the job doesn't finish within Delayed::Worker.shutdown_timeout, or on
+  # SIGQUIT. The job is released (unlocked, its attempts unchanged) for
+  # another worker to run. Not a StandardError, so that `rescue => e` in job
+  # code doesn't swallow it.
+  class ShutdownInterrupt < Exception # rubocop:disable Lint/InheritException
+  end
+
   # Recorded as the error of jobs that were running in a worker process when
   # it died (killed by a signal, or exited with a failure status).
   class ProcessExitError < StandardError

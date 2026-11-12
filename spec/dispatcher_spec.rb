@@ -1,36 +1,5 @@
 require 'helper'
 
-# Records which thread/worker ran it and how many jobs ran at once.
-class ConcurrencyJob
-  cattr_accessor :mutex, :running, :max_running, :runs, :delay
-  self.mutex = Mutex.new
-
-  def self.reset(delay = 0.05)
-    self.running = 0
-    self.max_running = 0
-    self.runs = Hash.new(0)
-    self.delay = delay
-  end
-  reset
-
-  attr_accessor :key
-
-  def initialize(key)
-    self.key = key
-  end
-
-  def perform
-    self.class.mutex.synchronize do
-      self.class.running += 1
-      self.class.max_running = [self.class.max_running, self.class.running].max
-      self.class.runs[key] += 1
-    end
-    sleep self.class.delay
-  ensure
-    self.class.mutex.synchronize { self.class.running -= 1 }
-  end
-end
-
 describe Delayed::Dispatcher do
   let(:thread_count) { 4 }
   let(:dispatcher) { described_class.new(:threads => thread_count, :sleep_delay => 0.1) }
