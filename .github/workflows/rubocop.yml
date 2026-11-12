@@ -2,29 +2,23 @@ name: RuboCop
 
 on: [push, pull_request]
 
+permissions:
+  contents: read
+
 jobs:
-  build:
-    runs-on: ubuntu-latest
+  rubocop:
+    # RuboCop is pinned to < 0.49 (see Gemfile), which needs Ruby 2.7.
+    # Ruby 2.7 is not built for newer runner images, so pin the runner.
+    runs-on: ubuntu-24.04
+    env:
+      # Install only the rubocop Gemfile group
+      BUNDLE_WITHOUT: 'default:test'
 
     steps:
     - uses: actions/checkout@v7
-    - name: Set up Ruby 2.7
-      uses: ruby/setup-ruby@v1
+    - uses: ruby/setup-ruby@v1
       with:
-        ruby-version: 2.7
-    - name: Generate lockfile for cache key
-      run: bundle lock
-    - name: Cache gems
-      uses: actions/cache@v6
-      with:
-        path: vendor/bundle
-        key: ${{ runner.os }}-rubocop-${{ hashFiles('**/Gemfile.lock') }}
-        restore-keys: |
-          ${{ runner.os }}-rubocop-
-    - name: Install gems
-      run: |
-        bundle config path vendor/bundle
-        bundle config set without 'default test'
-        bundle install --jobs 4 --retry 3
+        ruby-version: '2.7'
+        bundler-cache: true # runs 'bundle install' and caches installed gems automatically
     - name: Run RuboCop
       run: bundle exec rubocop
