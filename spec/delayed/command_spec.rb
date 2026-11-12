@@ -157,6 +157,33 @@ describe Delayed::Command do
     end
   end
 
+  describe '--threads arg' do
+    context 'not set' do
+      let(:options) { [] }
+      it { expect(output_options[:thread_count]).to eq nil }
+    end
+
+    context '-t set' do
+      let(:options) { %w[-t 5] }
+      it { expect(output_options[:thread_count]).to eq 5 }
+    end
+
+    context '--threads set' do
+      let(:options) { %w[--threads 8] }
+      it { expect(output_options[:thread_count]).to eq 8 }
+    end
+
+    context '--threads zero' do
+      let(:options) { %w[--threads 0] }
+      it { expect { output_options }.to raise_error(ArgumentError) }
+    end
+
+    context '--threads not a number' do
+      let(:options) { %w[--threads zebra] }
+      it { expect { output_options }.to raise_error(ArgumentError) }
+    end
+  end
+
   describe '--pid-dir arg' do
     context 'not set' do
       let(:options) { [] }

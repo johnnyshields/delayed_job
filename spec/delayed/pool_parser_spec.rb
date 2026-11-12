@@ -16,6 +16,22 @@ describe Delayed::PoolParser do
       ]
     end
 
+    it 'parses an optional thread count per pool' do
+      subject.add('mailers,misc:2:5|*:1:3|tracking:4|reports::2')
+
+      expect(subject.pools).to eq [
+        [%w[mailers misc], 2, 5],
+        [[], 1, 3],
+        [['tracking'], 4],
+        [['reports'], 0, 2]
+      ]
+    end
+
+    it 'treats an invalid thread count as 1' do
+      subject.add('mailers:2:0|misc:1:foo')
+      expect(subject.pools).to eq [[['mailers'], 2, 1], [['misc'], 1, 1]]
+    end
+
     it 'should allow pipe delimiter' do
       %w[*:1|test_queue:4 mailers,misc:2|foo,bar:3|baz:4].each do |str|
         subject.add(str)

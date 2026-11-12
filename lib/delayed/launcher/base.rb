@@ -44,8 +44,9 @@ module Delayed
       end
 
       def setup_pooled_workers
-        pools.each do |queues, pool_worker_count|
+        pools.each do |queues, pool_worker_count, pool_thread_count|
           options = @options.merge(:queues => queues)
+          options[:thread_count] = pool_thread_count if pool_thread_count
           pool_worker_count.times { add_worker(options) }
         end
       end
@@ -71,7 +72,7 @@ module Delayed
         set_process_name(worker_name)
         Delayed::Worker.after_fork
         setup_logger
-        worker = Delayed::Worker.new(options)
+        worker = build_worker(options)
         worker.name_prefix = "#{worker_name} "
         worker.start
       rescue => e
@@ -79,6 +80,20 @@ module Delayed
         STDERR.puts e.backtrace
         logger.fatal(e)
         exit_with_error_status
+      end
+
+      # Builds a Delayed::ThreadedWorker when more than one thread per process
+      # is requested (options[:thread_count]), otherwise a Delayed::Worker.
+      def build_worker(options)
+        if thread_count(options) > 1
+          Delayed::ThreadedWorker.new(options)
+        else
+          Delayed::Worker.new(options)
+        end
+      end
+
+      def thread_count(options)
+        (options[:thread_count] || 1).to_i
       end
 
       def set_process_name(name) # rubocop:disable AccessorMethodName

@@ -71,6 +71,49 @@ describe Delayed::Worker do
     end
   end
 
+  describe 'name' do
+    it 'appends the thread index when set' do
+      worker = Delayed::Worker.new
+      worker.name_prefix = 'delayed_job.0 '
+      worker.thread_index = 2
+      expect(worker.name).to start_with('delayed_job.0 ')
+      expect(worker.name).to end_with(" pid:#{Process.pid} thread:2")
+    end
+
+    it 'does not include a thread index by default' do
+      expect(Delayed::Worker.new.name).not_to include('thread:')
+    end
+  end
+
+  describe '#work_loop' do
+    after { Delayed::Worker.sleep_delay = Delayed::Worker::DEFAULT_SLEEP_DELAY }
+
+    it 'does not install signal traps' do
+      worker = Delayed::Worker.new
+      worker.stop
+      expect(worker).not_to receive(:trap)
+      worker.work_loop
+    end
+
+    it 'wakes up from the idle sleep promptly when stopped' do
+      Delayed::Worker.sleep_delay = 30
+      worker = Delayed::Worker.new
+      thread = Thread.new { worker.work_loop }
+      sleep 0.2
+      worker.stop
+      expect(Timeout.timeout(2) { thread.join }).to eq thread
+    end
+  end
+
+  describe '#start' do
+    it 'traps signals and runs the work loop' do
+      worker = Delayed::Worker.new
+      expect(worker).to receive(:trap_signals).ordered
+      expect(worker).to receive(:work_loop).ordered
+      worker.start
+    end
+  end
+
   context 'worker exit on complete' do
     before do
       Delayed::Worker.exit_on_complete = true

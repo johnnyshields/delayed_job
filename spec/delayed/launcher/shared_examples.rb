@@ -135,6 +135,22 @@ shared_examples_for 'launcher shared examples' do
     end
   end
 
+  describe 'build_worker' do
+    it 'builds a Delayed::Worker by default' do
+      expect(subject.send(:build_worker, {}).class).to eq Delayed::Worker
+    end
+
+    it 'builds a Delayed::Worker for a single thread' do
+      expect(subject.send(:build_worker, :thread_count => 1).class).to eq Delayed::Worker
+    end
+
+    it 'builds a Delayed::ThreadedWorker for multiple threads' do
+      worker = subject.send(:build_worker, :thread_count => 3)
+      expect(worker).to be_a Delayed::ThreadedWorker
+      expect(worker.thread_count).to eq 3
+    end
+  end
+
   describe 'spawning workers' do
     context 'no args' do
       let(:options) { {} }
@@ -155,6 +171,29 @@ shared_examples_for 'launcher shared examples' do
           ['delayed_job.4', {:pid_dir => './tmp/pids', :log_dir => './log', :queues => ['test_queue']}],
           ['delayed_job.5', {:pid_dir => './tmp/pids', :log_dir => './log', :queues => %w[mailers misc]}],
           ['delayed_job.6', {:pid_dir => './tmp/pids', :log_dir => './log', :queues => %w[mailers misc]}]
+        ]
+      end
+      it { verify_worker_processes }
+    end
+
+    context ':pools arg with thread counts' do
+      let(:options) { {:thread_count => 2, :pools => [[['mailers'], 1, 5], [['misc'], 2]]} }
+      let(:exp) do
+        [
+          ['delayed_job.0', {:thread_count => 5, :pid_dir => './tmp/pids', :log_dir => './log', :queues => ['mailers']}],
+          ['delayed_job.1', {:thread_count => 2, :pid_dir => './tmp/pids', :log_dir => './log', :queues => ['misc']}],
+          ['delayed_job.2', {:thread_count => 2, :pid_dir => './tmp/pids', :log_dir => './log', :queues => ['misc']}]
+        ]
+      end
+      it { verify_worker_processes }
+    end
+
+    context ':thread_count and :worker_count args' do
+      let(:options) { {:thread_count => 4, :worker_count => 2} }
+      let(:exp) do
+        [
+          ['delayed_job.0', {:thread_count => 4, :pid_dir => './tmp/pids', :log_dir => './log'}],
+          ['delayed_job.1', {:thread_count => 4, :pid_dir => './tmp/pids', :log_dir => './log'}]
         ]
       end
       it { verify_worker_processes }

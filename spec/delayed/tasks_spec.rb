@@ -74,6 +74,25 @@ describe 'Rake tasks' do
       it { expect { run_task }.to raise_error(ArgumentError) }
     end
 
+    context 'NUM_THREADS=5' do
+      let(:env) { {'NUM_THREADS' => '5'} }
+      let(:exp_args) { {:quiet => false, :worker_count => 1, :thread_count => 5} }
+      it do
+        expect_success
+        run_task
+      end
+    end
+
+    context 'NUM_THREADS=0' do
+      let(:env) { {'NUM_THREADS' => '0'} }
+      it { expect { run_task }.to raise_error(ArgumentError) }
+    end
+
+    context 'NUM_THREADS not a number' do
+      let(:env) { {'NUM_THREADS' => 'foo'} }
+      it { expect { run_task }.to raise_error(ArgumentError) }
+    end
+
     context 'SLEEP_DELAY=5' do
       let(:env) { {'SLEEP_DELAY' => '5'} }
       let(:exp_args) { {:quiet => false, :sleep_delay => 5, :worker_count => 1} }

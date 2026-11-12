@@ -29,6 +29,30 @@ module Delayed
           end
         end
 
+        # Reserve up to one job for each of the given workers, used by
+        # Delayed::ThreadedWorker to fill its idle threads. Returns an array
+        # of [worker, job] pairs, in the order of the given workers.
+        #
+        # Each job must be locked under the name of the worker it is paired
+        # with. The default implementation calls #reserve once per worker
+        # (so backend-specific reserve optimizations are kept) and stops at
+        # the first worker for which no job is available. Backends may
+        # override this with a single-query batch reservation.
+        def reserve_batch(workers, max_run_time = Worker.max_run_time)
+          reserved = []
+          workers.each do |worker|
+            job = reserve(worker, max_run_time)
+            break unless job
+            reserved << [worker, job]
+          end
+          reserved
+        rescue StandardError
+          # Don't strand jobs that were already locked; if the error persists
+          # it will be raised again by the next reservation.
+          raise if reserved.empty?
+          reserved
+        end
+
         # Allow the backend to attempt recovery from reserve errors
         def recover_from(_error); end
 

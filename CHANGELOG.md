@@ -1,3 +1,8 @@
+Unreleased
+==========
+* Multi-threaded workers: run several jobs concurrently in each worker process with `-t`/`--threads=N` (or `NUM_THREADS`), and per pool with `--pool=queues:processes:threads`. A per-process dispatcher reserves jobs only for idle threads via the new `Delayed::Job.reserve_batch` backend hook. Works with both forking and daemon modes.
+* Workers wake up immediately from their idle sleep when stopped.
+
 4.1.10 - 2022-01-17
 ===================
 * Support for Rails 7.0. NOTE: If you are using Delayed Job independent of Rails, Active Support 7 has dropped classic dependency autoloading. You will need to add and setup zeitwerk for autoloading to continue working in ActiveSupport 7.

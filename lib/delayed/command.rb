@@ -70,6 +70,9 @@ module Delayed
         opt.on('-n', '--num-workers=workers', 'Number of child workers to spawn') do |n|
           @options[:worker_count] = Integer(n) rescue 1
         end
+        opt.on('-t', '--threads=threads', 'Number of threads per worker process') do |n|
+          @options[:thread_count] = Integer(n) rescue 0
+        end
         opt.on('--number_of_workers=workers', 'Number of child workers to spawn') do |n|
           STDERR.puts 'DEPRECATED: Use -n or --num-workers instead of --number_of_workers. This will be removed in the next major version.'
           @options[:worker_count] = Integer(n) rescue 1
@@ -104,10 +107,10 @@ module Delayed
         opt.on('--queue=queue1[,queue2]', 'Specify the job queues to work. Comma separated.') do |queue|
           @options[:queues] = queue.split(',')
         end
-        opt.on('--pools=queue1[,queue2][:worker_count][|...]', 'Specify queues and number of workers for a worker pool. Use pipe to delimit multiple pools.') do |pools|
+        opt.on('--pools=queue1[,queue2][:worker_count[:thread_count]][|...]', 'Specify queues, number of workers and threads per worker for a worker pool. Use pipe to delimit multiple pools.') do |pools|
           pool_parser.add(pools)
         end
-        opt.on('--pool=queue1[,queue2][:worker_count]', 'Specify queues and number of workers for a worker pool') do |pool|
+        opt.on('--pool=queue1[,queue2][:worker_count[:thread_count]]', 'Specify queues, number of workers and threads per worker for a worker pool') do |pool|
           pool_parser.add(pool)
         end
         opt.on('-x', '--exit-on-complete', 'Exit when no more jobs are available to run. This will exit if all jobs are scheduled to run in the future.') do
@@ -122,6 +125,7 @@ module Delayed
 
     def validate_options!
       validate_worker_count!
+      validate_thread_count!
       validate_priority!
       validate_identifier!
       validate_workers_and_pools!
@@ -131,6 +135,11 @@ module Delayed
     def validate_worker_count!
       return unless @options[:worker_count] < 1
       STDERR.puts 'WARNING: --num-workers must be 1 or greater. This will raise an ArgumentError in the next major version.'
+    end
+
+    def validate_thread_count!
+      return unless @options[:thread_count] && @options[:thread_count] < 1
+      raise ArgumentError, '--threads must be 1 or greater'
     end
 
     def validate_priority!

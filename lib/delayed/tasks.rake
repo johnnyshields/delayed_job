@@ -23,6 +23,7 @@ namespace :jobs do
     @options[:max_priority] = Integer(ENV['MAX_PRIORITY']) if ENV['MAX_PRIORITY']
     @options[:sleep_delay] = Integer(ENV['SLEEP_DELAY']) if ENV['SLEEP_DELAY']
     @options[:read_ahead] = Integer(ENV['READ_AHEAD']) if ENV['READ_AHEAD']
+    @options[:thread_count] = Integer(ENV['NUM_THREADS']) if ENV['NUM_THREADS']
 
     queues = (ENV['QUEUES'] || ENV['QUEUE'] || '').split(',')
     @options[:queues] = queues unless queues.empty?
@@ -32,6 +33,10 @@ namespace :jobs do
 
     if @options[:worker_count] < 1
       raise ArgumentError, 'NUM_WORKERS must be 1 or greater'
+    end
+
+    if @options[:thread_count] && @options[:thread_count] < 1
+      raise ArgumentError, 'NUM_THREADS must be 1 or greater'
     end
 
     if @options[:min_priority] && @options[:max_priority] && @options[:min_priority] > @options[:max_priority]

@@ -55,7 +55,7 @@ module Delayed
 
       def setup_single_worker
         set_process_name(get_name(process_identifier))
-        Delayed::Worker.new(@options).start
+        build_worker(@options).start
       end
 
       def add_worker(options)
@@ -64,9 +64,10 @@ module Delayed
 
         queues = options[:queues]
         queue_msg = " queues=#{queues.empty? ? '*' : queues.join(',')}" if queues
-        logger.info "Worker #{worker_name} started - pid #{worker_pid}#{queue_msg}"
+        thread_msg = " threads=#{thread_count(options)}" if thread_count(options) > 1
+        logger.info "Worker #{worker_name} started - pid #{worker_pid}#{queue_msg}#{thread_msg}"
 
-        workers[worker_pid] = [worker_name, queues]
+        workers[worker_pid] = [worker_name, options]
         @worker_index += 1
       end
 
@@ -78,7 +79,7 @@ module Delayed
         loop do
           worker_pid = Process.wait
           next unless workers.key?(worker_pid)
-          worker_name, queues = workers.delete(worker_pid)
+          worker_name, options = workers.delete(worker_pid)
           child_status = $?
           logger.info "Worker #{worker_name} exited - #{child_status}"
 
@@ -94,8 +95,6 @@ module Delayed
 
           break if @stopped && workers.empty?
           next if @stopped
-          options = @options
-          options = options.merge(:queues => queues) if queues
           add_worker(options)
         end
       rescue Errno::ECHILD

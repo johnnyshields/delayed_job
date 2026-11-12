@@ -2,6 +2,7 @@ require 'timeout'
 require 'active_support/dependencies'
 require 'active_support/core_ext/numeric/time'
 require 'active_support/core_ext/class/attribute_accessors'
+require 'active_support/core_ext/kernel/reporting'
 require 'active_support/hash_with_indifferent_access'
 require 'active_support/core_ext/hash/indifferent_access'
 require 'logger'
@@ -31,6 +32,11 @@ module Delayed
 
     # name_prefix is ignored if name is set directly
     attr_accessor :name_prefix
+
+    # Index of the thread this worker runs on within a Delayed::ThreadedWorker.
+    # When set, it is appended to the default name so that every thread locks
+    # jobs under a unique name.
+    attr_accessor :thread_index
 
     def self.reset
       self.default_log_level = DEFAULT_LOG_LEVEL
@@ -130,6 +136,8 @@ module Delayed
     def initialize(options = {})
       @quiet = options.key?(:quiet) ? options[:quiet] : true
       @failed_reserve_count = 0
+      @wake_mutex = Mutex.new
+      @wake_cond = ConditionVariable.new
 
       [:min_priority, :max_priority, :sleep_delay, :read_ahead, :queues, :exit_on_complete].each do |option|
         self.class.send("#{option}=", options[option]) if options.key?(option)
@@ -146,14 +154,20 @@ module Delayed
     # it crashed before.
     def name
       return @name unless @name.nil?
-      "#{@name_prefix}host:#{Socket.gethostname} pid:#{Process.pid}" rescue "#{@name_prefix}pid:#{Process.pid}"
+      thread_suffix = " thread:#{thread_index}" if thread_index
+      "#{@name_prefix}host:#{Socket.gethostname} pid:#{Process.pid}#{thread_suffix}" rescue "#{@name_prefix}pid:#{Process.pid}#{thread_suffix}"
     end
 
     # Sets the name of the worker.
     # Setting the name to nil will reset the default worker name
     attr_writer :name
 
-    def start # rubocop:disable CyclomaticComplexity, PerceivedComplexity
+    def start
+      trap_signals
+      work_loop
+    end
+
+    def trap_signals
       trap('TERM') do
         Thread.new { say 'Exiting...' }
         stop
@@ -165,38 +179,17 @@ module Delayed
         stop
         raise SignalException, 'INT' if self.class.raise_signal_exceptions && self.class.raise_signal_exceptions != :term
       end
+    end
 
+    # Runs the worker until it is stopped, without installing signal traps.
+    def work_loop
       say 'Starting job worker'
-
-      self.class.lifecycle.run_callbacks(:execute, self) do
-        loop do
-          self.class.lifecycle.run_callbacks(:loop, self) do
-            @realtime = Benchmark.realtime do
-              @result = work_off
-            end
-          end
-
-          count = @result[0] + @result[1]
-
-          if count.zero?
-            if self.class.exit_on_complete
-              say 'No more jobs available. Exiting'
-              break
-            elsif !stop?
-              sleep(self.class.sleep_delay)
-              reload!
-            end
-          else
-            say format("#{count} jobs processed at %.4f j/s, %d failed", count / @realtime, @result.last)
-          end
-
-          break if stop?
-        end
-      end
+      self.class.lifecycle.run_callbacks(:execute, self) { run_loop }
     end
 
     def stop
       @exit = true
+      wake_up
     end
 
     def stop?
@@ -293,7 +286,55 @@ module Delayed
       job.max_run_time || self.class.max_run_time
     end
 
+    # Runs an already reserved job, including its :perform callbacks.
+    # Returns true if the job succeeded, false if it failed.
+    def perform_job(job)
+      self.class.lifecycle.run_callbacks(:perform, self, job) { run(job) }
+    end
+
   protected
+
+    def run_loop # rubocop:disable CyclomaticComplexity, PerceivedComplexity
+      loop do
+        self.class.lifecycle.run_callbacks(:loop, self) do
+          @realtime = Benchmark.realtime do
+            @result = work_off
+          end
+        end
+
+        count = @result[0] + @result[1]
+
+        if count.zero?
+          if self.class.exit_on_complete
+            say 'No more jobs available. Exiting'
+            break
+          elsif !stop?
+            interruptible_sleep(self.class.sleep_delay)
+            reload!
+          end
+        else
+          say format("#{count} jobs processed at %.4f j/s, %d failed", count / @realtime, @result.last)
+        end
+
+        break if stop?
+      end
+    end
+
+    # Sleeps for the given number of seconds, returning early when the worker
+    # is stopped or #wake_up is called.
+    def interruptible_sleep(seconds)
+      @wake_mutex.synchronize do
+        @wake_cond.wait(@wake_mutex, seconds) unless stop?
+      end
+    end
+
+    def wake_up
+      @wake_mutex.synchronize { @wake_cond.broadcast }
+    rescue ThreadError
+      # A Mutex cannot be locked from within a signal trap, so deliver the
+      # wake-up from a separate thread instead.
+      Thread.new { wake_up }
+    end
 
     def say_queue(queue)
       " (queue=#{queue})" if queue
@@ -309,7 +350,7 @@ module Delayed
     # If no jobs are left we return nil
     def reserve_and_run_one_job
       job = reserve_job
-      self.class.lifecycle.run_callbacks(:perform, self, job) { run(job) } if job
+      perform_job(job) if job
     end
 
     def reserve_job

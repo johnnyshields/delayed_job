@@ -1,4 +1,5 @@
-require 'ostruct'
+require 'monitor'
+
 
 # An in-memory backend suitable only for testing. Tries to behave as if it were an ORM.
 module Delayed
@@ -21,10 +22,18 @@ module Delayed
         cattr_accessor :id
         self.id = 0
 
+        # Guards the in-memory job list so the backend can be used by
+        # multi-threaded workers. A Monitor is used since it is reentrant.
+        LOCK = Monitor.new
+
+        def self.synchronize(&block)
+          LOCK.synchronize(&block)
+        end
+
         def initialize(hash = {})
           self.attempts = 0
           self.priority = 0
-          self.id = (self.class.id += 1)
+          self.id = self.class.synchronize { self.class.id += 1 }
           hash.each { |k, v| send(:"#{k}=", v) }
         end
 
@@ -37,7 +46,7 @@ module Delayed
         end
 
         def self.delete_all
-          all.clear
+          synchronize { all.clear }
         end
 
         def self.create(attrs = {})
@@ -51,18 +60,22 @@ module Delayed
         end
 
         def self.clear_locks!(worker_name)
-          all.select { |j| j.locked_by == worker_name }.each do |j|
-            j.locked_by = nil
-            j.locked_at = nil
+          synchronize do
+            all.select { |j| j.locked_by == worker_name }.each do |j|
+              j.locked_by = nil
+              j.locked_at = nil
+            end
           end
         end
 
         # Find a few candidate jobs to run (in case some immediately get locked by others).
         def self.find_available(worker_name, limit = 5, max_run_time = Worker.max_run_time) # rubocop:disable CyclomaticComplexity, PerceivedComplexity
-          jobs = all.select do |j|
-            j.run_at <= db_time_now &&
-              (j.locked_at.nil? || j.locked_at < db_time_now - max_run_time || j.locked_by == worker_name) &&
-              !j.failed?
+          jobs = synchronize do
+            all.select do |j|
+              j.run_at <= db_time_now &&
+                (j.locked_at.nil? || j.locked_at < db_time_now - max_run_time || j.locked_by == worker_name) &&
+                !j.failed?
+            end
           end
           jobs.select! { |j| j.priority <= Worker.max_priority } if Worker.max_priority
           jobs.select! { |j| j.priority >= Worker.min_priority } if Worker.min_priority
@@ -72,15 +85,19 @@ module Delayed
 
         # Lock this job for this worker.
         # Returns true if we have the lock, false otherwise.
-        def lock_exclusively!(_max_run_time, worker)
-          now = self.class.db_time_now
-          if locked_by != worker
+        # The check and the update are atomic, so concurrent workers
+        # (threads) can never both lock the same job.
+        def lock_exclusively!(max_run_time, worker)
+          self.class.synchronize do
+            now = self.class.db_time_now
+            return true if locked_by == worker
+            return false if locked_at && locked_at >= now - max_run_time
+
             # We don't own this job so we will update the locked_by name and the locked_at
             self.locked_at = now
             self.locked_by = worker
+            true
           end
-
-          true
         end
 
         def self.db_time_now
@@ -88,13 +105,15 @@ module Delayed
         end
 
         def destroy
-          self.class.all.delete(self)
+          self.class.synchronize { self.class.all.delete(self) }
         end
 
         def save
           self.run_at ||= Time.current
 
-          self.class.all << self unless self.class.all.include?(self)
+          self.class.synchronize do
+            self.class.all << self unless self.class.all.include?(self)
+          end
           true
         end
 

@@ -267,6 +267,43 @@ RAILS_ENV=production script/delayed_job --queues=mailers,tasks start
 RAILS_ENV=production script/delayed_job --pool=tracking --pool=mailers,tasks:2 --pool=*:2 start
 ```
 
+### Multi-Threaded Workers
+
+Each worker process can run several jobs at once on separate threads, which
+uses much less memory than running more processes and works well for IO-bound
+jobs (HTTP calls, mailers, etc.). Use `-t`/`--threads` to set the number of
+threads per process; total concurrency is processes × threads.
+
+```
+# 2 worker processes, each running 5 jobs concurrently (10 jobs at a time)
+RAILS_ENV=production script/delayed_job --fork -n2 --threads=5 start
+
+# Pools accept an optional thread count: queues:processes:threads.
+# 1 process with 10 threads for mailers, 2 single-threaded processes for any jobs:
+RAILS_ENV=production script/delayed_job --fork --pool=mailers:1:10 --pool=*:2 start
+```
+
+Within a process, a single dispatcher reserves only as many jobs as there are
+idle threads and hands one to each, so polling the database does not grow with
+the number of threads, and a job is never locked while it waits for a thread.
+Each thread locks jobs under its own worker name (e.g. `... pid:123 thread:2`).
+
+When using threads:
+
+* Your job code (and any plugins) must be thread-safe.
+* The database connection pool must hold at least one connection per thread
+  plus one (`pool` in `config/database.yml`). A warning is logged if it is too small.
+* All threads of a process work the same queues; use pools to give queues
+  different thread counts.
+* Under Rails, each job runs inside the Rails reloader, so code reloading in
+  development stays safe.
+* On `SIGTERM`/`SIGINT`, running jobs finish before the process exits, as with
+  single-threaded workers.
+
+Backend authors may override `Delayed::Job.reserve_batch(workers, max_run_time)`
+to reserve jobs for several threads in one query; each returned job must be
+locked under the name of the worker it is paired with.
+
 ### Exit On Complete Mode
 
 ```
@@ -322,6 +359,12 @@ NUM_WORKERS=4 QUEUES=mailers,tasks rake jobs:workoff
 
 # You may also specify POOLS pipe-delimited
 POOLS=mailers,tasks:2|tweets:1|*:2 rake jobs:workoff
+
+# Run 2 worker processes with 5 threads each
+NUM_WORKERS=2 NUM_THREADS=5 rake jobs:work
+
+# Pools accept a thread count too: queues:processes:threads
+POOLS=mailers:1:10|*:2 rake jobs:work
 ```
 
 Rake uses Forking Mode (see above) under-the-hood.
