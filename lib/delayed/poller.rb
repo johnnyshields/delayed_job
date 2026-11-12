@@ -18,9 +18,12 @@ module Delayed
   # Delayed::Worker), so all threads of a process work the same queues.
   class Poller # rubocop:disable ClassLength
     include Logging
-    include ReservationGuard
 
     STOP = Object.new.freeze
+
+    # Give up (raising FatalBackendError) after this many consecutive
+    # failures to reserve jobs.
+    MAX_FAILED_RESERVATIONS = 10
 
     # Log throughput at least this often while the queue stays busy.
     REPORT_EVERY = 100
@@ -45,6 +48,7 @@ module Delayed
       @in_flight = 0
       @events = 0
       @thread_error = nil
+      @failed_reserve_count = 0
       reset_stats
     end
 
@@ -81,6 +85,21 @@ module Delayed
       ensure
         stop_threads(error)
       end
+    end
+
+    # Runs up to `num` jobs inline on the calling thread with the given worker
+    # (no threads, no :loop callbacks), stopping early when no job is
+    # available or the worker is stopped. Returns [succeeded, failed] counts.
+    def work_off(num = 100, worker = workers.first)
+      success = 0
+      failure = 0
+      num.times do
+        _, job = reserve([worker]).first
+        break unless job
+        worker.perform_job(job) ? success += 1 : failure += 1
+        break if worker.stop?
+      end
+      [success, failure]
     end
 
     def stop
@@ -145,10 +164,22 @@ module Delayed
 
     def poll(idle)
       reserved = []
-      Worker.lifecycle.run_callbacks(:loop, self) do
-        reserved = guard_reservation([]) { with_executor { Delayed::Job.reserve_batch(idle) } }
-      end
+      Worker.lifecycle.run_callbacks(:loop, self) { reserved = reserve(idle) }
       reserved
+    end
+
+    # Reserves up to one job per given worker. On error, lets the backend
+    # recover and returns no jobs, until too many consecutive failures.
+    def reserve(workers)
+      reserved = with_executor { Delayed::Job.reserve_batch(workers) }
+      @failed_reserve_count = 0
+      reserved
+    rescue ::Exception => error # rubocop:disable RescueException
+      say "Error while reserving job: #{error}"
+      Delayed::Job.recover_from(error)
+      @failed_reserve_count += 1
+      raise FatalBackendError if @failed_reserve_count >= MAX_FAILED_RESERVATIONS
+      []
     end
 
     def start_threads

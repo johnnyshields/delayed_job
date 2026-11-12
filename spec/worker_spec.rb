@@ -146,6 +146,23 @@ describe Delayed::Worker do
       expect(lambda { worker.work_off }).to raise_exception Delayed::FatalBackendError
     end
 
+    it 'counts a job that fails to deserialize as failed and keeps working' do
+      Delayed::Job.delete_all
+      SimpleJob.runs = 0
+      Delayed::Job.create(:handler => '--- !ruby/object:JobThatDoesNotExist {}', :run_at => 1.minute.ago)
+      Delayed::Job.enqueue(SimpleJob.new)
+      expect(Delayed::Worker.new.work_off).to eq [1, 1]
+    end
+
+    it 'reuses its poller, so reservation failures accumulate across calls' do
+      worker = Delayed::Worker.new
+      worker.work_off
+      poller = worker.poller
+      expect(poller).to be_a Delayed::Poller
+      worker.work_off
+      expect(worker.poller).to equal poller
+    end
+
     it 'allows the backend to attempt recovery from reservation errors' do
       expect(Delayed::Job).to receive(:reserve).and_raise(Exception)
       expect(Delayed::Job).to receive(:recover_from).with(instance_of(Exception))

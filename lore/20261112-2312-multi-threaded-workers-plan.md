@@ -96,3 +96,6 @@ Add: `lib/delayed/threaded_worker.rb`, `spec/threaded_worker_spec.rb`, lore file
 - Removed `Worker.reload_app?`/`#reload!`: the Rails reloader wraps each job instead.
 - Launchers construct `Delayed::Poller.new(options)` directly (no `build_worker` branching).
 - Verified: full suite (same 2 pre-existing env failures), poller/worker/launcher specs 10/10, smoke 2×4 threads (2.6s, concurrency 8, 0 dupes; SIGTERM drains cleanly) and 2×1 thread (10.1s, concurrency 2).
+
+## Follow-up: reservation in one place
+`Delayed::ReservationGuard` removed. All job reservation (and the 10-consecutive-failures → `FatalBackendError` guard) now lives in `Poller#reserve`. `Worker#work_off` delegates to `Poller#work_off(num, worker)` (inline, calling thread, no `:loop` callbacks), reusing the worker's poller so the failure count persists across calls. `Worker#reserve_job`/`#reserve_and_run_one_job` removed. Also fixed: `Worker#run` returned `failed(job)`'s value on `DeserializationError` (usually nil), which the old `work_off` treated as "queue empty" and stopped; it now returns false.

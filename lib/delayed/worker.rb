@@ -14,7 +14,6 @@ module Delayed
   # calling thread instead (e.g. in tests or a console).
   class Worker # rubocop:disable ClassLength
     include Logging
-    include ReservationGuard
 
     DEFAULT_LOG_LEVEL        = 'info'.freeze
     DEFAULT_SLEEP_DELAY      = 5
@@ -147,7 +146,6 @@ module Delayed
 
     def initialize(options = {})
       @quiet = options.key?(:quiet) ? options[:quiet] : true
-      @failed_reserve_count = 0
 
       [:min_priority, :max_priority, :sleep_delay, :read_ahead, :queues, :exit_on_complete].each do |option|
         self.class.send("#{option}=", options[option]) if options.key?(option)
@@ -187,25 +185,12 @@ module Delayed
       !!@exit
     end
 
-    # Do num jobs and return stats on success/failure.
-    # Exit early if interrupted.
+    # Do num jobs inline on the calling thread and return stats on
+    # success/failure. Exit early if interrupted or no job is available.
+    # Reservation goes through this worker's Delayed::Poller, as in a
+    # worker process.
     def work_off(num = 100)
-      success = 0
-      failure = 0
-
-      num.times do
-        case reserve_and_run_one_job
-        when true
-          success += 1
-        when false
-          failure += 1
-        else
-          break # leave if no work could be done
-        end
-        break if stop? # leave if we're exiting
-      end
-
-      [success, failure]
+      (poller || Poller.new(:workers => [self], :quiet => @quiet)).work_off(num, self)
     end
 
     def run(job)
@@ -221,6 +206,7 @@ module Delayed
 
       job.error = error
       failed(job)
+      return false # work failed
     rescue Exception => error # rubocop:disable RescueException
       self.class.lifecycle.run_callbacks(:error, self, job) { handle_failed_job(job, error) }
       return false # work failed
@@ -284,16 +270,6 @@ module Delayed
       reschedule(job)
     end
 
-    # Run the next job we can get an exclusive lock on.
-    # If no jobs are left we return nil
-    def reserve_and_run_one_job
-      job = reserve_job
-      perform_job(job) if job
-    end
-
-    def reserve_job
-      guard_reservation(nil) { Delayed::Job.reserve(self) }
-    end
   end
 end
 
