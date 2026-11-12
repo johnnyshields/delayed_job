@@ -129,10 +129,53 @@ module Delayed
     end
 
     # Default worker/dispatcher name: identifies the process.
-    def self.default_name(prefix = nil)
-      "#{prefix}host:#{Socket.gethostname} pid:#{Process.pid}"
+    def self.default_name(prefix = nil, pid = Process.pid)
+      "#{prefix}host:#{Socket.gethostname} pid:#{pid}"
     rescue StandardError
-      "#{prefix}pid:#{Process.pid}"
+      "#{prefix}pid:#{pid}"
+    end
+
+    # The name a worker locks jobs under, by default.
+    def self.lock_name(prefix = nil, pid = Process.pid, thread_index = nil)
+      "#{default_name(prefix, pid)}#{" thread:#{thread_index}" if thread_index}"
+    end
+
+    # The lock names of every worker in a worker process with the given name
+    # prefix, pid and thread count (see Delayed::Dispatcher).
+    def self.lock_names(prefix, pid, threads)
+      return [lock_name(prefix, pid)] if threads <= 1
+      Array.new(threads) { |index| lock_name(prefix, pid, index) }
+    end
+
+    # Recovers the jobs left locked by workers whose process died while
+    # running them: each counts as a failed attempt, as if the job had raised
+    # `error` - it is rescheduled with back-off, or fails permanently after
+    # max_attempts, so a job that keeps killing its worker eventually stops.
+    # Backends that can't list a worker's jobs (Job.locked_jobs returns nil)
+    # only have the locks cleared. Returns the number of jobs recovered.
+    def self.recover_jobs_of(worker_names, error)
+      worker_names.inject(0) do |count, worker_name|
+        jobs = Delayed::Job.locked_jobs(worker_name)
+        if jobs.nil?
+          Delayed::Job.clear_locks!(worker_name)
+          next count
+        end
+        worker = named(worker_name)
+        jobs.each { |job| worker.fail_attempt(job, error) }
+        # Jobs failed permanently keep their lock (as when a live worker fails
+        # them, until ClearLocks runs on exit); the dead worker can't clear it.
+        Delayed::Job.clear_locks!(worker_name)
+        count + jobs.size
+      end
+    end
+
+    # A worker that only records job outcomes under the given name. Unlike
+    # Worker.new, it doesn't reset the lifecycle or process-wide settings.
+    def self.named(name)
+      allocate.tap do |worker|
+        worker.instance_variable_set(:@quiet, true)
+        worker.name = name
+      end
     end
 
     def self.delay_job?(job)
@@ -161,7 +204,7 @@ module Delayed
     # it crashed before.
     def name
       return @name unless @name.nil?
-      "#{self.class.default_name(@name_prefix)}#{" thread:#{thread_index}" if thread_index}"
+      self.class.lock_name(@name_prefix, Process.pid, thread_index)
     end
 
     # Sets the name of the worker.
@@ -207,8 +250,14 @@ module Delayed
       failed(job)
       return false # work failed
     rescue Exception => error # rubocop:disable RescueException
-      self.class.lifecycle.run_callbacks(:error, self, job) { handle_failed_job(job, error) }
+      fail_attempt(job, error)
       return false # work failed
+    end
+
+    # Records a failed attempt of the job: runs the :error callbacks, then
+    # reschedules the job, or fails it permanently after max_attempts.
+    def fail_attempt(job, error)
+      self.class.lifecycle.run_callbacks(:error, self, job) { handle_failed_job(job, error) }
     end
 
     # Reschedule the job in the future (when a job fails).

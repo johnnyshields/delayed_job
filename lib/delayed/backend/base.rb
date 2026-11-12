@@ -53,6 +53,15 @@ module Delayed
           reserved
         end
 
+        # Returns the jobs locked by the named worker, or nil if the backend
+        # can't list them. Backends implement this so that Delayed Job can
+        # recover the jobs of a worker process that died (see
+        # Delayed::Worker.recover_jobs_of); without it, those jobs' locks are
+        # only cleared.
+        def locked_jobs(_worker_name)
+          nil
+        end
+
         # Allow the backend to attempt recovery from reserve errors
         def recover_from(_error); end
 

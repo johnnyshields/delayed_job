@@ -59,6 +59,10 @@ module Delayed
           create(*args)
         end
 
+        def self.locked_jobs(worker_name)
+          synchronize { all.select { |j| j.locked_by == worker_name } }
+        end
+
         def self.clear_locks!(worker_name)
           synchronize do
             all.select { |j| j.locked_by == worker_name }.each do |j|

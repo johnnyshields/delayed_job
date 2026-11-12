@@ -30,7 +30,9 @@ module Delayed
         @killed = true
         message = " #{message}" if message
         logger.warn "Kill invoked#{message}"
+        killed = workers.dup
         signal_workers('KILL')
+        reap_killed_workers(killed)
         logger.warn "#{parent_name} exited forcefully#{message} - pid #{$$}"
         exit(exit_status)
       end
@@ -80,11 +82,11 @@ module Delayed
 
       def run_loop # rubocop:disable CyclomaticComplexity, PerceivedComplexity
         loop do
-          worker_pid = Process.wait
+          worker_pid, child_status = Process.wait2
           next unless workers.key?(worker_pid)
           worker_name, options = workers.delete(worker_pid)
-          child_status = $?
           logger.info "Worker #{worker_name} exited - #{child_status}"
+          recover_jobs_of_worker(worker_name, worker_pid, options, child_status)
 
           # If any child was SIGKILL'ed, we must shutdown all children.
           # This first will attempt a graceful SIGTERM of the children,
@@ -102,6 +104,45 @@ module Delayed
         end
       rescue Errno::ECHILD
         logger.warn 'No worker processes found'
+      end
+
+      # Waits for the given SIGKILLed workers and recovers their jobs. The main
+      # thread may reap some of them first (it then recovers them itself).
+      def reap_killed_workers(killed)
+        killed.each do |pid, (worker_name, options)|
+          begin
+            _, status = Process.waitpid2(pid)
+          rescue Errno::ECHILD
+            next
+          end
+          workers.delete(pid)
+          recover_jobs_of_worker(worker_name, pid, options, status)
+        end
+      end
+
+      # A worker process that didn't exit cleanly may have died while running
+      # jobs (OOM killer, SIGKILL, crash), leaving them locked until
+      # max_run_time expires. Recover them now: each counts as a failed
+      # attempt (see Delayed::Worker.recover_jobs_of). If the database can't
+      # be reached, the locks are left to expire.
+      def recover_jobs_of_worker(worker_name, pid, options, status)
+        return if status.success?
+        lock_names = Delayed::Worker.lock_names("#{worker_name} ", pid, threads(options))
+        count = Delayed::Worker.recover_jobs_of(lock_names, ProcessExitError.new(worker_name, pid, status))
+        logger.warn "Recovered #{count} job(s) left locked by worker #{worker_name} (pid #{pid})" if count > 0
+      rescue StandardError => error
+        logger.error "Could not recover the jobs of worker #{worker_name} (pid #{pid}): #{error.class}: #{error.message}. " \
+                     'Their locks will expire after max_run_time.'
+      ensure
+        disconnect_backend
+      end
+
+      # Drops the connections opened by recovery, so the next forked worker
+      # doesn't inherit them.
+      def disconnect_backend
+        Delayed::Worker.backend.before_fork
+      rescue StandardError => error
+        logger.error "Could not disconnect from the database: #{error.class}: #{error.message}"
       end
 
       def schedule_kill(timeout)

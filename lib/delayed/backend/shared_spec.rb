@@ -335,6 +335,17 @@ shared_examples_for 'a delayed_job backend' do
     end
   end
 
+  describe 'locked_jobs' do
+    it 'returns the jobs locked by the given worker, or nil when unsupported' do
+      mine = create_job(:locked_by => 'worker1', :locked_at => described_class.db_time_now)
+      create_job(:locked_by => 'worker2', :locked_at => described_class.db_time_now)
+      create_job
+      jobs = described_class.locked_jobs('worker1')
+      skip 'this backend does not implement locked_jobs' if jobs.nil?
+      expect(jobs.map(&:id)).to eq [mine.id]
+    end
+  end
+
   context 'clear_locks!' do
     before do
       @job = create_job(:locked_by => 'worker1', :locked_at => described_class.db_time_now)

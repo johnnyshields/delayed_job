@@ -60,6 +60,8 @@ else
 
   loader = Zeitwerk::Loader.new
   loader.push_dir File.dirname(__FILE__)
+  # Process-level specs load these files explicitly, in subprocesses too
+  loader.ignore File.join(File.dirname(__FILE__), 'processes')
   loader.setup
 end
 

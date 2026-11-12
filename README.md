@@ -344,6 +344,22 @@ RAILS_ENV=production script/delayed_job --fork --pool=mailers,tasks:2 --pool=*:2
 Forking mode does not yet support the `restart`, `stop`, etc. script commands.
 Use `SIGTERM` or `SIGINT` to allow workers to finish their current job then gracefully shutdown.
 
+#### Worker processes that die
+
+When a worker process dies while running jobs (killed by the OOM killer or
+`SIGKILL`, or exiting with a failure status), the parent process recovers its
+jobs right away instead of leaving them locked until `max_run_time` expires.
+Each counts as a failed attempt with a `Delayed::ProcessExitError`: it is
+rescheduled with the usual back-off, or fails permanently after `max_attempts`,
+so a job that keeps killing its worker eventually stops. `:error` and
+`:failure` plugin callbacks and the job's `error` and `failure` hooks run as
+for any failed attempt.
+
+If the database can't be reached at that moment, the jobs' locks expire after
+`max_run_time` as before. Backends support this by implementing
+`Delayed::Job.locked_jobs(worker_name)`; for backends without it, the locks are
+only cleared.
+
 ### Running via Rake
 
 You may start a worker process using `rake jobs:work`.
