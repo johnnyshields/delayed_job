@@ -5,6 +5,8 @@ Unreleased
 * BREAKING (plugins): the `:loop` lifecycle callback now yields the `Delayed::Poller` instead of a `Delayed::Worker`, and wraps each poll rather than each batch of up to 100 jobs.
 * Under Rails, each job runs inside the Rails reloader/executor; code is reloaded before a job when it has changed (instead of after each 100 jobs).
 * Workers wake up immediately from their idle sleep when stopped.
+* Before forking worker processes (`--fork` and daemon modes), the parent eager loads the Rails application (rake tasks don't by default) and runs `Process.warmup` (Ruby >= 3.3) or `GC.start` + `GC.compact`, so more memory is shared copy-on-write with the workers.
+* Fix `--fork` with `--pool`/`POOLS` and the default worker count: the parent now calls `Worker.before_fork` (children previously crashed in `after_fork`) and supervises the forked workers instead of exiting immediately. `--identifier` with `-n > 1` no longer enters the supervision loop for a worker it never forked.
 
 4.1.10 - 2022-01-17
 ===================

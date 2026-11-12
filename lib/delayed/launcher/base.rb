@@ -31,6 +31,37 @@ module Delayed
         Delayed::Worker.logger ||= Logger.new(File.join(@options[:log_dir], 'delayed_job.log'))
       end
 
+      # Readies the booted parent process to be forked, so that as much memory
+      # as possible is shared copy-on-write with the worker processes: loads
+      # all application code up front, then runs a full GC and compacts the
+      # heap so long-lived objects sit on pages the children won't write to.
+      def prepare_for_fork
+        eager_load_application
+        warmup_heap
+      end
+
+      # Rails does not eager load in rake tasks (config.rake_eager_load is
+      # false by default), so without this each worker would autoload, and
+      # hold a private copy of, the application code. Skipped when code
+      # reloading is enabled, since reloaded code is not shared anyway.
+      def eager_load_application
+        return unless defined?(::Rails.application) && ::Rails.application
+        config = ::Rails.application.config
+        return unless config.cache_classes
+        ::Rails.application.eager_load!
+      end
+
+      def warmup_heap
+        if Process.respond_to?(:warmup) # Ruby >= 3.3: GC, compaction, etc.
+          Process.warmup
+        else
+          GC.start
+          GC.compact if GC.respond_to?(:compact)
+        end
+      rescue NotImplementedError
+        nil # GC.compact is unsupported on this platform
+      end
+
       def setup_workers
         if pools
           setup_pooled_workers

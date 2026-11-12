@@ -8,6 +8,7 @@ module Delayed
       def launch
         require_daemons!
         create_pid_dir
+        prepare_for_fork
         setup_workers
       end
 

@@ -8,9 +8,12 @@ module Delayed
         @killed = false
         setup_logger
         trap_signals
-        Delayed::Worker.before_fork if worker_count > 1
+        if forking?
+          prepare_for_fork
+          Delayed::Worker.before_fork
+        end
         setup_workers
-        run_loop if worker_count > 1
+        run_loop if forking?
         before_graceful_exit
       end
 
@@ -120,7 +123,14 @@ module Delayed
       end
 
       def parent_name
-        "#{get_name(process_identifier)}#{' (parent)' if worker_count > 1}"
+        "#{get_name(process_identifier)}#{' (parent)' if forking?}"
+      end
+
+      # Whether worker processes are forked (otherwise the single worker runs
+      # in this process). Mirrors the branches of #setup_workers.
+      def forking?
+        return true if pools
+        !process_identifier && worker_count > 1
       end
     end
   end
