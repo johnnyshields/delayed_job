@@ -86,20 +86,20 @@ describe Delayed::Worker do
   end
 
   describe '#start' do
-    it 'runs the worker in a single-threaded Delayed::Poller' do
+    it 'runs the worker in a single-threaded Delayed::Dispatcher' do
       worker = Delayed::Worker.new
       worker.name_prefix = 'dj.0 '
-      expect_any_instance_of(Delayed::Poller).to receive(:start) do |poller|
-        expect(poller.workers).to eq [worker]
-        expect(poller.name_prefix).to eq 'dj.0 '
+      expect_any_instance_of(Delayed::Dispatcher).to receive(:start) do |dispatcher|
+        expect(dispatcher.workers).to eq [worker]
+        expect(dispatcher.name_prefix).to eq 'dj.0 '
       end
       worker.start
     end
 
-    it 'stops the poller when the worker is stopped' do
+    it 'stops the dispatcher when the worker is stopped' do
       Delayed::Worker.sleep_delay = 30
       worker = Delayed::Worker.new
-      allow_any_instance_of(Delayed::Poller).to receive(:trap_signals)
+      allow_any_instance_of(Delayed::Dispatcher).to receive(:trap_signals)
       thread = Thread.new { worker.start }
       sleep 0.2
       worker.stop
@@ -154,13 +154,13 @@ describe Delayed::Worker do
       expect(Delayed::Worker.new.work_off).to eq [1, 1]
     end
 
-    it 'reuses its poller, so reservation failures accumulate across calls' do
+    it 'reuses its dispatcher, so reservation failures accumulate across calls' do
       worker = Delayed::Worker.new
       worker.work_off
-      poller = worker.poller
-      expect(poller).to be_a Delayed::Poller
+      dispatcher = worker.dispatcher
+      expect(dispatcher).to be_a Delayed::Dispatcher
       worker.work_off
-      expect(worker.poller).to equal poller
+      expect(worker.dispatcher).to equal dispatcher
     end
 
     it 'allows the backend to attempt recovery from reservation errors' do

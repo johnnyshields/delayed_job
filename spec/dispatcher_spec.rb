@@ -31,9 +31,9 @@ class ConcurrencyJob
   end
 end
 
-describe Delayed::Poller do
+describe Delayed::Dispatcher do
   let(:thread_count) { 4 }
-  let(:poller) { described_class.new(:threads => thread_count, :sleep_delay => 0.1) }
+  let(:dispatcher) { described_class.new(:threads => thread_count, :sleep_delay => 0.1) }
 
   before do
     Delayed::Job.delete_all
@@ -52,10 +52,10 @@ describe Delayed::Poller do
 
   describe '#initialize' do
     it 'builds a single unindexed worker by default' do
-      poller = described_class.new
-      expect(poller.thread_count).to eq 1
-      expect(poller.workers.first.thread_index).to be_nil
-      expect(poller.workers.first.poller).to eq poller
+      dispatcher = described_class.new
+      expect(dispatcher.thread_count).to eq 1
+      expect(dispatcher.workers.first.thread_index).to be_nil
+      expect(dispatcher.workers.first.dispatcher).to eq dispatcher
     end
 
     it 'runs the given workers' do
@@ -64,8 +64,8 @@ describe Delayed::Poller do
     end
 
     it 'builds one worker per thread with distinct names' do
-      poller.name_prefix = 'delayed_job.1 '
-      names = poller.workers.map(&:name)
+      dispatcher.name_prefix = 'delayed_job.1 '
+      names = dispatcher.workers.map(&:name)
       expect(names.uniq.size).to eq thread_count
       expect(names).to all(start_with('delayed_job.1 '))
       expect(names.last).to end_with('thread:3')
@@ -78,9 +78,9 @@ describe Delayed::Poller do
 
   describe '#start' do
     it 'traps signals and runs' do
-      expect(poller).to receive(:trap_signals).ordered
-      expect(poller).to receive(:run).ordered
-      poller.start
+      expect(dispatcher).to receive(:trap_signals).ordered
+      expect(dispatcher).to receive(:run).ordered
+      dispatcher.start
     end
   end
 
@@ -90,7 +90,7 @@ describe Delayed::Poller do
 
       it 'runs every job, one at a time' do
         enqueue_jobs(5)
-        Timeout.timeout(10) { poller.run }
+        Timeout.timeout(10) { dispatcher.run }
         expect(ConcurrencyJob.runs.size).to eq 5
         expect(ConcurrencyJob.max_running).to eq 1
         expect(Delayed::Job.count).to eq 0
@@ -98,33 +98,33 @@ describe Delayed::Poller do
     end
 
     it 'does not install signal traps' do
-      expect(poller).not_to receive(:trap)
-      Timeout.timeout(5) { poller.run }
+      expect(dispatcher).not_to receive(:trap)
+      Timeout.timeout(5) { dispatcher.run }
     end
 
-    it 'runs :loop callbacks around each poll, with the poller' do
+    it 'runs :loop callbacks around each poll, with the dispatcher' do
       polled = []
-      poller
+      dispatcher
       Delayed::Worker.lifecycle.around(:loop) do |p, &block|
         polled << p
         block.call(p)
       end
       enqueue_jobs(2)
-      Timeout.timeout(5) { poller.run }
+      Timeout.timeout(5) { dispatcher.run }
       expect(polled).not_to be_empty
-      expect(polled).to all(equal(poller))
+      expect(polled).to all(equal(dispatcher))
     end
 
     it 'logs throughput' do
       enqueue_jobs(3)
-      allow(poller).to receive(:say)
-      expect(poller).to receive(:say).with(/\A3 jobs processed at [\d.]+ j\/s, 0 failed\z/)
-      Timeout.timeout(5) { poller.run }
+      allow(dispatcher).to receive(:say)
+      expect(dispatcher).to receive(:say).with(/\A3 jobs processed at [\d.]+ j\/s, 0 failed\z/)
+      Timeout.timeout(5) { dispatcher.run }
     end
 
     it 'runs every job exactly once, concurrently' do
       enqueue_jobs(20)
-      Timeout.timeout(10) { poller.run }
+      Timeout.timeout(10) { dispatcher.run }
 
       expect(Delayed::Job.count).to eq 0
       expect(ConcurrencyJob.runs.keys.sort).to eq((0...20).to_a)
@@ -140,10 +140,10 @@ describe Delayed::Poller do
         lockers << job.locked_by
         m.call(job)
       end
-      Timeout.timeout(10) { poller.run }
+      Timeout.timeout(10) { dispatcher.run }
 
       expect(lockers.size).to eq 8
-      expect(lockers - poller.workers.map(&:name)).to be_empty
+      expect(lockers - dispatcher.workers.map(&:name)).to be_empty
       expect(lockers.uniq.size).to be > 1
     end
 
@@ -154,7 +154,7 @@ describe Delayed::Poller do
         expect(workers.size).to be <= thread_count
         m.call(workers).tap { |reserved| batch_sizes << reserved.size }
       end
-      Timeout.timeout(10) { poller.run }
+      Timeout.timeout(10) { dispatcher.run }
 
       expect(batch_sizes.inject(:+)).to eq 6
       expect(batch_sizes.first).to eq thread_count
@@ -170,10 +170,10 @@ describe Delayed::Poller do
       end
       allow(Delayed::Job).to receive(:reserve_batch).and_wrap_original do |m, workers|
         expect(workers.size).to eq thread_count
-        poller.stop if (polls += 1) == 3
+        dispatcher.stop if (polls += 1) == 3
         m.call(workers)
       end
-      Timeout.timeout(5) { poller.run }
+      Timeout.timeout(5) { dispatcher.run }
       expect(polls).to eq 3
       expect(reserves).to eq 3
     end
@@ -182,9 +182,9 @@ describe Delayed::Poller do
       ConcurrencyJob.reset(0.3)
       enqueue_jobs(8)
       Delayed::Worker.exit_on_complete = false
-      thread = Thread.new { poller.run }
+      thread = Thread.new { dispatcher.run }
       sleep 0.1 until ConcurrencyJob.running == thread_count
-      poller.stop
+      dispatcher.stop
       Timeout.timeout(5) { thread.join }
 
       expect(ConcurrencyJob.running).to eq 0
@@ -196,36 +196,36 @@ describe Delayed::Poller do
     it 'wakes up from the idle sleep promptly when stopped' do
       Delayed::Worker.exit_on_complete = false
       Delayed::Worker.sleep_delay = 30
-      thread = Thread.new { poller.run }
+      thread = Thread.new { dispatcher.run }
       sleep 0.2
-      poller.stop
+      dispatcher.stop
       expect(Timeout.timeout(2) { thread.join }).to eq thread
     end
 
     it 'stops and re-raises when a thread dies' do
       enqueue_jobs(4)
       allow_any_instance_of(Delayed::Worker).to receive(:perform_job).and_raise(NoMemoryError, 'boom')
-      expect { Timeout.timeout(5) { poller.run } }.to raise_error(NoMemoryError, 'boom')
-      expect(poller.instance_variable_get(:@threads)).to all(satisfy { |t| !t.alive? })
+      expect { Timeout.timeout(5) { dispatcher.run } }.to raise_error(NoMemoryError, 'boom')
+      expect(dispatcher.instance_variable_get(:@threads)).to all(satisfy { |t| !t.alive? })
     end
 
     it 'raises FatalBackendError after 10 reservation failures' do
       Delayed::Worker.exit_on_complete = false
       Delayed::Worker.sleep_delay = 0.01
       expect(Delayed::Job).to receive(:reserve).exactly(10).times.and_raise(StandardError)
-      expect { Timeout.timeout(5) { poller.run } }.to raise_error(Delayed::FatalBackendError)
+      expect { Timeout.timeout(5) { dispatcher.run } }.to raise_error(Delayed::FatalBackendError)
     end
 
     it 'runs :execute callbacks for every thread and clears their locks' do
-      poller # Worker.new resets the lifecycle, so build it first
+      dispatcher # Worker.new resets the lifecycle, so build it first
       executed = []
       expect(Delayed::Job).to receive(:clear_locks!).exactly(thread_count).times
       Delayed::Worker.lifecycle.around(:execute) do |w, &block|
         executed << w.name
         block.call(w)
       end
-      Timeout.timeout(5) { poller.run }
-      expect(executed).to match_array(poller.workers.map(&:name))
+      Timeout.timeout(5) { dispatcher.run }
+      expect(executed).to match_array(dispatcher.workers.map(&:name))
     end
   end
 end

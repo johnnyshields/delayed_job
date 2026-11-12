@@ -1,8 +1,8 @@
 Unreleased
 ==========
 * Multi-threaded workers: run several jobs concurrently in each worker process with `-t`/`--threads=N` (or `NUM_THREADS`); every process, including pool processes, runs that many threads. A per-process dispatcher reserves jobs only for idle threads via the new `Delayed::Job.reserve_batch` backend hook. Works with both forking and daemon modes.
-* Every worker process now runs a `Delayed::Poller`, which owns the poll loop, signal handling and threads; `Delayed::Worker` only runs jobs (`Worker#start` runs itself through a single-threaded Poller; `Worker#work_off` is unchanged).
-* BREAKING (plugins): the `:loop` lifecycle callback now yields the `Delayed::Poller` instead of a `Delayed::Worker`, and wraps each poll rather than each batch of up to 100 jobs.
+* Every worker process now runs a `Delayed::Dispatcher`, which owns the poll loop, signal handling and threads; `Delayed::Worker` only runs jobs (`Worker#start` runs itself through a single-threaded Dispatcher; `Worker#work_off` is unchanged).
+* BREAKING (plugins): the `:loop` lifecycle callback now yields the `Delayed::Dispatcher` instead of a `Delayed::Worker`, and wraps each poll rather than each batch of up to 100 jobs.
 * Under Rails, each job runs inside the Rails reloader/executor; code is reloaded before a job when it has changed (instead of after each 100 jobs).
 * The number of worker processes is now set with `-n`/`--processes=N` (rake: `NUM_PROCESSES`); `--num-workers` and `--number_of_workers` still work but are deprecated (with a warning pointing to `--processes`), and `NUM_WORKERS` remains an alias. Launchers take `:processes` and `:threads` options (`:worker_count` is accepted as an alias of `:processes`, and `Launcher#worker_count` aliases `#processes`).
 * Workers wake up immediately from their idle sleep when stopped.

@@ -1,7 +1,7 @@
 module Delayed
   # Runs a worker process: owns one or more Delayed::Workers, each on its own
   # thread, and feeds them jobs. Every worker process (forked, daemonized,
-  # rake, or Worker#start) runs exactly one Poller, whatever its thread count.
+  # rake, or Worker#start) runs exactly one Dispatcher, whatever its thread count.
   #
   # Each poll reserves only as many jobs as there are idle workers (via
   # Delayed::Job.reserve_batch) and hands one job to each, so the database is
@@ -9,14 +9,14 @@ module Delayed
   # locked while it waits for a free thread.
   #
   # Lifecycle callbacks:
-  # * :loop wraps each poll and yields the Poller.
+  # * :loop wraps each poll and yields the Dispatcher.
   # * :execute wraps each worker thread's lifetime and yields the Worker
   #   (so the ClearLocks plugin releases every worker's locks on exit).
   # * :perform, :error and :failure yield the Worker running the job.
   #
   # Queue and priority settings are process-wide (class-level settings of
   # Delayed::Worker), so all threads of a process work the same queues.
-  class Poller # rubocop:disable ClassLength
+  class Dispatcher # rubocop:disable ClassLength
     include Logging
 
     STOP = Object.new.freeze
@@ -37,7 +37,7 @@ module Delayed
       @quiet = options.key?(:quiet) ? options[:quiet] : true
       @workers = options[:workers] || build_workers(options)
       raise ArgumentError, 'threads must be 1 or greater' if @workers.empty?
-      @workers.each { |worker| worker.poller = self }
+      @workers.each { |worker| worker.dispatcher = self }
       @stopped = false
 
       @mutex = Mutex.new
@@ -122,7 +122,7 @@ module Delayed
       end
     end
 
-    # Signals INT and TERM stop the poller once running jobs finish, or raise
+    # Signals INT and TERM stop the dispatcher once running jobs finish, or raise
     # a SignalException, see Worker.raise_signal_exceptions.
     def trap_signals
       trap('TERM') do
@@ -209,7 +209,7 @@ module Delayed
     end
 
     # Lets running jobs finish, then waits for every thread to exit. If the
-    # poller is exiting because of a signal exception (see
+    # dispatcher is exiting because of a signal exception (see
     # Worker.raise_signal_exceptions), it is raised in running jobs as well.
     def stop_threads(error)
       @inboxes.each_value { |inbox| inbox << STOP }
@@ -236,7 +236,7 @@ module Delayed
       end
     end
 
-    # Waits until a worker finishes a job (or dies), the poller is stopped, or
+    # Waits until a worker finishes a job (or dies), the dispatcher is stopped, or
     # the timeout (if any) expires. `seen` is the event count observed before
     # deciding to wait, so no event can be missed.
     def wait_for_event(seen, timeout)

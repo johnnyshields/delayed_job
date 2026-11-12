@@ -109,9 +109,9 @@ module Delayed
         set_process_name(worker_name)
         Delayed::Worker.after_fork
         setup_logger
-        poller = Delayed::Poller.new(options)
-        poller.name_prefix = "#{worker_name} "
-        poller.start
+        dispatcher = Delayed::Dispatcher.new(options)
+        dispatcher.name_prefix = "#{worker_name} "
+        dispatcher.start
       rescue => e
         STDERR.puts e.message
         STDERR.puts e.backtrace

@@ -14,7 +14,7 @@ shared_examples_for 'launcher shared examples' do
 
     before do
       allow(Delayed::Worker).to receive(:after_fork)
-      allow_any_instance_of(Delayed::Poller).to receive(:start)
+      allow_any_instance_of(Delayed::Dispatcher).to receive(:start)
       allow(Logger).to receive(:new).and_return(logger)
       allow(Delayed::Worker).to receive(:logger=)
       allow(Delayed::Worker).to receive(:logger).and_return(nil, logger)

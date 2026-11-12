@@ -284,13 +284,13 @@ RAILS_ENV=production script/delayed_job --fork --processes=2 --threads=5 start
 RAILS_ENV=production script/delayed_job --fork --pool=mailers:1 --pool=*:2 --threads=4 start
 ```
 
-Every worker process, single- or multi-threaded, runs one `Delayed::Poller`.
+Every worker process, single- or multi-threaded, runs one `Delayed::Dispatcher`.
 It reserves only as many jobs as there are idle threads and hands one to each,
 so polling the database does not grow with the number of threads, and a job is
 never locked while it waits for a thread. Each thread runs a `Delayed::Worker`
 that locks jobs under its own name (e.g. `... pid:123 thread:2`).
 
-Plugin callbacks: `:loop` wraps each poll and yields the `Delayed::Poller`;
+Plugin callbacks: `:loop` wraps each poll and yields the `Delayed::Dispatcher`;
 `:execute` wraps each worker thread's lifetime and yields its `Delayed::Worker`;
 `:perform`, `:error` and `:failure` yield the `Delayed::Worker` running the job.
 

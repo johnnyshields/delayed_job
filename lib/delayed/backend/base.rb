@@ -30,7 +30,7 @@ module Delayed
         end
 
         # Reserve up to one job for each of the given workers, used by
-        # Delayed::Poller to fill its idle threads. Returns an array
+        # Delayed::Dispatcher to fill its idle threads. Returns an array
         # of [worker, job] pairs, in the order of the given workers.
         #
         # Each job must be locked under the name of the worker it is paired

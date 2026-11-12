@@ -103,3 +103,6 @@ Add: `lib/delayed/threaded_worker.rb`, `spec/threaded_worker_spec.rb`, lore file
 ## Follow-up: processes naming; no per-pool threads
 - Per-pool thread counts (`queues:processes:threads`) removed: `--threads`/`NUM_THREADS` applies to every process, including pool processes. `PoolParser` is back to `[queues, process_count]`; a third field is ignored, as before.
 - Process count renamed: CLI `-n`/`--processes=N` (`--num-workers` and `--number_of_workers` deprecated, both warn pointing to `--processes`), rake `NUM_PROCESSES` (`NUM_WORKERS` alias; `NUM_PROCESSES` wins if both are set), launcher/options keys `:processes` and `:threads` (`:worker_count` accepted by `Launcher::Base`; `#worker_count` aliases `#processes`; the never-released `:process_count`/`:thread_count` keys have no alias). Validation messages say `--processes`/`NUM_PROCESSES`.
+
+## Follow-up: Poller renamed to Dispatcher
+`Delayed::Poller` → `Delayed::Dispatcher` (`lib/delayed/dispatcher.rb`, `spec/dispatcher_spec.rb`); `Worker#poller` → `#dispatcher`; `:loop` callback argument `:poller` → `:dispatcher`. Polling is the smallest part of the class; its defining job is reserving work only for idle threads and handing it to them, plus owning the process's threads/signals/shutdown. Renamed before release, so no alias. Earlier sections of this file use the old name.

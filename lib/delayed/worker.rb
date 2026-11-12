@@ -9,7 +9,7 @@ require 'logger'
 require 'benchmark'
 
 module Delayed
-  # Runs jobs. In a worker process, Delayed::Poller runs each Worker on its
+  # Runs jobs. In a worker process, Delayed::Dispatcher runs each Worker on its
   # own thread and hands it jobs. Worker#work_off runs jobs inline on the
   # calling thread instead (e.g. in tests or a console).
   class Worker # rubocop:disable ClassLength
@@ -38,13 +38,13 @@ module Delayed
     # name_prefix is ignored if name is set directly
     attr_accessor :name_prefix
 
-    # Index of the thread this worker runs on when a Delayed::Poller runs
+    # Index of the thread this worker runs on when a Delayed::Dispatcher runs
     # several workers. When set, it is appended to the default name so that
     # every thread locks jobs under a unique name.
     attr_accessor :thread_index
 
-    # The Delayed::Poller running this worker, if any.
-    attr_accessor :poller
+    # The Delayed::Dispatcher running this worker, if any.
+    attr_accessor :dispatcher
 
     def self.reset
       self.default_log_level = DEFAULT_LOG_LEVEL
@@ -66,7 +66,7 @@ module Delayed
     # (perhaps to inspect the reason for the failure), set this to false.
     self.destroy_failed_jobs = true
 
-    # By default, Signals INT and TERM stop the Delayed::Poller, which exits upon completion of the current jobs.
+    # By default, Signals INT and TERM stop the Delayed::Dispatcher, which exits upon completion of the current jobs.
     # If you would prefer to raise a SignalException and exit immediately you can use this.
     # Be aware daemons uses TERM to stop and restart
     # false - No exceptions will be raised
@@ -129,7 +129,7 @@ module Delayed
       plugins.each { |klass| klass.new }
     end
 
-    # Default worker/poller name: identifies the process.
+    # Default worker/dispatcher name: identifies the process.
     def self.default_name(prefix = nil)
       "#{prefix}host:#{Socket.gethostname} pid:#{Process.pid}"
     rescue StandardError
@@ -169,16 +169,16 @@ module Delayed
     # Setting the name to nil will reset the default worker name
     attr_writer :name
 
-    # Runs this worker in the foreground until stopped, via a Delayed::Poller,
+    # Runs this worker in the foreground until stopped, via a Delayed::Dispatcher,
     # as every worker process does.
     def start
-      Poller.new(:workers => [self], :quiet => @quiet).tap { |poller| poller.name_prefix = name_prefix }.start
+      Dispatcher.new(:workers => [self], :quiet => @quiet).tap { |dispatcher| dispatcher.name_prefix = name_prefix }.start
     end
 
-    # Stops this worker, and the poller running it (if any).
+    # Stops this worker, and the dispatcher running it (if any).
     def stop
       @exit = true
-      poller.stop if poller
+      dispatcher.stop if dispatcher
     end
 
     def stop?
@@ -187,10 +187,10 @@ module Delayed
 
     # Do num jobs inline on the calling thread and return stats on
     # success/failure. Exit early if interrupted or no job is available.
-    # Reservation goes through this worker's Delayed::Poller, as in a
+    # Reservation goes through this worker's Delayed::Dispatcher, as in a
     # worker process.
     def work_off(num = 100)
-      (poller || Poller.new(:workers => [self], :quiet => @quiet)).work_off(num, self)
+      (dispatcher || Dispatcher.new(:workers => [self], :quiet => @quiet)).work_off(num, self)
     end
 
     def run(job)
