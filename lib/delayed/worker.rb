@@ -6,7 +6,6 @@ require 'active_support/core_ext/kernel/reporting'
 require 'active_support/hash_with_indifferent_access'
 require 'active_support/core_ext/hash/indifferent_access'
 require 'logger'
-require 'benchmark'
 
 module Delayed
   # Runs jobs. In a worker process, Delayed::Dispatcher runs each Worker on its
@@ -195,10 +194,10 @@ module Delayed
 
     def run(job)
       job_say job, 'RUNNING'
-      runtime = Benchmark.realtime do
-        Timeout.timeout(max_run_time(job).to_i, WorkerTimeout) { job.invoke_job }
-        job.destroy
-      end
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      Timeout.timeout(max_run_time(job).to_i, WorkerTimeout) { job.invoke_job }
+      job.destroy
+      runtime = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
       job_say job, format('COMPLETED after %.4f', runtime)
       return true # did work
     rescue DeserializationError => error
