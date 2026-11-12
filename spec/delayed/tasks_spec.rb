@@ -130,6 +130,34 @@ describe 'Rake tasks' do
       it { expect { run_task }.to raise_error(ArgumentError) }
     end
 
+    context 'LOCK_HEARTBEAT and LOCK_TIMEOUT' do
+      let(:env) { {'LOCK_HEARTBEAT' => '10', 'LOCK_TIMEOUT' => '60'} }
+      let(:exp_args) { {:quiet => false, :processes => 1, :lock_heartbeat_interval => 10.0, :lock_timeout => 60.0} }
+      it do
+        expect_success
+        run_task
+      end
+    end
+
+    context 'LOCK_HEARTBEAT alone uses the default lock timeout' do
+      let(:env) { {'LOCK_HEARTBEAT' => '30'} }
+      let(:exp_args) { {:quiet => false, :processes => 1, :lock_heartbeat_interval => 30.0} }
+      it do
+        expect_success
+        run_task
+      end
+    end
+
+    context 'LOCK_TIMEOUT under twice LOCK_HEARTBEAT' do
+      let(:env) { {'LOCK_HEARTBEAT' => '10', 'LOCK_TIMEOUT' => '15'} }
+      it { expect { run_task }.to raise_error(ArgumentError, /LOCK_TIMEOUT/) }
+    end
+
+    context 'LOCK_HEARTBEAT not positive' do
+      let(:env) { {'LOCK_HEARTBEAT' => '0'} }
+      it { expect { run_task }.to raise_error(ArgumentError, /LOCK_HEARTBEAT/) }
+    end
+
     context 'SLEEP_DELAY=5' do
       let(:env) { {'SLEEP_DELAY' => '5'} }
       let(:exp_args) { {:quiet => false, :sleep_delay => 5, :processes => 1} }

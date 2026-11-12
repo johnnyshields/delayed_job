@@ -748,3 +748,127 @@ shared_examples_for 'a delayed_job backend' do
     end
   end
 end
+
+# Examples for backends that support lock heartbeats and owner-guarded writes
+# (lock_heartbeats?, touch_locks, destroy_if_locked_by, save_if_locked_by).
+# Include alongside 'a delayed_job backend'.
+shared_examples_for 'a delayed_job backend supporting lock heartbeats' do
+  let(:now) { described_class.db_time_now }
+
+  before { SimpleJob.runs = 0 }
+
+  def locked(name, locked_at = described_class.db_time_now)
+    described_class.create!(:payload_object => SimpleJob.new, :locked_by => name, :locked_at => locked_at)
+  end
+
+  def reload_job(job)
+    described_class.where(:id => job.id).first
+  end
+
+  # Another worker takes the job over, as reserve would after the lock expired.
+  def take_over(job, name = 'w2')
+    described_class.where(:id => job.id).update_all(:locked_by => name, :locked_at => described_class.db_time_now)
+  end
+
+  it 'supports lock heartbeats' do
+    expect(described_class.lock_heartbeats?).to be true
+  end
+
+  describe 'touch_locks' do
+    it "refreshes the given workers' locks only" do
+      mine = locked('w1', now - 600)
+      also_mine = locked('w2', now - 600)
+      other = locked('w3', now - 600)
+      unlocked = described_class.create!(:payload_object => SimpleJob.new)
+
+      expect(described_class.touch_locks(%w[w1 w2])).to eq 2
+      expect(reload_job(mine).locked_at).to be_within(5).of(now)
+      expect(reload_job(also_mine).locked_at).to be_within(5).of(now)
+      expect(reload_job(other).locked_at).to be_within(1).of(now - 600)
+      expect(reload_job(unlocked).locked_at).to be_nil
+    end
+  end
+
+  describe 'reserve with a short lock expiry' do
+    let(:worker) { Delayed::Worker.new.tap { |w| w.name = 'w2' } }
+
+    it 'reserves a job whose lock is older than the expiry' do
+      job = locked('w1', now - 120)
+      expect(described_class.reserve(worker, 60).id).to eq job.id
+      expect(reload_job(job).locked_by).to eq 'w2'
+    end
+
+    it 'does not reserve a job whose lock was refreshed' do
+      locked('w1', now - 120)
+      described_class.touch_locks(['w1'])
+      expect(described_class.reserve(worker, 60)).to be_nil
+    end
+  end
+
+  describe 'destroy_if_locked_by' do
+    it 'destroys the job while the worker holds its lock' do
+      job = locked('w1')
+      expect(job.destroy_if_locked_by('w1')).to be true
+      expect(reload_job(job)).to be_nil
+    end
+
+    it 'leaves the job alone once another worker holds its lock' do
+      job = locked('w1')
+      take_over(job)
+      expect(job.destroy_if_locked_by('w1')).to be false
+      expect(reload_job(job).locked_by).to eq 'w2'
+    end
+  end
+
+  describe 'save_if_locked_by' do
+    it 'saves the job while the worker holds its lock' do
+      job = locked('w1')
+      job.attempts = 3
+      job.run_at = now + 3600
+      job.unlock
+      expect(job.save_if_locked_by('w1')).to be true
+      saved = reload_job(job)
+      expect([saved.attempts, saved.locked_by, saved.locked_at]).to eq [3, nil, nil]
+      expect(saved.run_at).to be_within(5).of(now + 3600)
+    end
+
+    it 'saves nothing once another worker holds its lock' do
+      job = locked('w1')
+      take_over(job)
+      job.attempts = 3
+      job.unlock
+      expect(job.save_if_locked_by('w1')).to be false
+      saved = reload_job(job)
+      expect([saved.attempts, saved.locked_by]).to eq [0, 'w2']
+    end
+  end
+
+  describe 'a worker that lost its lock' do
+    let(:stale) { Delayed::Worker.new.tap { |w| w.name = 'w1' } }
+
+    it 'does not delete the job when it finishes' do
+      job = locked('w1')
+      take_over(job)
+      expect(stale.run(job)).to be true
+      expect(reload_job(job).locked_by).to eq 'w2'
+    end
+
+    it 'does not reschedule the job when it fails' do
+      job = described_class.create!(:payload_object => ErrorJob.new, :locked_by => 'w1', :locked_at => now)
+      take_over(job)
+      expect(stale.run(job)).to be false
+      saved = reload_job(job)
+      expect([saved.attempts, saved.locked_by, saved.last_error]).to eq [0, 'w2', nil]
+    end
+
+    it 'does not fail or delete the job permanently' do
+      job = described_class.create!(:payload_object => ErrorJob.new, :locked_by => 'w1', :locked_at => now,
+                                    :attempts => Delayed::Worker.max_attempts - 1)
+      take_over(job)
+      stale.run(job)
+      saved = reload_job(job)
+      expect(saved).not_to be_nil
+      expect([saved.failed_at, saved.locked_by]).to eq [nil, 'w2']
+    end
+  end
+end

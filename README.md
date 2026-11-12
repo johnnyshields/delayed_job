@@ -368,6 +368,34 @@ SIGKILLs any worker process still running 10 seconds after that.
 doesn't catch it. A released job runs again from the start, so jobs should be
 safe to retry.
 
+#### Lock heartbeats
+
+A worker locks each job it runs. If the worker dies or hangs without its
+process exiting (a frozen VM, a lost node, a deadlocked process), that lock is
+only considered abandoned after `max_run_time`, 4 hours by default. Lock
+heartbeats shorten that: each worker process refreshes the locks of its running
+jobs every few seconds, and a lock that hasn't been refreshed for the lock
+timeout counts as abandoned, so another worker picks the job up.
+
+```
+RAILS_ENV=production script/delayed_job --fork --lock-heartbeat=30 --lock-timeout=120 start
+LOCK_HEARTBEAT=30 LOCK_TIMEOUT=120 rake jobs:work
+# or in an initializer
+Delayed::Worker.lock_heartbeat_interval = 30
+Delayed::Worker.lock_timeout = 120 # default 300; at least twice the heartbeat
+```
+
+* Turn heartbeats on for **every** worker running the same jobs: a worker
+  without them doesn't refresh its locks, so its long jobs would be taken over
+  after the lock timeout.
+* The backend must support them (`Delayed::Job.lock_heartbeats?`); otherwise
+  Delayed Job logs a warning and locks expire after `max_run_time` as before.
+* A worker whose lock was taken over doesn't overwrite the new owner's result:
+  backends that implement `destroy_if_locked_by` and `save_if_locked_by` only
+  finish, reschedule or fail a job while the worker still holds its lock.
+* A job taken over from a worker that was only slow, not dead, runs twice.
+  Choose a lock timeout well above the time a worker can stall.
+
 #### When the parent process dies
 
 If the forking parent is killed (e.g. with `SIGKILL`), its worker processes

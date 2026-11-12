@@ -52,6 +52,14 @@ module Delayed
           connection_handler.clear_all_connections!
         end
 
+        def self.lock_heartbeats?
+          true
+        end
+
+        def self.touch_locks(names)
+          where(:locked_by => names).update_all(:locked_at => db_time_now)
+        end
+
         def self.locked_jobs(name)
           where(:locked_by => name).to_a
         end
@@ -78,6 +86,17 @@ module Delayed
           self.locked_by = name
           clear_changes_information
           true
+        end
+
+        def destroy_if_locked_by(name)
+          self.class.where(:id => id, :locked_by => name).delete_all == 1
+        end
+
+        def save_if_locked_by(name)
+          self.updated_at = self.class.db_time_now
+          saved = self.class.where(:id => id, :locked_by => name).update_all(attributes.except('id')) == 1
+          clear_changes_information if saved
+          saved
         end
 
         def reload(*)

@@ -97,14 +97,16 @@ module Delayed
     def run
       say thread_count > 1 ? "Starting job worker with #{thread_count} threads" : 'Starting job worker'
       warn_if_connection_pool_too_small
-      start_threads
-      error = nil
-      begin
-        poll_loop
-      rescue Exception => error # rubocop:disable RescueException
-        raise
-      ensure
-        stop_threads(error)
+      with_lock_heartbeat do
+        start_threads
+        error = nil
+        begin
+          poll_loop
+        rescue Exception => error # rubocop:disable RescueException
+          raise
+        ensure
+          stop_threads(error)
+        end
       end
     end
 
@@ -114,11 +116,13 @@ module Delayed
     def work_off(num = 100, worker = workers.first)
       success = 0
       failure = 0
-      num.times do
-        _, job = reserve([worker]).first
-        break unless job
-        worker.perform_job(job) ? success += 1 : failure += 1
-        break if worker.stop?
+      with_lock_heartbeat do
+        num.times do
+          _, job = reserve([worker]).first
+          break unless job
+          worker.perform_job(job) ? success += 1 : failure += 1
+          break if worker.stop?
+        end
       end
       [success, failure]
     end
@@ -244,7 +248,7 @@ module Delayed
     # Reserves up to one job per given worker. On error, lets the backend
     # recover and returns no jobs, until too many consecutive failures.
     def reserve(workers)
-      reserved = with_executor { Delayed::Job.reserve_batch(workers) }
+      reserved = with_executor { Delayed::Job.reserve_batch(workers, Worker.lock_expiry) }
       @failed_reserve_count = 0
       reserved
     rescue ::Exception => error # rubocop:disable RescueException
@@ -253,6 +257,62 @@ module Delayed
       @failed_reserve_count += 1
       raise FatalBackendError if @failed_reserve_count >= MAX_FAILED_RESERVATIONS
       []
+    end
+
+    # Runs the block while a heartbeat thread refreshes the locks of this
+    # dispatcher's workers every Worker.lock_heartbeat_interval seconds (see
+    # Worker.lock_heartbeat_interval), if enabled and supported.
+    def with_lock_heartbeat
+      return yield unless start_lock_heartbeat
+      begin
+        yield
+      ensure
+        stop_lock_heartbeat
+      end
+    end
+
+    def start_lock_heartbeat
+      return false if Worker.lock_heartbeat_interval.nil?
+      Worker.validate_lock_heartbeats!
+      unless Delayed::Job.lock_heartbeats?
+        say "WARNING: lock heartbeats are enabled, but #{Delayed::Job.name} does not support them; " \
+            'locks expire after max_run_time', 'warn'
+        return false
+      end
+      @heartbeat_stopped = false
+      @heartbeat_mutex = Mutex.new
+      @heartbeat_cond = ConditionVariable.new
+      @heartbeat = Thread.new { lock_heartbeat_loop(Worker.lock_heartbeat_interval) }
+      @heartbeat.report_on_exception = false if @heartbeat.respond_to?(:report_on_exception=)
+      @heartbeat.name = 'delayed_job heartbeat' if @heartbeat.respond_to?(:name=)
+      true
+    end
+
+    def stop_lock_heartbeat
+      @heartbeat_mutex.synchronize do
+        @heartbeat_stopped = true
+        @heartbeat_cond.broadcast
+      end
+      @heartbeat.join
+    end
+
+    def lock_heartbeat_loop(interval)
+      names = workers.map(&:name)
+      loop do
+        @heartbeat_mutex.synchronize do
+          @heartbeat_cond.wait(@heartbeat_mutex, interval) unless @heartbeat_stopped
+        end
+        break if @heartbeat_mutex.synchronize { @heartbeat_stopped }
+        touch_locks(names)
+      end
+    end
+
+    # Errors are logged and the next heartbeat tries again; the locks only
+    # expire if heartbeats keep failing for lock_timeout seconds.
+    def touch_locks(names)
+      with_executor { Delayed::Job.touch_locks(names) }
+    rescue StandardError => error
+      say "Error while refreshing job locks: #{error.class}: #{error.message}", 'error'
     end
 
     def start_threads

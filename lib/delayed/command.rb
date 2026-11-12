@@ -99,6 +99,12 @@ module Delayed
         opt.on('--shutdown-timeout N', 'Seconds to let running jobs finish when stopping before interrupting and releasing them (default: wait for them)') do |n|
           @options[:shutdown_timeout] = Float(n) rescue -1
         end
+        opt.on('--lock-heartbeat N', 'Refresh the locks of running jobs every N seconds, so a dead or hung worker\'s jobs are picked up after --lock-timeout (default: off)') do |n|
+          @options[:lock_heartbeat_interval] = Float(n) rescue 0
+        end
+        opt.on('--lock-timeout N', 'With --lock-heartbeat, seconds after which a lock that was not refreshed counts as abandoned (default: 300)') do |n|
+          @options[:lock_timeout] = Float(n) rescue 0
+        end
         opt.on('--sleep-delay N', 'Amount of time to sleep when no jobs are found') do |n|
           @options[:sleep_delay] = Integer(n) rescue nil
         end
@@ -134,6 +140,7 @@ module Delayed
       validate_process_count!
       validate_thread_count!
       validate_shutdown_timeout!
+      validate_lock_heartbeat!
       validate_priority!
       validate_identifier!
       validate_processes_and_pools!
@@ -153,6 +160,16 @@ module Delayed
     def validate_shutdown_timeout!
       return unless @options.key?(:shutdown_timeout) && @options[:shutdown_timeout] < 0
       raise ArgumentError, '--shutdown-timeout must be a number of seconds, 0 or greater'
+    end
+
+    def validate_lock_heartbeat!
+      interval = @options[:lock_heartbeat_interval]
+      timeout = @options.fetch(:lock_timeout, Delayed::Worker::DEFAULT_LOCK_TIMEOUT)
+      raise ArgumentError, '--lock-timeout must be greater than 0' if @options.key?(:lock_timeout) && timeout <= 0
+      return unless @options.key?(:lock_heartbeat_interval)
+      raise ArgumentError, '--lock-heartbeat must be greater than 0' unless interval > 0
+      return if timeout >= 2 * interval
+      raise ArgumentError, '--lock-timeout must be at least twice --lock-heartbeat'
     end
 
     def validate_priority!

@@ -297,6 +297,46 @@ describe Delayed::Command do
     end
   end
 
+  describe '--lock-heartbeat and --lock-timeout args' do
+    context 'not set' do
+      let(:options) { [] }
+      it do
+        expect(output_options).not_to have_key(:lock_heartbeat_interval)
+        expect(output_options).not_to have_key(:lock_timeout)
+      end
+    end
+
+    context 'heartbeat only' do
+      let(:options) { %w[--lock-heartbeat 30] }
+      it { expect(output_options[:lock_heartbeat_interval]).to eq 30.0 }
+    end
+
+    context 'both' do
+      let(:options) { %w[--lock-heartbeat=10 --lock-timeout=45] }
+      it { expect(output_options.values_at(:lock_heartbeat_interval, :lock_timeout)).to eq [10.0, 45.0] }
+    end
+
+    context 'a heartbeat longer than half the default lock timeout' do
+      let(:options) { %w[--lock-heartbeat 200] }
+      it { expect { output_options }.to raise_error(ArgumentError, /at least twice --lock-heartbeat/) }
+    end
+
+    context 'a lock timeout under twice the heartbeat' do
+      let(:options) { %w[--lock-heartbeat 10 --lock-timeout 15] }
+      it { expect { output_options }.to raise_error(ArgumentError, /at least twice/) }
+    end
+
+    context 'heartbeat not a number' do
+      let(:options) { %w[--lock-heartbeat often] }
+      it { expect { output_options }.to raise_error(ArgumentError, /--lock-heartbeat must be greater than 0/) }
+    end
+
+    context 'lock timeout not positive' do
+      let(:options) { %w[--lock-timeout 0] }
+      it { expect { output_options }.to raise_error(ArgumentError, /--lock-timeout must be greater than 0/) }
+    end
+  end
+
   describe '--sleep-delay arg' do
     context 'not set' do
       let(:options) { [] }

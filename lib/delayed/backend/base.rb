@@ -62,6 +62,20 @@ module Delayed
           nil
         end
 
+        # Whether the backend supports lock heartbeats (see
+        # Delayed::Worker.lock_heartbeat_interval): it implements
+        # touch_locks, and honours the max_run_time passed to reserve as the
+        # age after which a lock counts as abandoned.
+        def lock_heartbeats?
+          false
+        end
+
+        # Refreshes (sets locked_at to now) the locks held by the named
+        # workers. Returns the number of jobs touched.
+        def touch_locks(_worker_names)
+          raise NotImplementedError, "#{name} does not support lock heartbeats"
+        end
+
         # Allow the backend to attempt recovery from reserve errors
         def recover_from(_error); end
 

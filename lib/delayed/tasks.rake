@@ -28,6 +28,8 @@ namespace :jobs do
     @options[:read_ahead] = Integer(ENV['READ_AHEAD']) if ENV['READ_AHEAD']
     @options[:threads] = Integer(ENV['NUM_THREADS']) if ENV['NUM_THREADS']
     @options[:shutdown_timeout] = Float(ENV['SHUTDOWN_TIMEOUT']) if ENV['SHUTDOWN_TIMEOUT']
+    @options[:lock_heartbeat_interval] = Float(ENV['LOCK_HEARTBEAT']) if ENV['LOCK_HEARTBEAT']
+    @options[:lock_timeout] = Float(ENV['LOCK_TIMEOUT']) if ENV['LOCK_TIMEOUT']
 
     queues = (ENV['QUEUES'] || ENV['QUEUE'] || '').split(',')
     @options[:queues] = queues unless queues.empty?
@@ -45,6 +47,12 @@ namespace :jobs do
 
     if @options[:shutdown_timeout] && @options[:shutdown_timeout] < 0
       raise ArgumentError, 'SHUTDOWN_TIMEOUT must be 0 or greater'
+    end
+
+    if @options[:lock_heartbeat_interval]
+      timeout = @options.fetch(:lock_timeout, Delayed::Worker::DEFAULT_LOCK_TIMEOUT)
+      raise ArgumentError, 'LOCK_HEARTBEAT must be greater than 0' unless @options[:lock_heartbeat_interval] > 0
+      raise ArgumentError, 'LOCK_TIMEOUT must be at least twice LOCK_HEARTBEAT' if timeout < 2 * @options[:lock_heartbeat_interval]
     end
 
     if @options[:min_priority] && @options[:max_priority] && @options[:min_priority] > @options[:max_priority]

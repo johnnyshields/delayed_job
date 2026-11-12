@@ -24,6 +24,8 @@ module Delayed
     DEFAULT_QUEUE_ATTRIBUTES = HashWithIndifferentAccess.new.freeze
     DEFAULT_READ_AHEAD       = 5
     DEFAULT_SHUTDOWN_TIMEOUT = nil
+    DEFAULT_LOCK_HEARTBEAT_INTERVAL = nil
+    DEFAULT_LOCK_TIMEOUT     = 5.minutes
 
     cattr_accessor :min_priority, :max_priority, :max_attempts, :max_run_time,
                    :default_priority, :sleep_delay, :logger, :delay_jobs, :queues,
@@ -34,6 +36,16 @@ module Delayed
     # interrupting them (see Delayed::ShutdownInterrupt). nil, the default,
     # waits for as long as they take.
     cattr_accessor :shutdown_timeout
+
+    # Lock heartbeats (off by default). While a job runs, its worker process
+    # refreshes the job's lock every lock_heartbeat_interval seconds, and a
+    # lock not refreshed for lock_timeout seconds counts as abandoned: its
+    # job can be reserved by another worker. So the job of a worker that
+    # died or hung is picked up after lock_timeout instead of max_run_time.
+    # Needs a backend that supports it (Delayed::Job.lock_heartbeats?), and
+    # every worker on the same jobs must enable it: a worker without
+    # heartbeats would have its long-running jobs taken over.
+    cattr_accessor :lock_heartbeat_interval, :lock_timeout
 
     # Named queue into which jobs are enqueued by default
     cattr_accessor :default_queue_name
@@ -62,6 +74,8 @@ module Delayed
       self.queue_attributes  = DEFAULT_QUEUE_ATTRIBUTES
       self.read_ahead        = DEFAULT_READ_AHEAD
       self.shutdown_timeout  = DEFAULT_SHUTDOWN_TIMEOUT
+      self.lock_heartbeat_interval = DEFAULT_LOCK_HEARTBEAT_INTERVAL
+      self.lock_timeout      = DEFAULT_LOCK_TIMEOUT
       @lifecycle             = nil
     end
 
@@ -176,6 +190,27 @@ module Delayed
       end
     end
 
+    # Whether lock heartbeats are enabled and supported by the backend.
+    def self.lock_heartbeats?
+      !lock_heartbeat_interval.nil? && Delayed::Job.lock_heartbeats?
+    end
+
+    # How long a job's lock is honoured: lock_timeout with lock heartbeats,
+    # else max_run_time (after which the job must have been interrupted).
+    def self.lock_expiry
+      lock_heartbeats? ? lock_timeout : max_run_time
+    end
+
+    # Raises ArgumentError for lock heartbeat settings that would let a live
+    # worker's locks expire between two heartbeats.
+    def self.validate_lock_heartbeats!
+      return if lock_heartbeat_interval.nil?
+      raise ArgumentError, 'lock_heartbeat_interval must be greater than 0' unless lock_heartbeat_interval > 0
+      return if lock_timeout && lock_timeout >= 2 * lock_heartbeat_interval
+      raise ArgumentError, "lock_timeout (#{lock_timeout.inspect}) must be at least twice " \
+                           "lock_heartbeat_interval (#{lock_heartbeat_interval})"
+    end
+
     # A worker that only records job outcomes under the given name. Unlike
     # Worker.new, it doesn't reset the lifecycle or process-wide settings.
     def self.named(name)
@@ -196,7 +231,8 @@ module Delayed
     def initialize(options = {})
       @quiet = options.key?(:quiet) ? options[:quiet] : true
 
-      [:min_priority, :max_priority, :sleep_delay, :read_ahead, :queues, :exit_on_complete, :shutdown_timeout].each do |option|
+      [:min_priority, :max_priority, :sleep_delay, :read_ahead, :queues, :exit_on_complete, :shutdown_timeout,
+       :lock_heartbeat_interval, :lock_timeout].each do |option|
         self.class.send("#{option}=", options[option]) if options.key?(option)
       end
 
@@ -246,7 +282,7 @@ module Delayed
       job_say job, 'RUNNING'
       started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
       Timeout.timeout(max_run_time(job).to_i, WorkerTimeout) { job.invoke_job }
-      job.destroy
+      owned_destroy(job)
       runtime = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
       job_say job, format('COMPLETED after %.4f', runtime)
       return true # did work
@@ -275,8 +311,9 @@ module Delayed
       if (job.attempts += 1) < max_attempts(job)
         time ||= job.reschedule_at
         job.run_at = time
+        owner = job.locked_by
         job.unlock
-        job.save!
+        owned_save(job, owner)
       else
         job_say job, "FAILED permanently because of #{job.attempts} consecutive failures", 'error'
         failed(job)
@@ -291,7 +328,7 @@ module Delayed
           say "Error when running failure callback: #{error}", 'error'
           say error.backtrace.join("\n"), 'error'
         ensure
-          job.destroy_failed_jobs? ? job.destroy : job.fail!
+          job.destroy_failed_jobs? ? owned_destroy(job) : owned_fail(job)
         end
       end
     end
@@ -316,6 +353,35 @@ module Delayed
     end
 
   protected
+
+    # Owner-guarded writes. A job is finished, rescheduled or failed only if
+    # this worker still holds its lock: if the lock expired and another
+    # worker reserved the job meanwhile (see Worker.lock_timeout), the other
+    # worker's run decides the job's fate, and this outcome is discarded.
+    # Applies to backends that implement destroy_if_locked_by and
+    # save_if_locked_by, and to locked jobs; others are written as before.
+    def owned_destroy(job)
+      owner = job.locked_by
+      return job.destroy unless owner && job.respond_to?(:destroy_if_locked_by)
+      lost_lock(job, 'finished') unless job.destroy_if_locked_by(owner)
+    end
+
+    def owned_save(job, owner)
+      return job.save! unless owner && job.respond_to?(:save_if_locked_by)
+      lost_lock(job, 'rescheduled') unless job.save_if_locked_by(owner)
+    end
+
+    def owned_fail(job)
+      owner = job.locked_by
+      return job.fail! unless owner && job.respond_to?(:save_if_locked_by)
+      job.failed_at = job.class.db_time_now
+      lost_lock(job, 'failed') unless job.save_if_locked_by(owner)
+    end
+
+    def lost_lock(job, outcome)
+      job_say job, "was #{outcome} here, but its lock expired and another worker reserved it; " \
+                   'leaving the job to that worker', 'warn'
+    end
 
     def say_queue(queue)
       " (queue=#{queue})" if queue
