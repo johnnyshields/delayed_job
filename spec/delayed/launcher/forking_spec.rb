@@ -49,7 +49,7 @@ describe Delayed::Launcher::Forking do
     end
 
     context 'with multiple workers' do
-      let(:options) { {:worker_count => 2} }
+      let(:options) { {:processes => 2} }
       it_behaves_like 'a forking parent'
     end
 
@@ -72,7 +72,7 @@ describe Delayed::Launcher::Forking do
     end
 
     context 'with an identifier and multiple workers' do
-      let(:options) { {:identifier => 'abc', :worker_count => 2} }
+      let(:options) { {:identifier => 'abc', :processes => 2} }
       it_behaves_like 'a single worker process'
     end
   end

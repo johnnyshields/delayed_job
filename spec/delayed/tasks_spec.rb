@@ -25,7 +25,7 @@ describe 'Rake tasks' do
     end
 
     context 'default case' do
-      let(:exp_args) { {:quiet => false, :worker_count => 1} }
+      let(:exp_args) { {:quiet => false, :processes => 1} }
       it do
         expect_success
         run_task
@@ -34,7 +34,7 @@ describe 'Rake tasks' do
 
     context 'MIN_PRIORITY=-2' do
       let(:env) { {'MIN_PRIORITY' => '-2'} }
-      let(:exp_args) { {:min_priority => -2, :quiet => false, :worker_count => 1} }
+      let(:exp_args) { {:min_priority => -2, :quiet => false, :processes => 1} }
       it do
         expect_success
         run_task
@@ -48,7 +48,7 @@ describe 'Rake tasks' do
 
     context 'MAX_PRIORITY=-5' do
       let(:env) { {'MAX_PRIORITY' => '-5'} }
-      let(:exp_args) { {:max_priority => -5, :quiet => false, :worker_count => 1} }
+      let(:exp_args) { {:max_priority => -5, :quiet => false, :processes => 1} }
       it do
         expect_success
         run_task
@@ -60,23 +60,41 @@ describe 'Rake tasks' do
       it { expect { run_task }.to raise_error(ArgumentError) }
     end
 
-    context 'NUM_WORKERS=5' do
-      let(:env) { {'NUM_WORKERS' => '5'} }
-      let(:exp_args) { {:quiet => false, :worker_count => 5} }
+    context 'NUM_PROCESSES=5' do
+      let(:env) { {'NUM_PROCESSES' => '5'} }
+      let(:exp_args) { {:quiet => false, :processes => 5} }
       it do
         expect_success
         run_task
       end
     end
 
-    context 'NUM_WORKERS not a number' do
-      let(:env) { {'NUM_WORKERS' => 'foo'} }
+    context 'NUM_PROCESSES not a number' do
+      let(:env) { {'NUM_PROCESSES' => 'foo'} }
       it { expect { run_task }.to raise_error(ArgumentError) }
+    end
+
+    context 'NUM_WORKERS=4 (alias of NUM_PROCESSES)' do
+      let(:env) { {'NUM_WORKERS' => '4'} }
+      let(:exp_args) { {:quiet => false, :processes => 4} }
+      it do
+        expect_success
+        run_task
+      end
+    end
+
+    context 'NUM_PROCESSES and NUM_WORKERS' do
+      let(:env) { {'NUM_PROCESSES' => '3', 'NUM_WORKERS' => '4'} }
+      let(:exp_args) { {:quiet => false, :processes => 3} }
+      it do
+        expect_success
+        run_task
+      end
     end
 
     context 'NUM_THREADS=5' do
       let(:env) { {'NUM_THREADS' => '5'} }
-      let(:exp_args) { {:quiet => false, :worker_count => 1, :thread_count => 5} }
+      let(:exp_args) { {:quiet => false, :processes => 1, :threads => 5} }
       it do
         expect_success
         run_task
@@ -95,7 +113,7 @@ describe 'Rake tasks' do
 
     context 'SLEEP_DELAY=5' do
       let(:env) { {'SLEEP_DELAY' => '5'} }
-      let(:exp_args) { {:quiet => false, :sleep_delay => 5, :worker_count => 1} }
+      let(:exp_args) { {:quiet => false, :sleep_delay => 5, :processes => 1} }
       it do
         expect_success
         run_task
@@ -109,7 +127,7 @@ describe 'Rake tasks' do
 
     context 'READ_AHEAD=5' do
       let(:env) { {'READ_AHEAD' => '5'} }
-      let(:exp_args) { {:quiet => false, :read_ahead => 5, :worker_count => 1} }
+      let(:exp_args) { {:quiet => false, :read_ahead => 5, :processes => 1} }
       it do
         expect_success
         run_task
@@ -123,7 +141,7 @@ describe 'Rake tasks' do
 
     context 'QUIET=foo' do
       let(:env) { {'QUIET' => 'foo'} }
-      let(:exp_args) { {:quiet => true, :worker_count => 1} }
+      let(:exp_args) { {:quiet => true, :processes => 1} }
       it do
         expect_success
         run_task
@@ -132,7 +150,7 @@ describe 'Rake tasks' do
 
     context 'QUIET=0' do
       let(:env) { {'QUIET' => '0'} }
-      let(:exp_args) { {:quiet => false, :worker_count => 1} }
+      let(:exp_args) { {:quiet => false, :processes => 1} }
       it do
         expect_success
         run_task
@@ -141,7 +159,7 @@ describe 'Rake tasks' do
 
     context 'QUIET=f' do
       let(:env) { {'QUIET' => 'f'} }
-      let(:exp_args) { {:quiet => false, :worker_count => 1} }
+      let(:exp_args) { {:quiet => false, :processes => 1} }
       it do
         expect_success
         run_task
@@ -150,7 +168,7 @@ describe 'Rake tasks' do
 
     context 'QUIET=FaLsE' do
       let(:env) { {'QUIET' => 'FaLsE'} }
-      let(:exp_args) { {:quiet => false, :worker_count => 1} }
+      let(:exp_args) { {:quiet => false, :processes => 1} }
       it do
         expect_success
         run_task
@@ -159,7 +177,7 @@ describe 'Rake tasks' do
 
     context 'QUEUE=mailers' do
       let(:env) { {'QUEUE' => 'mailers'} }
-      let(:exp_args) { {:queues => %w[mailers], :quiet => false, :worker_count => 1} }
+      let(:exp_args) { {:queues => %w[mailers], :quiet => false, :processes => 1} }
       it do
         expect_success
         run_task
@@ -168,7 +186,7 @@ describe 'Rake tasks' do
 
     context 'QUEUE=mailers,tweets,payments' do
       let(:env) { {'QUEUE' => 'mailers,tweets,payments'} }
-      let(:exp_args) { {:queues => %w[mailers tweets payments], :quiet => false, :worker_count => 1} }
+      let(:exp_args) { {:queues => %w[mailers tweets payments], :quiet => false, :processes => 1} }
       it do
         expect_success
         run_task
@@ -177,7 +195,7 @@ describe 'Rake tasks' do
 
     context 'QUEUES=mailers' do
       let(:env) { {'QUEUES' => 'mailers'} }
-      let(:exp_args) { {:queues => %w[mailers], :quiet => false, :worker_count => 1} }
+      let(:exp_args) { {:queues => %w[mailers], :quiet => false, :processes => 1} }
       it do
         expect_success
         run_task
@@ -186,7 +204,7 @@ describe 'Rake tasks' do
 
     context 'QUEUES=mailers,tweets,payments' do
       let(:env) { {'QUEUES' => 'mailers,tweets,payments'} }
-      let(:exp_args) { {:queues => %w[mailers tweets payments], :quiet => false, :worker_count => 1} }
+      let(:exp_args) { {:queues => %w[mailers tweets payments], :quiet => false, :processes => 1} }
       it do
         expect_success
         run_task
@@ -195,7 +213,7 @@ describe 'Rake tasks' do
 
     context 'POOL=*:1' do
       let(:env) { {'POOL' => '*:1'} }
-      let(:exp_args) { {:pools => [[[], 1]], :quiet => false, :worker_count => 1} }
+      let(:exp_args) { {:pools => [[[], 1]], :quiet => false, :processes => 1} }
       it do
         expect_success
         run_task
@@ -204,7 +222,7 @@ describe 'Rake tasks' do
 
     context 'POOL=*:1|test_queue:4|mailers,misc:2' do
       let(:env) { {'POOL' => '*:1|test_queue:4|mailers,misc:2'} }
-      let(:exp_args) { {:pools => [[[], 1], [%w[test_queue], 4], [%w[mailers misc], 2]], :quiet => false, :worker_count => 1} }
+      let(:exp_args) { {:pools => [[[], 1], [%w[test_queue], 4], [%w[mailers misc], 2]], :quiet => false, :processes => 1} }
       it do
         expect_success
         run_task
@@ -213,7 +231,7 @@ describe 'Rake tasks' do
 
     context 'POOLS=*:1' do
       let(:env) { {'POOL' => '*:1'} }
-      let(:exp_args) { {:pools => [[[], 1]], :quiet => false, :worker_count => 1} }
+      let(:exp_args) { {:pools => [[[], 1]], :quiet => false, :processes => 1} }
       it do
         expect_success
         run_task
@@ -222,21 +240,21 @@ describe 'Rake tasks' do
 
     context 'POOLS=*:1|test_queue:4|mailers,misc:2' do
       let(:env) { {'POOL' => '*:1|test_queue:4|mailers,misc:2'} }
-      let(:exp_args) { {:pools => [[[], 1], [%w[test_queue], 4], [%w[mailers misc], 2]], :quiet => false, :worker_count => 1} }
+      let(:exp_args) { {:pools => [[[], 1], [%w[test_queue], 4], [%w[mailers misc], 2]], :quiet => false, :processes => 1} }
       it do
         expect_success
         run_task
       end
     end
 
-    context 'NUM_WORKERS=0' do
-      let(:env) { {'NUM_WORKERS' => '0'} }
+    context 'NUM_PROCESSES=0' do
+      let(:env) { {'NUM_PROCESSES' => '0'} }
       it { expect { run_task }.to raise_error(ArgumentError) }
     end
 
     context 'MIN_PRIORITY less than MAX_PRIORITY' do
       let(:env) { {'MIN_PRIORITY' => '-5', 'MAX_PRIORITY' => '0'} }
-      let(:exp_args) { {:max_priority => 0, :min_priority => -5, :quiet => false, :worker_count => 1} }
+      let(:exp_args) { {:max_priority => 0, :min_priority => -5, :quiet => false, :processes => 1} }
       it do
         expect_success
         run_task
@@ -245,7 +263,7 @@ describe 'Rake tasks' do
 
     context 'MIN_PRIORITY equal to MAX_PRIORITY' do
       let(:env) { {'MIN_PRIORITY' => '-5', 'MAX_PRIORITY' => '-5'} }
-      let(:exp_args) { {:max_priority => -5, :min_priority => -5, :quiet => false, :worker_count => 1} }
+      let(:exp_args) { {:max_priority => -5, :min_priority => -5, :quiet => false, :processes => 1} }
       it do
         expect_success
         run_task
@@ -257,9 +275,14 @@ describe 'Rake tasks' do
       it { expect { run_task }.to raise_error(ArgumentError) }
     end
 
+    context 'NUM_PROCESSES and POOLS' do
+      let(:env) { {'NUM_PROCESSES' => '5', 'POOLS' => 'mailers:2'} }
+      it { expect { run_task }.to raise_error(ArgumentError) }
+    end
+
     context 'NUM_WORKERS and POOLS' do
       let(:env) { {'NUM_WORKERS' => '5', 'POOLS' => 'mailers:2'} }
-      it { expect { run_task }.to raise_error(ArgumentError) }
+      it { expect { run_task }.to raise_error(ArgumentError, /NUM_PROCESSES/) }
     end
 
     context 'QUEUES and POOLS' do

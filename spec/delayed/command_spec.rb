@@ -114,37 +114,66 @@ describe Delayed::Command do
     end
   end
 
-  describe '--num-workers arg' do
+  describe '--processes arg' do
     context 'not set' do
       let(:options) { [] }
-      it { expect(output_options[:worker_count]).to eq 1 }
+      it { expect(output_options[:processes]).to eq 1 }
     end
 
     context '-n set' do
       let(:options) { %w[-n 2] }
-      it { expect(output_options[:worker_count]).to eq 2 }
+      it { expect(output_options[:processes]).to eq 2 }
     end
 
     context '-n not a number' do
       let(:options) { %w[-n elephant] }
-      it { expect(output_options[:worker_count]).to eq 1 }
+      it { expect(output_options[:processes]).to eq 1 }
     end
 
-    context '--num-workers set' do
+    context '--processes set' do
+      let(:options) { %w[--processes 3] }
+      it { expect(output_options[:processes]).to eq 3 }
+    end
+
+    context '--processes= set' do
+      let(:options) { %w[--processes=6] }
+      it { expect(output_options[:processes]).to eq 6 }
+    end
+
+    context '--processes not a number' do
+      let(:options) { %w[--processes zebu] }
+      it { expect(output_options[:processes]).to eq 1 }
+    end
+
+    context '--num-workers (deprecated) set' do
       let(:options) { %w[--num-workers 4] }
-      it { expect(output_options[:worker_count]).to eq 4 }
+      it do
+        expect(STDERR).to receive(:puts).with(/DEPRECATED: Use -n or --processes instead of --num-workers/)
+        expect(output_options[:processes]).to eq 4
+      end
     end
 
     context '--num-workers not a number' do
       let(:options) { %w[--num-workers hippo] }
-      it { expect(output_options[:worker_count]).to eq 1 }
-    end
-
-    context '--number_of_workers set' do
-      let(:options) { %w[--number_of_workers 5] }
       it do
         expect(STDERR).to receive(:puts)
-        expect(output_options[:worker_count]).to eq 5
+        expect(output_options[:processes]).to eq 1
+      end
+    end
+
+    context '--number_of_workers (deprecated) set' do
+      let(:options) { %w[--number_of_workers 5] }
+      it do
+        expect(STDERR).to receive(:puts).with(/DEPRECATED: Use -n or --processes instead of --number_of_workers/)
+        expect(output_options[:processes]).to eq 5
+      end
+    end
+
+    context '--processes does not warn' do
+      let(:options) { %w[--processes 2] }
+      it do
+        expect(STDERR).not_to receive(:puts)
+        expect(output_options[:processes]).to eq 2
       end
     end
 
@@ -152,7 +181,7 @@ describe Delayed::Command do
       let(:options) { %w[--number_of_workers rhino] }
       it do
         expect(STDERR).to receive(:puts)
-        expect(output_options[:worker_count]).to eq 1
+        expect(output_options[:processes]).to eq 1
       end
     end
   end
@@ -160,17 +189,17 @@ describe Delayed::Command do
   describe '--threads arg' do
     context 'not set' do
       let(:options) { [] }
-      it { expect(output_options[:thread_count]).to eq nil }
+      it { expect(output_options[:threads]).to eq nil }
     end
 
     context '-t set' do
       let(:options) { %w[-t 5] }
-      it { expect(output_options[:thread_count]).to eq 5 }
+      it { expect(output_options[:threads]).to eq 5 }
     end
 
     context '--threads set' do
       let(:options) { %w[--threads 8] }
-      it { expect(output_options[:thread_count]).to eq 8 }
+      it { expect(output_options[:threads]).to eq 8 }
     end
 
     context '--threads zero' do
@@ -477,16 +506,20 @@ describe Delayed::Command do
       Delayed::Command.new(%w[-d]).launch
     end
 
-    it 'raise error num-workers and identifier are present' do
-      expect_any_instance_of(Delayed::Launcher::Daemonized).to_not receive(:launch)
-      expect(STDERR).to_not receive(:puts)
-      expect { Delayed::Command.new(%w[-d --num-workers=2 --identifier=foobar]).launch }.to raise_error(ArgumentError)
+    it 'raise error processes and identifier are present' do
+      expect { Delayed::Command.new(%w[-d --processes=2 --identifier=foobar]) }.to raise_error(ArgumentError, /--processes/)
     end
 
-    it 'warn if num-workers is 0' do
+    it 'raise error processes and identifier are present (via -n)' do
+      expect_any_instance_of(Delayed::Launcher::Daemonized).to_not receive(:launch)
+      expect(STDERR).to_not receive(:puts)
+      expect { Delayed::Command.new(%w[-d -n2 --identifier=foobar]).launch }.to raise_error(ArgumentError)
+    end
+
+    it 'warn if processes is 0' do
       expect_any_instance_of(Delayed::Launcher::Daemonized).to receive(:launch)
-      expect(STDERR).to receive(:puts)
-      Delayed::Command.new(%w[-d --num-workers=0]).launch
+      expect(STDERR).to receive(:puts).with(/--processes must be 1 or greater/)
+      Delayed::Command.new(%w[-d --processes=0]).launch
     end
 
     it 'not warn if min-priority is less than max-priority' do
@@ -513,10 +546,10 @@ describe Delayed::Command do
       Delayed::Command.new(%w[-d --queues=mailers --pool=mailers:2]).launch
     end
 
-    it 'warn if both num-workers and pools are present' do
+    it 'warn if both processes and pools are present' do
       expect_any_instance_of(Delayed::Launcher::Daemonized).to receive(:launch)
       expect(STDERR).to receive(:puts)
-      Delayed::Command.new(%w[-d --num-workers=2 --pool=mailers:2]).launch
+      Delayed::Command.new(%w[-d --processes=2 --pool=mailers:2]).launch
     end
   end
 end

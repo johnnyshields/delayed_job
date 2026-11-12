@@ -67,7 +67,7 @@ module Delayed
 
         queues = options[:queues]
         queue_msg = " queues=#{queues.empty? ? '*' : queues.join(',')}" if queues
-        thread_msg = " threads=#{thread_count(options)}" if thread_count(options) > 1
+        thread_msg = " threads=#{threads(options)}" if threads(options) > 1
         logger.info "Worker #{worker_name} started - pid #{worker_pid}#{queue_msg}#{thread_msg}"
 
         workers[worker_pid] = [worker_name, options]
@@ -130,7 +130,7 @@ module Delayed
       # in this process). Mirrors the branches of #setup_workers.
       def forking?
         return true if pools
-        !process_identifier && worker_count > 1
+        !process_identifier && processes > 1
       end
     end
   end

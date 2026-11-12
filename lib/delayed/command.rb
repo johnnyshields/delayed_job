@@ -5,7 +5,7 @@ module Delayed
     def initialize(args)
       @options = {
         :quiet => true,
-        :worker_count => 1,
+        :processes => 1,
         :monitor => false
       }
 
@@ -67,15 +67,19 @@ module Delayed
         opt.on('--max-priority N', 'Maximum priority of jobs to run.') do |n|
           @options[:max_priority] = Integer(n) rescue nil
         end
-        opt.on('-n', '--num-workers=workers', 'Number of child workers to spawn') do |n|
-          @options[:worker_count] = Integer(n) rescue 1
+        opt.on('-n', '--processes=N', 'Number of worker processes to spawn') do |n|
+          @options[:processes] = Integer(n) rescue 1
         end
-        opt.on('-t', '--threads=threads', 'Number of threads per worker process') do |n|
-          @options[:thread_count] = Integer(n) rescue 0
+        opt.on('--num-workers=N', 'DEPRECATED: Use --processes') do |n|
+          STDERR.puts 'DEPRECATED: Use -n or --processes instead of --num-workers. This will be removed in the next major version.'
+          @options[:processes] = Integer(n) rescue 1
         end
-        opt.on('--number_of_workers=workers', 'Number of child workers to spawn') do |n|
-          STDERR.puts 'DEPRECATED: Use -n or --num-workers instead of --number_of_workers. This will be removed in the next major version.'
-          @options[:worker_count] = Integer(n) rescue 1
+        opt.on('-t', '--threads=N', 'Number of threads per worker process') do |n|
+          @options[:threads] = Integer(n) rescue 0
+        end
+        opt.on('--number_of_workers=N', 'DEPRECATED: Use --processes') do |n|
+          STDERR.puts 'DEPRECATED: Use -n or --processes instead of --number_of_workers. This will be removed in the next major version.'
+          @options[:processes] = Integer(n) rescue 1
         end
         opt.on('--pid-dir=DIR', 'Specifies an alternate directory in which to store the process ids.') do |dir|
           @options[:pid_dir] = dir
@@ -107,10 +111,10 @@ module Delayed
         opt.on('--queue=queue1[,queue2]', 'Specify the job queues to work. Comma separated.') do |queue|
           @options[:queues] = queue.split(',')
         end
-        opt.on('--pools=queue1[,queue2][:worker_count[:thread_count]][|...]', 'Specify queues, number of workers and threads per worker for a worker pool. Use pipe to delimit multiple pools.') do |pools|
+        opt.on('--pools=queue1[,queue2][:processes][|...]', 'Specify queues and number of processes for a worker pool. Use pipe to delimit multiple pools.') do |pools|
           pool_parser.add(pools)
         end
-        opt.on('--pool=queue1[,queue2][:worker_count[:thread_count]]', 'Specify queues, number of workers and threads per worker for a worker pool') do |pool|
+        opt.on('--pool=queue1[,queue2][:processes]', 'Specify queues and number of processes for a worker pool') do |pool|
           pool_parser.add(pool)
         end
         opt.on('-x', '--exit-on-complete', 'Exit when no more jobs are available to run. This will exit if all jobs are scheduled to run in the future.') do
@@ -124,21 +128,21 @@ module Delayed
     end
 
     def validate_options!
-      validate_worker_count!
+      validate_process_count!
       validate_thread_count!
       validate_priority!
       validate_identifier!
-      validate_workers_and_pools!
+      validate_processes_and_pools!
       validate_queues_and_pools!
     end
 
-    def validate_worker_count!
-      return unless @options[:worker_count] < 1
-      STDERR.puts 'WARNING: --num-workers must be 1 or greater. This will raise an ArgumentError in the next major version.'
+    def validate_process_count!
+      return unless @options[:processes] < 1
+      STDERR.puts 'WARNING: --processes must be 1 or greater. This will raise an ArgumentError in the next major version.'
     end
 
     def validate_thread_count!
-      return unless @options[:thread_count] && @options[:thread_count] < 1
+      return unless @options[:threads] && @options[:threads] < 1
       raise ArgumentError, '--threads must be 1 or greater'
     end
 
@@ -148,13 +152,13 @@ module Delayed
     end
 
     def validate_identifier!
-      return unless @options[:identifier] && @options[:worker_count] > 1
-      raise ArgumentError, 'Cannot specify both --num-workers and --identifier'
+      return unless @options[:identifier] && @options[:processes] > 1
+      raise ArgumentError, 'Cannot specify both --processes and --identifier'
     end
 
-    def validate_workers_and_pools!
-      return unless @options[:worker_count] > 1 && @options[:pools]
-      STDERR.puts 'WARNING: Cannot specify both --num-workers and --pool. This will raise an ArgumentError in the next major version.'
+    def validate_processes_and_pools!
+      return unless @options[:processes] > 1 && @options[:pools]
+      STDERR.puts 'WARNING: Cannot specify both --processes and --pool. This will raise an ArgumentError in the next major version.'
     end
 
     def validate_queues_and_pools!

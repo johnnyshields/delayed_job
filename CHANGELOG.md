@@ -1,13 +1,14 @@
 Unreleased
 ==========
-* Multi-threaded workers: run several jobs concurrently in each worker process with `-t`/`--threads=N` (or `NUM_THREADS`), and per pool with `--pool=queues:processes:threads`. A per-process dispatcher reserves jobs only for idle threads via the new `Delayed::Job.reserve_batch` backend hook. Works with both forking and daemon modes.
+* Multi-threaded workers: run several jobs concurrently in each worker process with `-t`/`--threads=N` (or `NUM_THREADS`); every process, including pool processes, runs that many threads. A per-process dispatcher reserves jobs only for idle threads via the new `Delayed::Job.reserve_batch` backend hook. Works with both forking and daemon modes.
 * Every worker process now runs a `Delayed::Poller`, which owns the poll loop, signal handling and threads; `Delayed::Worker` only runs jobs (`Worker#start` runs itself through a single-threaded Poller; `Worker#work_off` is unchanged).
 * BREAKING (plugins): the `:loop` lifecycle callback now yields the `Delayed::Poller` instead of a `Delayed::Worker`, and wraps each poll rather than each batch of up to 100 jobs.
 * Under Rails, each job runs inside the Rails reloader/executor; code is reloaded before a job when it has changed (instead of after each 100 jobs).
+* The number of worker processes is now set with `-n`/`--processes=N` (rake: `NUM_PROCESSES`); `--num-workers` and `--number_of_workers` still work but are deprecated (with a warning pointing to `--processes`), and `NUM_WORKERS` remains an alias. Launchers take `:processes` and `:threads` options (`:worker_count` is accepted as an alias of `:processes`, and `Launcher#worker_count` aliases `#processes`).
 * Workers wake up immediately from their idle sleep when stopped.
 * Fix `Worker#work_off` stopping early after a job failed to deserialize; such a job now counts as failed.
 * Before forking worker processes (`--fork` and daemon modes), the parent eager loads the Rails application (rake tasks don't by default) and runs `Process.warmup` (Ruby >= 3.3) or `GC.start` + `GC.compact`, so more memory is shared copy-on-write with the workers.
-* Fix `--fork` with `--pool`/`POOLS` and the default worker count: the parent now calls `Worker.before_fork` (children previously crashed in `after_fork`) and supervises the forked workers instead of exiting immediately. `--identifier` with `-n > 1` no longer enters the supervision loop for a worker it never forked.
+* Fix `--fork` with `--pool`/`POOLS` and the default process count: the parent now calls `Worker.before_fork` (children previously crashed in `after_fork`) and supervises the forked workers instead of exiting immediately. `--identifier` with `-n > 1` no longer enters the supervision loop for a worker it never forked.
 
 4.1.10 - 2022-01-17
 ===================

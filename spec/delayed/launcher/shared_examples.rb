@@ -160,31 +160,32 @@ shared_examples_for 'launcher shared examples' do
       it { verify_worker_processes }
     end
 
-    context ':pools arg with thread counts' do
-      let(:options) { {:thread_count => 2, :pools => [[['mailers'], 1, 5], [['misc'], 2]]} }
+    context ':threads and :processes args' do
+      let(:options) { {:threads => 4, :processes => 2} }
       let(:exp) do
         [
-          ['delayed_job.0', {:thread_count => 5, :pid_dir => './tmp/pids', :log_dir => './log', :queues => ['mailers']}],
-          ['delayed_job.1', {:thread_count => 2, :pid_dir => './tmp/pids', :log_dir => './log', :queues => ['misc']}],
-          ['delayed_job.2', {:thread_count => 2, :pid_dir => './tmp/pids', :log_dir => './log', :queues => ['misc']}]
+          ['delayed_job.0', {:threads => 4, :pid_dir => './tmp/pids', :log_dir => './log'}],
+          ['delayed_job.1', {:threads => 4, :pid_dir => './tmp/pids', :log_dir => './log'}]
         ]
       end
       it { verify_worker_processes }
     end
 
-    context ':thread_count and :worker_count args' do
-      let(:options) { {:thread_count => 4, :worker_count => 2} }
+    context ':worker_count alias of :processes' do
+      let(:options) { {:worker_count => 2} }
       let(:exp) do
         [
-          ['delayed_job.0', {:thread_count => 4, :pid_dir => './tmp/pids', :log_dir => './log'}],
-          ['delayed_job.1', {:thread_count => 4, :pid_dir => './tmp/pids', :log_dir => './log'}]
+          ['delayed_job.0', {:pid_dir => './tmp/pids', :log_dir => './log'}],
+          ['delayed_job.1', {:pid_dir => './tmp/pids', :log_dir => './log'}]
         ]
       end
       it { verify_worker_processes }
+      it { expect(subject.processes).to eq 2 }
+      it { expect(subject.worker_count).to eq 2 }
     end
 
-    context ':queues and :worker_count args' do
-      let(:options) { {:queues => %w[mailers misc], :worker_count => 4} }
+    context ':queues and :processes args' do
+      let(:options) { {:queues => %w[mailers misc], :processes => 4} }
       let(:exp) do
         [
           ['delayed_job.0', {:pid_dir => './tmp/pids', :log_dir => './log', :queues =>  %w[mailers misc]}],
@@ -197,7 +198,7 @@ shared_examples_for 'launcher shared examples' do
     end
 
     context ':pid_dir and :log_dir args' do
-      let(:options) { {:pid_dir => './foo/bar', :log_dir => './baz/qux', :worker_count => 2} }
+      let(:options) { {:pid_dir => './foo/bar', :log_dir => './baz/qux', :processes => 2} }
       let(:exp) do
         [
           ['delayed_job.0', {:pid_dir => './foo/bar', :log_dir => './baz/qux'}],
@@ -208,7 +209,7 @@ shared_examples_for 'launcher shared examples' do
     end
 
     context ':identifier and other args' do
-      let(:options) { {:monitor => true, :prefix => 'my_prefix', :identifier => 'my_identifier', :worker_count => 2, :args => {:foo => 'bar', :baz => 'qux'}} }
+      let(:options) { {:monitor => true, :prefix => 'my_prefix', :identifier => 'my_identifier', :processes => 2, :args => {:foo => 'bar', :baz => 'qux'}} }
       let(:exp) do
         [['delayed_job.my_identifier', {:pid_dir => './tmp/pids', :log_dir => './log'}]]
       end

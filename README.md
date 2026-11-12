@@ -228,8 +228,9 @@ Then run the `start` command:
 # Run a single worker as a background process
 RAILS_ENV=production script/delayed_job start
 
-# Run 4 workers in separate background child processes
+# Run 4 worker processes (-n is short for --processes)
 RAILS_ENV=production script/delayed_job -n4 start
+RAILS_ENV=production script/delayed_job --processes=4 start
 ```
 
 Each worker will check the database at least every 5 seconds.
@@ -260,10 +261,10 @@ You may also send `SIGTERM` to stop Delayed Job.
 # Set the --queues option to work from a particular queue
 RAILS_ENV=production script/delayed_job --queues=mailers,tasks start
 
-# Use the --pool option to specify a worker pool. You can use this option multiple
-# times to start different numbers of workers for different queues.
-# The following command will start 1 worker for the tracking queue,
-# 2 workers for the mailers and tasks queues, and 2 workers for any jobs:
+# Use the --pool option (queues:processes) to specify a worker pool. You can use
+# this option multiple times to start different numbers of processes for different queues.
+# The following command will start 1 process for the tracking queue,
+# 2 processes for the mailers and tasks queues, and 2 processes for any jobs:
 RAILS_ENV=production script/delayed_job --pool=tracking --pool=mailers,tasks:2 --pool=*:2 start
 ```
 
@@ -276,11 +277,11 @@ threads per process; total concurrency is processes × threads.
 
 ```
 # 2 worker processes, each running 5 jobs concurrently (10 jobs at a time)
-RAILS_ENV=production script/delayed_job --fork -n2 --threads=5 start
+RAILS_ENV=production script/delayed_job --fork --processes=2 --threads=5 start
 
-# Pools accept an optional thread count: queues:processes:threads.
-# 1 process with 10 threads for mailers, 2 single-threaded processes for any jobs:
-RAILS_ENV=production script/delayed_job --fork --pool=mailers:1:10 --pool=*:2 start
+# --threads applies to every process, including pool processes:
+# 3 processes (1 for mailers, 2 for any jobs), each with 4 threads
+RAILS_ENV=production script/delayed_job --fork --pool=mailers:1 --pool=*:2 --threads=4 start
 ```
 
 Every worker process, single- or multi-threaded, runs one `Delayed::Poller`.
@@ -298,8 +299,8 @@ When using threads:
 * Your job code (and any plugins) must be thread-safe.
 * The database connection pool must hold at least one connection per thread
   plus one (`pool` in `config/database.yml`). A warning is logged if it is too small.
-* All threads of a process work the same queues; use pools to give queues
-  different thread counts.
+* All threads of a process work the same queues, and every process runs the
+  same number of threads.
 * Under Rails, each job runs inside the Rails reloader, so code reloading in
   development stays safe.
 * On `SIGTERM`/`SIGINT`, running jobs finish before the process exits, as with
@@ -357,19 +358,17 @@ Set the `QUEUES` or `POOLS` environment variable to work specific queues.
 rake jobs:work
 
 # Run 4 worker processes and exit when all jobs are finished
-NUM_WORKERS=4 rake jobs:workoff
+# (NUM_WORKERS is an alias of NUM_PROCESSES)
+NUM_PROCESSES=4 rake jobs:workoff
 
 # Work all jobs from the "mailers" and "tasks" queues, then exit
-NUM_WORKERS=4 QUEUES=mailers,tasks rake jobs:workoff
+NUM_PROCESSES=4 QUEUES=mailers,tasks rake jobs:workoff
 
 # You may also specify POOLS pipe-delimited
 POOLS=mailers,tasks:2|tweets:1|*:2 rake jobs:workoff
 
 # Run 2 worker processes with 5 threads each
-NUM_WORKERS=2 NUM_THREADS=5 rake jobs:work
-
-# Pools accept a thread count too: queues:processes:threads
-POOLS=mailers:1:10|*:2 rake jobs:work
+NUM_PROCESSES=2 NUM_THREADS=5 rake jobs:work
 ```
 
 Rake uses Forking Mode (see above) under-the-hood.

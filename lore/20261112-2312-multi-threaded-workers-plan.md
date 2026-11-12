@@ -99,3 +99,7 @@ Add: `lib/delayed/threaded_worker.rb`, `spec/threaded_worker_spec.rb`, lore file
 
 ## Follow-up: reservation in one place
 `Delayed::ReservationGuard` removed. All job reservation (and the 10-consecutive-failures → `FatalBackendError` guard) now lives in `Poller#reserve`. `Worker#work_off` delegates to `Poller#work_off(num, worker)` (inline, calling thread, no `:loop` callbacks), reusing the worker's poller so the failure count persists across calls. `Worker#reserve_job`/`#reserve_and_run_one_job` removed. Also fixed: `Worker#run` returned `failed(job)`'s value on `DeserializationError` (usually nil), which the old `work_off` treated as "queue empty" and stopped; it now returns false.
+
+## Follow-up: processes naming; no per-pool threads
+- Per-pool thread counts (`queues:processes:threads`) removed: `--threads`/`NUM_THREADS` applies to every process, including pool processes. `PoolParser` is back to `[queues, process_count]`; a third field is ignored, as before.
+- Process count renamed: CLI `-n`/`--processes=N` (`--num-workers` and `--number_of_workers` deprecated, both warn pointing to `--processes`), rake `NUM_PROCESSES` (`NUM_WORKERS` alias; `NUM_PROCESSES` wins if both are set), launcher/options keys `:processes` and `:threads` (`:worker_count` accepted by `Launcher::Base`; `#worker_count` aliases `#processes`; the never-released `:process_count`/`:thread_count` keys have no alias). Validation messages say `--processes`/`NUM_PROCESSES`.

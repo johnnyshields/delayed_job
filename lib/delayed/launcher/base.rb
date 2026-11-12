@@ -1,14 +1,22 @@
 module Delayed
   module Launcher
     class Base
-      attr_accessor :worker_count,
+      attr_accessor :processes,
                     :pools,
                     :process_prefix,
                     :process_identifier
 
+      # Deprecated alias of #processes.
+      alias worker_count processes
+      alias worker_count= processes=
+
+      # options[:processes] is the number of worker processes to run;
+      # options[:worker_count] is accepted as an alias.
       def initialize(options)
         @worker_index = 0
-        @worker_count = options.delete(:worker_count) || 1
+        processes = options.delete(:processes)
+        worker_count = options.delete(:worker_count)
+        @processes = processes || worker_count || 1
         @pools = options.delete(:pools)
         @pools = nil if @pools == []
         @monitor = options.delete(:monitor)
@@ -66,7 +74,7 @@ module Delayed
           setup_pooled_workers
         elsif process_identifier
           setup_identified_worker
-        elsif worker_count > 1
+        elsif processes > 1
           setup_multiple_workers
         else
           setup_single_worker
@@ -74,15 +82,14 @@ module Delayed
       end
 
       def setup_pooled_workers
-        pools.each do |queues, pool_worker_count, pool_thread_count|
+        pools.each do |queues, pool_process_count|
           options = @options.merge(:queues => queues)
-          options[:thread_count] = pool_thread_count if pool_thread_count
-          pool_worker_count.times { add_worker(options) }
+          pool_process_count.times { add_worker(options) }
         end
       end
 
       def setup_multiple_workers
-        worker_count.times { add_worker(@options) }
+        processes.times { add_worker(@options) }
       end
 
       def setup_single_worker
@@ -112,8 +119,9 @@ module Delayed
         exit_with_error_status
       end
 
-      def thread_count(options)
-        (options[:thread_count] || 1).to_i
+      # Number of threads each worker process runs.
+      def threads(options)
+        (options[:threads] || 1).to_i
       end
 
       def set_process_name(name) # rubocop:disable AccessorMethodName

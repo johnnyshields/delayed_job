@@ -33,7 +33,7 @@ end
 
 describe Delayed::Poller do
   let(:thread_count) { 4 }
-  let(:poller) { described_class.new(:thread_count => thread_count, :sleep_delay => 0.1) }
+  let(:poller) { described_class.new(:threads => thread_count, :sleep_delay => 0.1) }
 
   before do
     Delayed::Job.delete_all
@@ -72,7 +72,7 @@ describe Delayed::Poller do
     end
 
     it 'rejects a thread count below 1' do
-      expect { described_class.new(:thread_count => 0) }.to raise_error(ArgumentError)
+      expect { described_class.new(:threads => 0) }.to raise_error(ArgumentError)
     end
   end
 

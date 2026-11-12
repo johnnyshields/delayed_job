@@ -31,12 +31,12 @@ module Delayed
     attr_reader :workers, :name_prefix
 
     # Options are those of Delayed::Worker, plus:
-    # * :thread_count - number of workers (threads) to run (default 1)
+    # * :threads - number of workers (threads) to run (default 1)
     # * :workers - run these workers instead of building new ones
     def initialize(options = {})
       @quiet = options.key?(:quiet) ? options[:quiet] : true
       @workers = options[:workers] || build_workers(options)
-      raise ArgumentError, 'thread_count must be 1 or greater' if @workers.empty?
+      raise ArgumentError, 'threads must be 1 or greater' if @workers.empty?
       @workers.each { |worker| worker.poller = self }
       @stopped = false
 
@@ -114,7 +114,7 @@ module Delayed
   private
 
     def build_workers(options)
-      count = Integer(options.fetch(:thread_count, 1))
+      count = Integer(options.fetch(:threads, 1))
       Array.new([count, 0].max) do |index|
         # Worker.new resets the global lifecycle, so all workers are built
         # here, before any thread starts.
