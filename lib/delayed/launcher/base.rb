@@ -46,13 +46,12 @@ module Delayed
       # reloading is enabled, since reloaded code is not shared anyway.
       def eager_load_application
         return unless defined?(::Rails.application) && ::Rails.application
-        config = ::Rails.application.config
-        return unless config.cache_classes
+        return unless ::Rails.application.config.cache_classes
         ::Rails.application.eager_load!
       end
 
       def warmup_heap
-        if Process.respond_to?(:warmup) # Ruby >= 3.3: GC, compaction, etc.
+        if Process.respond_to?(:warmup)
           Process.warmup
         else
           GC.start
