@@ -283,10 +283,15 @@ RAILS_ENV=production script/delayed_job --fork -n2 --threads=5 start
 RAILS_ENV=production script/delayed_job --fork --pool=mailers:1:10 --pool=*:2 start
 ```
 
-Within a process, a single dispatcher reserves only as many jobs as there are
-idle threads and hands one to each, so polling the database does not grow with
-the number of threads, and a job is never locked while it waits for a thread.
-Each thread locks jobs under its own worker name (e.g. `... pid:123 thread:2`).
+Every worker process, single- or multi-threaded, runs one `Delayed::Poller`.
+It reserves only as many jobs as there are idle threads and hands one to each,
+so polling the database does not grow with the number of threads, and a job is
+never locked while it waits for a thread. Each thread runs a `Delayed::Worker`
+that locks jobs under its own name (e.g. `... pid:123 thread:2`).
+
+Plugin callbacks: `:loop` wraps each poll and yields the `Delayed::Poller`;
+`:execute` wraps each worker thread's lifetime and yields its `Delayed::Worker`;
+`:perform`, `:error` and `:failure` yield the `Delayed::Worker` running the job.
 
 When using threads:
 
@@ -371,8 +376,8 @@ Rake uses Forking Mode (see above) under-the-hood.
 
 ### Development
 
-In `development` environment, Delayed Job will automatically reload
-your application code after each 100 jobs or when the queue finishes.
+In `development` environment, Delayed Job runs each job inside the Rails
+reloader, so your application code is reloaded before a job when it has changed.
 You should not need to restart Delayed Job each time you update your code.
 
 ## Advanced Topics

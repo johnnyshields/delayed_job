@@ -85,32 +85,26 @@ describe Delayed::Worker do
     end
   end
 
-  describe '#work_loop' do
-    after { Delayed::Worker.sleep_delay = Delayed::Worker::DEFAULT_SLEEP_DELAY }
-
-    it 'does not install signal traps' do
+  describe '#start' do
+    it 'runs the worker in a single-threaded Delayed::Poller' do
       worker = Delayed::Worker.new
-      worker.stop
-      expect(worker).not_to receive(:trap)
-      worker.work_loop
+      worker.name_prefix = 'dj.0 '
+      expect_any_instance_of(Delayed::Poller).to receive(:start) do |poller|
+        expect(poller.workers).to eq [worker]
+        expect(poller.name_prefix).to eq 'dj.0 '
+      end
+      worker.start
     end
 
-    it 'wakes up from the idle sleep promptly when stopped' do
+    it 'stops the poller when the worker is stopped' do
       Delayed::Worker.sleep_delay = 30
       worker = Delayed::Worker.new
-      thread = Thread.new { worker.work_loop }
+      allow_any_instance_of(Delayed::Poller).to receive(:trap_signals)
+      thread = Thread.new { worker.start }
       sleep 0.2
       worker.stop
       expect(Timeout.timeout(2) { thread.join }).to eq thread
-    end
-  end
-
-  describe '#start' do
-    it 'traps signals and runs the work loop' do
-      worker = Delayed::Worker.new
-      expect(worker).to receive(:trap_signals).ordered
-      expect(worker).to receive(:work_loop).ordered
-      worker.start
+      Delayed::Worker.sleep_delay = Delayed::Worker::DEFAULT_SLEEP_DELAY
     end
   end
 

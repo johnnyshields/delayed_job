@@ -5,7 +5,7 @@ module Delayed
     EVENTS = {
       :enqueue    => [:job],
       :execute    => [:worker],
-      :loop       => [:worker],
+      :loop       => [:poller],
       :perform    => [:worker, :job],
       :error      => [:worker, :job],
       :failure    => [:worker, :job],

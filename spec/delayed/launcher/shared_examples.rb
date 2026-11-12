@@ -14,7 +14,7 @@ shared_examples_for 'launcher shared examples' do
 
     before do
       allow(Delayed::Worker).to receive(:after_fork)
-      allow_any_instance_of(Delayed::Worker).to receive(:start)
+      allow_any_instance_of(Delayed::Poller).to receive(:start)
       allow(Logger).to receive(:new).and_return(logger)
       allow(Delayed::Worker).to receive(:logger=)
       allow(Delayed::Worker).to receive(:logger).and_return(nil, logger)
@@ -132,22 +132,6 @@ shared_examples_for 'launcher shared examples' do
           subject.send(:run_worker, 'delayed_job.0', {})
         end
       end
-    end
-  end
-
-  describe 'build_worker' do
-    it 'builds a Delayed::Worker by default' do
-      expect(subject.send(:build_worker, {}).class).to eq Delayed::Worker
-    end
-
-    it 'builds a Delayed::Worker for a single thread' do
-      expect(subject.send(:build_worker, :thread_count => 1).class).to eq Delayed::Worker
-    end
-
-    it 'builds a Delayed::ThreadedWorker for multiple threads' do
-      worker = subject.send(:build_worker, :thread_count => 3)
-      expect(worker).to be_a Delayed::ThreadedWorker
-      expect(worker.thread_count).to eq 3
     end
   end
 

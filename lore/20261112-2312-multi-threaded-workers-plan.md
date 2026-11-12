@@ -86,3 +86,13 @@ Add: `lib/delayed/threaded_worker.rb`, `spec/threaded_worker_spec.rb`, lore file
 - Two pre-existing spec failures remain, unrelated (Ruby 3.4+ backtrace quote style; `US/Eastern` tz missing from tzdata).
 - rubocop 0.48 (pinned) cannot run on Ruby 4 (Psych API); lint is verified by CI only.
 - Smoke (2 procs × 4 threads, sqlite, 40 × 0.5s jobs): 2.6s vs 20s serial, max concurrency 8, 0 duplicates; SIGTERM mid-run drained in-flight jobs, left no locks, all exit 0.
+
+## Follow-up: Poller refactor (replaces ThreadedWorker)
+`ThreadedWorker < Worker` was the wrong abstraction: it never ran jobs, had to override `lifecycle`/`setup_lifecycle`/`reload!` to undo inherited behaviour, and fired `:execute` N+1 times. Replaced with:
+- `Delayed::Poller` (`lib/delayed/poller.rb`): the one golden path for every worker process, single- or multi-threaded. Owns signal traps, poll loop, `exit_on_complete`, throughput logging, threads, shutdown, crash propagation. Even thread_count=1 runs the job on a worker thread.
+- `Delayed::Worker`: only runs jobs (`perform_job`, `run`, reschedule/fail). `Worker#start` = `Poller.new(:workers => [self]).start`; `Worker#stop` also stops its poller. `Worker#work_off` kept as the inline (no-thread) path for tests/console/`Job.work_off` — a legitimately separate role, not a duplicate loop.
+- Shared pieces extracted instead of duplicated: `Delayed::Logging#say`, `Delayed::ReservationGuard#guard_reservation` (10-failure FatalBackendError logic), `Worker.default_name`.
+- `:loop` callback (cleanest, not most compatible): yields the Poller and wraps each poll. Breaking for plugins expecting a Worker; documented in CHANGELOG. `Lifecycle::EVENTS[:loop]` arg renamed `:poller`.
+- Removed `Worker.reload_app?`/`#reload!`: the Rails reloader wraps each job instead.
+- Launchers construct `Delayed::Poller.new(options)` directly (no `build_worker` branching).
+- Verified: full suite (same 2 pre-existing env failures), poller/worker/launcher specs 10/10, smoke 2×4 threads (2.6s, concurrency 8, 0 dupes; SIGTERM drains cleanly) and 2×1 thread (10.1s, concurrency 2).

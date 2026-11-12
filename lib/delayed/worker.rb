@@ -9,7 +9,13 @@ require 'logger'
 require 'benchmark'
 
 module Delayed
+  # Runs jobs. In a worker process, Delayed::Poller runs each Worker on its
+  # own thread and hands it jobs. Worker#work_off runs jobs inline on the
+  # calling thread instead (e.g. in tests or a console).
   class Worker # rubocop:disable ClassLength
+    include Logging
+    include ReservationGuard
+
     DEFAULT_LOG_LEVEL        = 'info'.freeze
     DEFAULT_SLEEP_DELAY      = 5
     DEFAULT_MAX_ATTEMPTS     = 25
@@ -33,10 +39,13 @@ module Delayed
     # name_prefix is ignored if name is set directly
     attr_accessor :name_prefix
 
-    # Index of the thread this worker runs on within a Delayed::ThreadedWorker.
-    # When set, it is appended to the default name so that every thread locks
-    # jobs under a unique name.
+    # Index of the thread this worker runs on when a Delayed::Poller runs
+    # several workers. When set, it is appended to the default name so that
+    # every thread locks jobs under a unique name.
     attr_accessor :thread_index
+
+    # The Delayed::Poller running this worker, if any.
+    attr_accessor :poller
 
     def self.reset
       self.default_log_level = DEFAULT_LOG_LEVEL
@@ -58,7 +67,7 @@ module Delayed
     # (perhaps to inspect the reason for the failure), set this to false.
     self.destroy_failed_jobs = true
 
-    # By default, Signals INT and TERM set @exit, and the worker exits upon completion of the current job.
+    # By default, Signals INT and TERM stop the Delayed::Poller, which exits upon completion of the current jobs.
     # If you would prefer to raise a SignalException and exit immediately you can use this.
     # Be aware daemons uses TERM to stop and restart
     # false - No exceptions will be raised
@@ -121,8 +130,11 @@ module Delayed
       plugins.each { |klass| klass.new }
     end
 
-    def self.reload_app?
-      defined?(ActionDispatch::Reloader) && Rails.application.config.cache_classes == false
+    # Default worker/poller name: identifies the process.
+    def self.default_name(prefix = nil)
+      "#{prefix}host:#{Socket.gethostname} pid:#{Process.pid}"
+    rescue StandardError
+      "#{prefix}pid:#{Process.pid}"
     end
 
     def self.delay_job?(job)
@@ -136,8 +148,6 @@ module Delayed
     def initialize(options = {})
       @quiet = options.key?(:quiet) ? options[:quiet] : true
       @failed_reserve_count = 0
-      @wake_mutex = Mutex.new
-      @wake_cond = ConditionVariable.new
 
       [:min_priority, :max_priority, :sleep_delay, :read_ahead, :queues, :exit_on_complete].each do |option|
         self.class.send("#{option}=", options[option]) if options.key?(option)
@@ -154,42 +164,23 @@ module Delayed
     # it crashed before.
     def name
       return @name unless @name.nil?
-      thread_suffix = " thread:#{thread_index}" if thread_index
-      "#{@name_prefix}host:#{Socket.gethostname} pid:#{Process.pid}#{thread_suffix}" rescue "#{@name_prefix}pid:#{Process.pid}#{thread_suffix}"
+      "#{self.class.default_name(@name_prefix)}#{" thread:#{thread_index}" if thread_index}"
     end
 
     # Sets the name of the worker.
     # Setting the name to nil will reset the default worker name
     attr_writer :name
 
+    # Runs this worker in the foreground until stopped, via a Delayed::Poller,
+    # as every worker process does.
     def start
-      trap_signals
-      work_loop
+      Poller.new(:workers => [self], :quiet => @quiet).tap { |poller| poller.name_prefix = name_prefix }.start
     end
 
-    def trap_signals
-      trap('TERM') do
-        Thread.new { say 'Exiting...' }
-        stop
-        raise SignalException, 'TERM' if self.class.raise_signal_exceptions
-      end
-
-      trap('INT') do
-        Thread.new { say 'Exiting...' }
-        stop
-        raise SignalException, 'INT' if self.class.raise_signal_exceptions && self.class.raise_signal_exceptions != :term
-      end
-    end
-
-    # Runs the worker until it is stopped, without installing signal traps.
-    def work_loop
-      say 'Starting job worker'
-      self.class.lifecycle.run_callbacks(:execute, self) { run_loop }
-    end
-
+    # Stops this worker, and the poller running it (if any).
     def stop
       @exit = true
-      wake_up
+      poller.stop if poller
     end
 
     def stop?
@@ -267,17 +258,6 @@ module Delayed
       say text, level
     end
 
-    def say(text, level = default_log_level)
-      text = "[Worker(#{name})] #{text}"
-      puts text unless @quiet
-      return unless logger
-      # TODO: Deprecate use of Fixnum log levels
-      unless level.is_a?(String)
-        level = Logger::Severity.constants.detect { |i| Logger::Severity.const_get(i) == level }.to_s.downcase
-      end
-      logger.send(level, "#{Time.now.strftime('%FT%T%z')}: #{text}")
-    end
-
     def max_attempts(job)
       job.max_attempts || self.class.max_attempts
     end
@@ -293,48 +273,6 @@ module Delayed
     end
 
   protected
-
-    def run_loop # rubocop:disable CyclomaticComplexity, PerceivedComplexity
-      loop do
-        self.class.lifecycle.run_callbacks(:loop, self) do
-          @realtime = Benchmark.realtime do
-            @result = work_off
-          end
-        end
-
-        count = @result[0] + @result[1]
-
-        if count.zero?
-          if self.class.exit_on_complete
-            say 'No more jobs available. Exiting'
-            break
-          elsif !stop?
-            interruptible_sleep(self.class.sleep_delay)
-            reload!
-          end
-        else
-          say format("#{count} jobs processed at %.4f j/s, %d failed", count / @realtime, @result.last)
-        end
-
-        break if stop?
-      end
-    end
-
-    # Sleeps for the given number of seconds, returning early when the worker
-    # is stopped or #wake_up is called.
-    def interruptible_sleep(seconds)
-      @wake_mutex.synchronize do
-        @wake_cond.wait(@wake_mutex, seconds) unless stop?
-      end
-    end
-
-    def wake_up
-      @wake_mutex.synchronize { @wake_cond.broadcast }
-    rescue ThreadError
-      # A Mutex cannot be locked from within a signal trap, so deliver the
-      # wake-up from a separate thread instead.
-      Thread.new { wake_up }
-    end
 
     def say_queue(queue)
       " (queue=#{queue})" if queue
@@ -354,25 +292,7 @@ module Delayed
     end
 
     def reserve_job
-      job = Delayed::Job.reserve(self)
-      @failed_reserve_count = 0
-      job
-    rescue ::Exception => error # rubocop:disable RescueException
-      say "Error while reserving job: #{error}"
-      Delayed::Job.recover_from(error)
-      @failed_reserve_count += 1
-      raise FatalBackendError if @failed_reserve_count >= 10
-      nil
-    end
-
-    def reload!
-      return unless self.class.reload_app?
-      if defined?(ActiveSupport::Reloader)
-        Rails.application.reloader.reload!
-      else
-        ActionDispatch::Reloader.cleanup!
-        ActionDispatch::Reloader.prepare!
-      end
+      guard_reservation(nil) { Delayed::Job.reserve(self) }
     end
   end
 end

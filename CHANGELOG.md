@@ -1,6 +1,9 @@
 Unreleased
 ==========
 * Multi-threaded workers: run several jobs concurrently in each worker process with `-t`/`--threads=N` (or `NUM_THREADS`), and per pool with `--pool=queues:processes:threads`. A per-process dispatcher reserves jobs only for idle threads via the new `Delayed::Job.reserve_batch` backend hook. Works with both forking and daemon modes.
+* Every worker process now runs a `Delayed::Poller`, which owns the poll loop, signal handling and threads; `Delayed::Worker` only runs jobs (`Worker#start` runs itself through a single-threaded Poller; `Worker#work_off` is unchanged).
+* BREAKING (plugins): the `:loop` lifecycle callback now yields the `Delayed::Poller` instead of a `Delayed::Worker`, and wraps each poll rather than each batch of up to 100 jobs.
+* Under Rails, each job runs inside the Rails reloader/executor; code is reloaded before a job when it has changed (instead of after each 100 jobs).
 * Workers wake up immediately from their idle sleep when stopped.
 
 4.1.10 - 2022-01-17

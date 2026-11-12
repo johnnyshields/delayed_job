@@ -55,7 +55,7 @@ module Delayed
 
       def setup_single_worker
         set_process_name(get_name(process_identifier))
-        build_worker(@options).start
+        Delayed::Poller.new(@options).start
       end
 
       def add_worker(options)

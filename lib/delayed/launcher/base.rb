@@ -72,24 +72,14 @@ module Delayed
         set_process_name(worker_name)
         Delayed::Worker.after_fork
         setup_logger
-        worker = build_worker(options)
-        worker.name_prefix = "#{worker_name} "
-        worker.start
+        poller = Delayed::Poller.new(options)
+        poller.name_prefix = "#{worker_name} "
+        poller.start
       rescue => e
         STDERR.puts e.message
         STDERR.puts e.backtrace
         logger.fatal(e)
         exit_with_error_status
-      end
-
-      # Builds a Delayed::ThreadedWorker when more than one thread per process
-      # is requested (options[:thread_count]), otherwise a Delayed::Worker.
-      def build_worker(options)
-        if thread_count(options) > 1
-          Delayed::ThreadedWorker.new(options)
-        else
-          Delayed::Worker.new(options)
-        end
       end
 
       def thread_count(options)
