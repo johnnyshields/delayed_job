@@ -293,30 +293,6 @@ describe 'Lock heartbeats' do
     end
 
     describe 'jobs running past their max_run_time' do
-      # Ignores its timeout (as a job blocked in native code would) and runs
-      # for `seconds`.
-      class StuckJob
-        attr_accessor :seconds, :limit
-
-        def initialize(seconds, limit)
-          self.seconds = seconds
-          self.limit = limit
-        end
-
-        def max_run_time
-          limit
-        end
-
-        def perform
-          deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + seconds
-          begin
-            sleep 0.01 while Process.clock_gettime(Process::CLOCK_MONOTONIC) < deadline
-          rescue Exception # rubocop:disable RescueException
-            retry
-          end
-        end
-      end
-
       let(:worker) { dispatcher.workers.first }
       let(:other) { dispatcher.workers.last }
 

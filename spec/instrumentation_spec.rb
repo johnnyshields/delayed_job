@@ -1,21 +1,5 @@
 require 'helper'
 
-# Blocks until released, so a dispatcher can be stopped while it runs.
-class BlockingJob
-  cattr_accessor :started, :release
-
-  def self.reset
-    self.started = Queue.new
-    self.release = false
-  end
-  reset
-
-  def perform
-    self.class.started << true
-    sleep 0.01 until self.class.release
-  end
-end
-
 describe 'Instrumentation' do
   let(:events) { [] }
   let(:log) { StringIO.new }

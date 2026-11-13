@@ -140,3 +140,101 @@ class ConcurrencyJob
     self.class.mutex.synchronize { self.class.running -= 1 }
   end
 end
+
+# Blocks until released, so a dispatcher can be stopped while it runs.
+class BlockingJob
+  cattr_accessor :started, :release
+
+  def self.reset
+    self.started = Queue.new
+    self.release = false
+  end
+  reset
+
+  def perform
+    self.class.started << true
+    sleep 0.01 until self.class.release
+  end
+end
+
+# A job that runs until told to finish, recording what happened to it.
+class GateJob
+  cattr_accessor :started, :finished, :interrupted, :release
+  def self.reset
+    self.started = Queue.new
+    self.finished = []
+    self.interrupted = []
+    self.release = false
+  end
+  reset
+
+  attr_accessor :key, :stubborn
+
+  def initialize(key, stubborn = false)
+    self.key = key
+    self.stubborn = stubborn
+  end
+
+  def perform
+    self.class.started << key
+    if stubborn
+      # Ignores interrupts, as a job that rescues Exception would.
+      loop do
+        begin
+          sleep 0.01 until self.class.release
+          break
+        rescue Exception # rubocop:disable RescueException
+          next
+        end
+      end
+    else
+      begin
+        sleep 0.01 until self.class.release
+      rescue StandardError
+        raise 'a StandardError rescue must not catch the interrupt'
+      rescue Exception # rubocop:disable RescueException
+        self.class.interrupted << key
+        raise
+      end
+    end
+    self.class.finished << key
+  end
+end
+
+# Runs for 0.2s, recording whether it finished or was interrupted.
+class NapJob
+  cattr_accessor :outcomes
+  self.outcomes = Queue.new
+
+  def perform
+    sleep 0.2
+    self.class.outcomes << :finished
+  rescue Exception # rubocop:disable RescueException
+    self.class.outcomes << :interrupted
+    raise
+  end
+end
+
+# Ignores its timeout (as a job blocked in native code would) and runs
+# for `seconds`.
+class StuckJob
+  attr_accessor :seconds, :limit
+
+  def initialize(seconds, limit)
+    self.seconds = seconds
+    self.limit = limit
+  end
+
+  def max_run_time
+    limit
+  end
+
+  def perform
+    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + seconds
+    begin
+      sleep 0.01 while Process.clock_gettime(Process::CLOCK_MONOTONIC) < deadline
+    rescue Exception # rubocop:disable RescueException
+      retry
+    end
+  end
+end

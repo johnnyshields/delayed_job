@@ -13,32 +13,16 @@ describe 'The process title of a worker process' do
 
   before do
     Delayed::Job.delete_all
-    BlockingProclineJob.reset
+    BlockingJob.reset
     allow(dispatcher).to receive(:say)
     dispatcher.workers.each { |w| allow(w).to receive(:say) }
     allow(Delayed::Worker).to receive(:logger).and_return(Logger.new(nil))
   end
 
   after do
-    BlockingProclineJob.release = true
+    BlockingJob.release = true
     Delayed::Worker.reset
     Delayed::Worker.exit_on_complete = false
-  end
-
-  # Blocks until released.
-  class BlockingProclineJob
-    cattr_accessor :started, :release
-
-    def self.reset
-      self.started = Queue.new
-      self.release = false
-    end
-    reset
-
-    def perform
-      self.class.started << true
-      sleep 0.01 until self.class.release
-    end
   end
 
   def run_in_thread
@@ -72,23 +56,23 @@ describe 'The process title of a worker process' do
     thread = run_in_thread
     wait_for_title('delayed_job.0: 0/3 busy, queues=*')
 
-    2.times { Delayed::Job.enqueue(BlockingProclineJob.new) }
-    Timeout.timeout(5) { 2.times { BlockingProclineJob.started.pop } }
+    2.times { Delayed::Job.enqueue(BlockingJob.new) }
+    Timeout.timeout(5) { 2.times { BlockingJob.started.pop } }
     wait_for_title('delayed_job.0: 2/3 busy, queues=*')
 
-    BlockingProclineJob.release = true
+    BlockingJob.release = true
     wait_for_title('delayed_job.0: 0/3 busy, queues=*')
     dispatcher.stop
     Timeout.timeout(5) { thread.join }
   end
 
   it 'shows that it is stopping while running jobs finish' do
-    Delayed::Job.enqueue(BlockingProclineJob.new)
+    Delayed::Job.enqueue(BlockingJob.new)
     thread = run_in_thread
-    Timeout.timeout(5) { BlockingProclineJob.started.pop }
+    Timeout.timeout(5) { BlockingJob.started.pop }
     dispatcher.stop
     wait_for_title('delayed_job.0: stopping, 1/3 busy, queues=*')
-    BlockingProclineJob.release = true
+    BlockingJob.release = true
     Timeout.timeout(5) { thread.join }
     expect($0).to eq 'delayed_job.0: stopping, 0/3 busy, queues=*'
   end

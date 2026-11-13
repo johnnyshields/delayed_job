@@ -1,49 +1,5 @@
 require 'helper'
 
-# A job that runs until told to finish, recording what happened to it.
-class GateJob
-  cattr_accessor :started, :finished, :interrupted, :release
-  def self.reset
-    self.started = Queue.new
-    self.finished = []
-    self.interrupted = []
-    self.release = false
-  end
-  reset
-
-  attr_accessor :key, :stubborn
-
-  def initialize(key, stubborn = false)
-    self.key = key
-    self.stubborn = stubborn
-  end
-
-  def perform
-    self.class.started << key
-    if stubborn
-      # Ignores interrupts, as a job that rescues Exception would.
-      loop do
-        begin
-          sleep 0.01 until self.class.release
-          break
-        rescue Exception # rubocop:disable RescueException
-          next
-        end
-      end
-    else
-      begin
-        sleep 0.01 until self.class.release
-      rescue StandardError
-        raise 'a StandardError rescue must not catch the interrupt'
-      rescue Exception # rubocop:disable RescueException
-        self.class.interrupted << key
-        raise
-      end
-    end
-    self.class.finished << key
-  end
-end
-
 describe 'Stopping a worker' do
   let(:dispatcher) { Delayed::Dispatcher.new(:threads => 2, :sleep_delay => 0.05) }
   let(:log) { [] }
@@ -211,20 +167,6 @@ describe 'Stopping a worker' do
 
   describe 'interrupts arriving outside of a job' do
     let(:reported) { [] }
-
-    # Runs for 0.2s, recording whether it finished or was interrupted.
-    class NapJob
-      cattr_accessor :outcomes
-      self.outcomes = Queue.new
-
-      def perform
-        sleep 0.2
-        self.class.outcomes << :finished
-      rescue Exception # rubocop:disable RescueException
-        self.class.outcomes << :interrupted
-        raise
-      end
-    end
 
     before do
       NapJob.outcomes = Queue.new
