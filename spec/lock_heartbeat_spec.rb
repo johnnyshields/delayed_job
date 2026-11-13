@@ -100,7 +100,15 @@ describe 'Lock heartbeats' do
     end
 
     def run_dispatcher
-      Thread.new { dispatcher.run }.tap { |t| t.report_on_exception = false }
+      @dispatcher_thread = Thread.new { dispatcher.run }.tap { |t| t.report_on_exception = false }
+    end
+
+    # A failed example must not leave its dispatcher polling in later ones.
+    after do
+      next unless @dispatcher_thread && @dispatcher_thread.alive?
+      dispatcher.quit
+      @dispatcher_thread.join(10) rescue nil # rubocop:disable RescueModifier
+      @dispatcher_thread.kill
     end
 
     it 'refreshes the locks of running jobs while they run' do

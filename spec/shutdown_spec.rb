@@ -796,6 +796,9 @@ describe Delayed::Launcher::Forking, 'stopping worker processes' do
       expect(launcher).to have_received(:kill).once
     end
 
+    # Kill timers that outlive their example would fire, for real, in a later one.
+    after { Thread.list.select { |t| t.backtrace.to_a.any? { |l| l.include?('schedule_kill') } }.each(&:kill) }
+
     it 'schedules an earlier kill' do
       allow(launcher).to receive(:kill)
       launcher.send(:schedule_kill, 30)
