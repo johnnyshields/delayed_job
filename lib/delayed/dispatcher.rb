@@ -242,20 +242,25 @@ module Delayed
         # again at once; only a poll that reserves nothing waits.
         next if !reserved.empty? && reserved.size < idle.size
 
-        # Wait for a worker to free up. If the queue ran dry, poll again
-        # after sleep_delay so that newly enqueued jobs get picked up.
-        wait_for_event(seen, poll_wait(!idle.empty? && reserved.empty?))
+        wait_before_next_poll(seen, !idle.empty? && reserved.empty?)
       end
       raise_thread_error
     end
 
-    # How long to wait before the next poll: until a worker frees up, or
-    # sleep_delay when the queue ran dry - and no longer than
-    # SUPERVISOR_CHECK_INTERVAL when supervised.
-    def poll_wait(queue_dry)
-      timeout = queue_dry ? Worker.sleep_delay : nil
-      return timeout unless supervisor_pid
-      [timeout, SUPERVISOR_CHECK_INTERVAL].compact.min
+    # Waits until a worker frees up (or dies) or the dispatcher is stopped,
+    # and, if the queue ran dry, at most sleep_delay seconds so that newly
+    # enqueued jobs get picked up. A supervised dispatcher also checks on its
+    # parent every SUPERVISOR_CHECK_INTERVAL seconds meanwhile - without
+    # polling for jobs, so the database is still polled every sleep_delay.
+    def wait_before_next_poll(seen, queue_dry)
+      deadline = monotonic_now + Worker.sleep_delay if queue_dry
+      loop do
+        remaining = deadline && deadline - monotonic_now
+        return if remaining && remaining <= 0
+        timeout = [remaining, (SUPERVISOR_CHECK_INTERVAL if supervisor_pid)].compact.min
+        return if wait_for_event(seen, timeout)
+        return if supervisor_gone?
+      end
     end
 
     # Whether the parent process went away (this process was re-parented).
@@ -503,10 +508,12 @@ module Delayed
 
     # Waits until a worker finishes a job (or dies), the dispatcher is stopped, or
     # the timeout (if any) expires. `seen` is the event count observed before
-    # deciding to wait, so no event can be missed.
+    # deciding to wait, so no event can be missed. Returns whether an event
+    # happened or the dispatcher was stopped (false if the timeout expired).
     def wait_for_event(seen, timeout)
       synchronize do
         @cond.wait(@mutex, timeout) if @events == seen && !stop?
+        @events != seen || stop?
       end
     end
 

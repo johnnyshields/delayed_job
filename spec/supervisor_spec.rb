@@ -42,23 +42,149 @@ describe 'Worker processes whose parent goes away' do
       end
     end
 
-    describe '#poll_wait' do
-      before { Delayed::Worker.sleep_delay = 5 }
-      after { Delayed::Worker.reset }
-
-      it 'waits for a worker to free up, or sleep_delay when the queue ran dry' do
+    describe '#wait_for_event' do
+      it 'returns false when the timeout expires without an event' do
         d = dispatcher
-        expect(d.send(:poll_wait, false)).to be_nil
-        expect(d.send(:poll_wait, true)).to eq 5
+        _, seen = d.send(:snapshot)
+        expect(d.send(:wait_for_event, seen, 0.01)).to be false
       end
 
-      it 'checks on the supervisor at least every SUPERVISOR_CHECK_INTERVAL seconds' do
+      it 'returns true at once when an event happened since the snapshot' do
+        d = dispatcher
+        _, seen = d.send(:snapshot)
+        d.send(:synchronize) { d.send(:signal_event) }
+        expect(d.send(:wait_for_event, seen, 5)).to be true
+      end
+
+      it 'returns true at once when stopped' do
+        d = dispatcher
+        _, seen = d.send(:snapshot)
+        d.stop
+        expect(d.send(:wait_for_event, seen, 5)).to be true
+      end
+
+      it 'returns true when woken up by an event' do
+        d = dispatcher
+        _, seen = d.send(:snapshot)
+        Thread.new { sleep 0.05; d.send(:synchronize) { d.send(:signal_event) } }
+        expect(Timeout.timeout(5) { d.send(:wait_for_event, seen, nil) }).to be true
+      end
+    end
+
+    describe '#wait_before_next_poll' do
+      after { Delayed::Worker.reset }
+
+      def timed
+        started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        yield
+        Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+      end
+
+      def waits_of(d)
+        timeouts = []
+        allow(d).to receive(:wait_for_event).and_wrap_original do |m, seen, timeout|
+          timeouts << timeout
+          m.call(seen, timeout)
+        end
+        timeouts
+      end
+
+      it 'waits sleep_delay when the queue ran dry, in one wait when not supervised' do
+        Delayed::Worker.sleep_delay = 0.2
+        d = dispatcher
+        timeouts = waits_of(d)
+        _, seen = d.send(:snapshot)
+        expect(timed { d.send(:wait_before_next_poll, seen, true) }).to be_within(0.15).of(0.2)
+        expect(timeouts.size).to eq 1
+        expect(timeouts.first).to be_within(0.01).of(0.2)
+      end
+
+      it 'waits for an event (no timeout) while workers are busy, when not supervised' do
+        d = dispatcher
+        timeouts = waits_of(d)
+        _, seen = d.send(:snapshot)
+        Thread.new { sleep 0.1; d.send(:synchronize) { d.send(:signal_event) } }
+        Timeout.timeout(5) { d.send(:wait_before_next_poll, seen, false) }
+        expect(timeouts).to eq [nil]
+      end
+
+      it 'checks on the supervisor every SUPERVISOR_CHECK_INTERVAL while the queue is dry, still waiting sleep_delay in all' do
+        stub_const('Delayed::Dispatcher::SUPERVISOR_CHECK_INTERVAL', 0.05)
+        Delayed::Worker.sleep_delay = 0.3
         d = dispatcher(:supervisor_pid => Process.ppid)
-        interval = described_class::SUPERVISOR_CHECK_INTERVAL
-        expect(d.send(:poll_wait, false)).to eq interval
-        expect(d.send(:poll_wait, true)).to eq interval
-        Delayed::Worker.sleep_delay = 0.1
-        expect(d.send(:poll_wait, true)).to eq 0.1
+        timeouts = waits_of(d)
+        allow(d).to receive(:supervisor_gone?).and_call_original
+        _, seen = d.send(:snapshot)
+        expect(timed { d.send(:wait_before_next_poll, seen, true) }).to be_within(0.15).of(0.3)
+        expect(timeouts.size).to be >= 5
+        expect(timeouts).to all(be <= 0.05)
+        expect(d).to have_received(:supervisor_gone?).at_least(4).times
+      end
+
+      it 'checks on the supervisor every SUPERVISOR_CHECK_INTERVAL while workers are busy' do
+        stub_const('Delayed::Dispatcher::SUPERVISOR_CHECK_INTERVAL', 0.05)
+        d = dispatcher(:supervisor_pid => Process.ppid)
+        timeouts = waits_of(d)
+        _, seen = d.send(:snapshot)
+        Thread.new { sleep 0.3; d.send(:synchronize) { d.send(:signal_event) } }
+        Timeout.timeout(5) { d.send(:wait_before_next_poll, seen, false) }
+        expect(timeouts.size).to be >= 3
+        expect(timeouts).to all(eq 0.05)
+      end
+
+      it 'stops waiting, and stops the dispatcher, as soon as the supervisor is gone' do
+        stub_const('Delayed::Dispatcher::SUPERVISOR_CHECK_INTERVAL', 0.05)
+        Delayed::Worker.sleep_delay = 30
+        d = dispatcher(:supervisor_pid => Process.ppid)
+        _, seen = d.send(:snapshot)
+        Thread.new { sleep 0.1; allow(Process).to receive(:ppid).and_return(1) }
+        expect(timed { Timeout.timeout(5) { d.send(:wait_before_next_poll, seen, true) } }).to be < 1
+        expect(d).to be_stop
+      end
+
+      it 'returns early when a worker frees up' do
+        Delayed::Worker.sleep_delay = 30
+        d = dispatcher(:supervisor_pid => Process.ppid)
+        _, seen = d.send(:snapshot)
+        Thread.new { sleep 0.1; d.send(:synchronize) { d.send(:signal_event) } }
+        expect(timed { Timeout.timeout(5) { d.send(:wait_before_next_poll, seen, true) } }).to be < 1
+      end
+
+      it 'returns early when stopped' do
+        Delayed::Worker.sleep_delay = 30
+        d = dispatcher(:supervisor_pid => Process.ppid)
+        _, seen = d.send(:snapshot)
+        Thread.new { sleep 0.1; d.stop }
+        expect(timed { Timeout.timeout(5) { d.send(:wait_before_next_poll, seen, true) } }).to be < 1
+      end
+    end
+
+    describe 'idle polling' do
+      before { Delayed::Job.delete_all }
+      after { Delayed::Worker.reset }
+
+      # Runs an idle dispatcher for `seconds` and returns how often it polled.
+      def polls_in(seconds, options)
+        stub_const('Delayed::Dispatcher::SUPERVISOR_CHECK_INTERVAL', 0.05)
+        polls = 0
+        allow(Delayed::Job).to receive(:reserve_batch).and_wrap_original { |m, *args| polls += 1; m.call(*args) }
+        d = dispatcher(options.merge(:threads => 2, :sleep_delay => 0.4))
+        thread = Thread.new { d.run }
+        sleep seconds
+        d.stop
+        Timeout.timeout(5) { thread.join }
+        polls
+      end
+
+      it 'polls every sleep_delay when supervised, not every SUPERVISOR_CHECK_INTERVAL' do
+        # At 0, 0.4 and 0.8s (8 polls per interval would be 20).
+        expect(polls_in(1.0, :supervisor_pid => Process.ppid)).to be_between(2, 4)
+      end
+
+      it 'polls as often when supervised as when not' do
+        supervised = polls_in(1.0, :supervisor_pid => Process.ppid)
+        unsupervised = polls_in(1.0, {})
+        expect((supervised - unsupervised).abs).to be <= 1
       end
     end
 
