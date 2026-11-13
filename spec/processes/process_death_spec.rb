@@ -10,8 +10,7 @@ describe 'A worker process dying while running jobs', :processes do
   let(:worker_settings) { {:sleep_delay => 0.1, :max_run_time => 3600} }
 
   # A dead worker process (SIGKILLed, or crashed with a failure status) is
-  # replaced, and its job recovered at once. With :shutdown_on_worker_kill,
-  # a SIGKILLed one makes the launcher shut down all workers instead.
+  # replaced, and its job recovered at once; the others carry on.
   context 'when it is SIGKILLed' do
     it 'recovers its job and replaces the worker, leaving the others running' do
       job = enqueue_process_job(ProcessJobs::KillJob.new('killed', 'KILL'))
@@ -26,7 +25,7 @@ describe 'A worker process dying while running jobs', :processes do
       output << rest
 
       expect(status).to be_success
-      expect(output).to match(/Worker delayed_job\.\d was SIGKILLed \(e\.g\. by the OOM killer\); replacing it/)
+      expect(output).to match(/Worker process delayed_job\.\d \(pid \d+\) was SIGKILLed \(e\.g\. by the OOM killer\); replacing it/)
       expect(output).not_to match(/SIGKILL detected/)
       expect(output).to match(/Recovered 1 job\(s\) left locked by worker delayed_job\.\d \(pid \d+\)/)
       job = reload_job(job)
@@ -35,20 +34,6 @@ describe 'A worker process dying while running jobs', :processes do
       expect(ProcessHelpers::Run.where(:key => 'after the kill').count).to eq 1
     end
 
-    it 'with :shutdown_on_worker_kill, recovers its job and shuts down all workers' do
-      job = enqueue_process_job(ProcessJobs::KillJob.new('killed', 'KILL'))
-      status, output = run_launcher(:processes => 2, :shutdown_on_worker_kill => true, :worker => worker_settings)
-      expect(output).to match(/SIGKILL detected\. delayed_job \(parent\) shutting down/)
-
-      expect(status).to be_success
-      expect(output).to match(/Recovered 1 job\(s\) left locked by worker delayed_job\.\d \(pid \d+\)/)
-      job = reload_job(job)
-      expect(job.locked_by).to be_nil
-      expect(job.locked_at).to be_nil
-      expect(job.attempts).to eq 1
-      expect(job.last_error).to match(/\AWorker process delayed_job\.\d \(pid \d+\) was killed by signal 9/)
-      expect(job.run_at).to be > job.created_at
-    end
   end
 
   context 'when it exits with a failure status' do

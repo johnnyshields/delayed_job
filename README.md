@@ -481,9 +481,8 @@ so a job that keeps killing its worker eventually stops. `:error` and
 for any failed attempt.
 
 The dead worker process is then replaced, as is one that exits for any other
-reason. Delayed Job used to shut down every worker when one was `SIGKILL`ed;
-to keep that, pass `--shutdown-on-worker-kill` (rake:
-`SHUTDOWN_ON_WORKER_KILL=1`, launcher option `:shutdown_on_worker_kill`).
+reason; the other worker processes carry on. (Delayed Job used to shut down
+every worker process when one was `SIGKILL`ed.)
 
 If the database can't be reached at that moment, the jobs' locks expire after
 `max_run_time` as before. Backends support this by implementing

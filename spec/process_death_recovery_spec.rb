@@ -221,7 +221,33 @@ describe 'Recovering the jobs of a dead worker process' do
         allow(launcher).to receive(:recover_jobs_of_worker)
         allow(launcher).to receive(:add_worker)
         launcher.send(:run_loop)
-        expect(logger).to have_received(:warn).with('Worker delayed_job.1 was SIGKILLed (e.g. by the OOM killer); replacing it')
+        expect(logger).to have_received(:warn).with('Worker process delayed_job.1 (pid 99) was SIGKILLed (e.g. by the OOM killer); replacing it')
+      end
+
+      it 'never shuts down the other worker processes, however often one is SIGKILLed' do
+        calls = 0
+        allow(Process).to receive(:wait2) do
+          raise Errno::ECHILD if (calls += 1) > 3
+          launcher.send(:workers)[99] = ['delayed_job.1', options]
+          [99, killed]
+        end
+        allow(launcher).to receive(:recover_jobs_of_worker)
+        expect(launcher).to receive(:add_worker).with(options).exactly(3).times
+        expect(launcher).not_to receive(:shutdown)
+        expect(launcher).not_to receive(:schedule_kill)
+        launcher.send(:run_loop)
+        expect(launcher.instance_variable_get(:@stopped)).to be false
+      end
+
+      it 'does not say a worker process it killed itself was SIGKILLed by someone else' do
+        reap(killed)
+        launcher.instance_variable_set(:@stopped, true)
+        launcher.instance_variable_set(:@killed, true)
+        logger = instance_double(Logger, :info => nil, :warn => nil, :error => nil)
+        allow(launcher).to receive(:logger).and_return(logger)
+        allow(launcher).to receive(:recover_jobs_of_worker)
+        launcher.send(:run_loop)
+        expect(logger).not_to have_received(:warn).with(/was SIGKILLed/)
       end
 
       it 'does not replace a SIGKILLed worker while stopping' do
@@ -233,29 +259,6 @@ describe 'Recovering the jobs of a dead worker process' do
         launcher.send(:run_loop)
       end
 
-      context 'with :shutdown_on_worker_kill' do
-        subject(:launcher) { described_class.new(:processes => 2, :shutdown_on_worker_kill => true) }
-
-        it 'recovers the jobs of a SIGKILLed worker before shutting down the others' do
-          reap(killed)
-          expect(launcher).to receive(:recover_jobs_of_worker).with('delayed_job.1', 99, options, killed).ordered
-          expect(launcher).to receive(:shutdown).with(described_class::KILL_TIMEOUT).ordered
-          expect(launcher).not_to receive(:add_worker)
-          launcher.send(:run_loop)
-        end
-
-        it 'still replaces a worker that crashed' do
-          reap(crashed)
-          allow(launcher).to receive(:recover_jobs_of_worker)
-          expect(launcher).to receive(:add_worker).with(options)
-          expect(launcher).not_to receive(:shutdown)
-          launcher.send(:run_loop)
-        end
-
-        it 'is not passed on to the worker processes' do
-          expect(launcher.instance_variable_get(:@options)).not_to have_key(:shutdown_on_worker_kill)
-        end
-      end
     end
 
     describe '#kill' do

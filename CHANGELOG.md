@@ -21,7 +21,7 @@ Unreleased
 * After a poll that reserved some jobs but fewer than its idle threads, a worker polls again at once if the backend says such a batch may leave jobs behind (new hook `Delayed::Job.partial_batch_may_leave_jobs?`, default false: e.g. a batch-reserving backend that lost candidates to other processes). Otherwise idle threads poll again after `sleep_delay`.
 * Workers wake up immediately from their idle sleep when stopped.
 * `Delayed::Worker.count_shutdown_interrupts` (`--count-shutdown-interrupts`, `COUNT_SHUTDOWN_INTERRUPTS=1`; off by default) counts a job interrupted by shutdown as a failed attempt instead of releasing it with its attempts unchanged.
-* BREAKING: a forked worker process that is SIGKILLed (e.g. by the OOM killer) is now replaced, with its jobs recovered, instead of making the parent shut down every worker. `--shutdown-on-worker-kill` (rake: `SHUTDOWN_ON_WORKER_KILL=1`) restores the old behaviour.
+* BREAKING: a forked worker process that is SIGKILLed (e.g. by the OOM killer) is now replaced, with its jobs recovered, instead of making the parent shut down every worker process.
 * `Delayed::Worker.reset` also resets `exit_on_complete`, `min_priority`, `max_priority` and `default_queue_name` to their defaults (nil).
 * `Delayed::Worker.on_thread_error` handlers may take no arguments, one (the error) or two (the error and its info).
 * `--sleep-delay` and `SLEEP_DELAY` accept fractional seconds (e.g. `0.5`) and reject negative or non-numeric values with an `ArgumentError` (`--sleep-delay giraffe` used to leave the delay unset, and `010` meant 8). A worker whose `sleep_delay` is unset uses the default of 5 seconds.

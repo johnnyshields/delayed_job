@@ -111,9 +111,6 @@ module Delayed
         opt.on('--count-shutdown-interrupts', 'Count a job interrupted by shutdown as a failed attempt (default: release it, attempts unchanged)') do
           @options[:count_shutdown_interrupts] = true
         end
-        opt.on('--shutdown-on-worker-kill', 'With --fork, shut down all workers when one is SIGKILLed (default: replace it)') do
-          @options[:shutdown_on_worker_kill] = true
-        end
         opt.on('--silence-polling', "Don't log the database queries of polling for jobs and refreshing their locks") do
           @options[:silence_polling] = true
         end
