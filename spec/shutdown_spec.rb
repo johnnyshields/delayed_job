@@ -342,8 +342,6 @@ describe 'Stopping a worker' do
       Timeout.timeout(5) { dispatcher.run }
       expect(SimpleJob.runs).to eq 3
       expect(Delayed::Job.all & jobs).to be_empty
-    ensure
-      Delayed::Worker.exit_on_complete = false
     end
 
     it 'still interrupts and releases running jobs on quit' do
@@ -660,8 +658,6 @@ describe 'Stopping a worker' do
       SimpleJob.runs = 0
       Timeout.timeout(5) { dispatcher.start }
       expect(Delayed::Job.all).not_to include(job)
-    ensure
-      Delayed::Worker.exit_on_complete = false
     end
   end
 

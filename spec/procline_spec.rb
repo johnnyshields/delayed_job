@@ -22,7 +22,6 @@ describe 'The process title of a worker process' do
   after do
     BlockingJob.release = true
     Delayed::Worker.reset
-    Delayed::Worker.exit_on_complete = false
   end
 
   def run_in_thread

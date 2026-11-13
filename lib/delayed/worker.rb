@@ -99,6 +99,10 @@ module Delayed
       self.lock_timeout      = DEFAULT_LOCK_TIMEOUT
       self.on_thread_error   = nil
       self.silence_polling   = false
+      self.exit_on_complete  = nil
+      self.min_priority      = nil
+      self.max_priority      = nil
+      self.default_queue_name = nil
       @lifecycle             = nil
     end
 

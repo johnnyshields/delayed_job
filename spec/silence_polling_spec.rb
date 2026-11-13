@@ -18,7 +18,6 @@ describe 'Delayed::Worker.silence_polling' do
   ensure
     ActiveRecord::Base.logger = previous
     Delayed::Worker.reset
-    Delayed::Worker.exit_on_complete = false
     Delayed::Worker.backend = :test
   end
 

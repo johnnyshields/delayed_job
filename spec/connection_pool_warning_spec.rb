@@ -92,8 +92,6 @@ describe 'The connection pool size warning' do
     Delayed::Worker.exit_on_complete = true
     Timeout.timeout(5) { d.run }
     expect(messages.select { |_, text| text.include?('connection pool') }.size).to eq 1
-  ensure
-    Delayed::Worker.exit_on_complete = false
   end
 
   context 'with a real Active Record pool' do

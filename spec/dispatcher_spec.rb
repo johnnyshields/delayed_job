@@ -10,10 +10,6 @@ describe Delayed::Dispatcher do
     Delayed::Worker.exit_on_complete = true
   end
 
-  after do
-    Delayed::Worker.exit_on_complete = false
-    Delayed::Worker.sleep_delay = Delayed::Worker::DEFAULT_SLEEP_DELAY
-  end
 
   def enqueue_jobs(count)
     count.times { |i| Delayed::Job.enqueue(ConcurrencyJob.new(i)) }

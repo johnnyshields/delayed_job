@@ -135,8 +135,6 @@ describe 'Lock heartbeats' do
       Timeout.timeout(5) { dispatcher.run }
       expect(job_class.where(:id => stale.id)).to be_empty
       expect(SimpleJob.runs).to eq 1
-    ensure
-      Delayed::Worker.exit_on_complete = false
     end
 
     it 'does not reserve jobs whose locks are fresh' do
@@ -144,8 +142,6 @@ describe 'Lock heartbeats' do
       Delayed::Worker.exit_on_complete = true
       Timeout.timeout(5) { dispatcher.run }
       expect(job_class.find(fresh.id).locked_by).to eq 'alive'
-    ensure
-      Delayed::Worker.exit_on_complete = false
     end
 
     it 'logs heartbeat errors and keeps beating' do
@@ -265,8 +261,6 @@ describe 'Lock heartbeats' do
       Delayed::Worker.exit_on_complete = true
       Timeout.timeout(5) { dispatcher.run }
       expect(dispatcher.instance_variable_get(:@heartbeat)).to be_nil
-    ensure
-      Delayed::Worker.exit_on_complete = false
     end
 
     it 'warns and runs without heartbeats when the backend does not support them' do
@@ -275,8 +269,6 @@ describe 'Lock heartbeats' do
       Delayed::Worker.exit_on_complete = true
       Timeout.timeout(5) { dispatcher.run }
       expect(messages.map(&:last).grep(/does not support them; locks expire after max_run_time/).size).to eq 1
-    ensure
-      Delayed::Worker.exit_on_complete = false
     end
 
     it 'refuses to run with invalid heartbeat settings' do
@@ -288,8 +280,6 @@ describe 'Lock heartbeats' do
       expect(job_class).to receive(:reserve_batch).with(anything, 0.5).at_least(:once).and_return([])
       Delayed::Worker.exit_on_complete = true
       Timeout.timeout(5) { dispatcher.run }
-    ensure
-      Delayed::Worker.exit_on_complete = false
     end
 
     describe 'jobs running past their max_run_time' do
@@ -482,8 +472,6 @@ describe 'Lock heartbeats' do
           Timeout.timeout(5) { dispatcher.run }
           expect(dispatcher.workers).to include(*seen.pop)
           expect(dispatcher.instance_variable_get(:@jobs_started)).to be_empty
-        ensure
-          Delayed::Worker.exit_on_complete = false
         end
 
         it 'tracks jobs run inline by #work_off' do

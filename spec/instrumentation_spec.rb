@@ -15,7 +15,6 @@ describe 'Instrumentation' do
 
   before do
     Delayed::Job.delete_all
-    Delayed::Worker.default_queue_name = nil # Set by other specs.
     SimpleJob.runs = 0
     BlockingJob.reset
     allow(Delayed::Worker).to receive(:logger).and_return(Logger.new(log))
@@ -24,7 +23,6 @@ describe 'Instrumentation' do
   after do
     BlockingJob.release = true
     Delayed::Worker.reset
-    Delayed::Worker.exit_on_complete = false # Not reset by Worker.reset.
   end
 
   def named(name)

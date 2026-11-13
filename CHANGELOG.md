@@ -20,6 +20,8 @@ Unreleased
 * Live process titles: each worker process shows its busy threads, queues and state, e.g. `delayed_job.0: 3/4 busy, queues=mailers` or `delayed_job.1: stopping, 1/4 busy, queues=*` (`Dispatcher#procline`, `:procline` option).
 * After a poll that reserved some jobs but fewer than its idle threads, a worker polls again at once instead of sleeping `sleep_delay`: a batch-reserving backend may have lost jobs to other processes. Only a poll that reserves nothing sleeps.
 * Workers wake up immediately from their idle sleep when stopped.
+* `Delayed::Worker.reset` also resets `exit_on_complete`, `min_priority`, `max_priority` and `default_queue_name` to their defaults (nil).
+* `Delayed::Worker.on_thread_error` handlers may take no arguments, one (the error) or two (the error and its info).
 * `--sleep-delay` and `SLEEP_DELAY` accept fractional seconds (e.g. `0.5`) and reject negative or non-numeric values with an `ArgumentError` (`--sleep-delay giraffe` used to leave the delay unset, and `010` meant 8). A worker whose `sleep_delay` is unset uses the default of 5 seconds.
 * Fix `Worker#work_off` stopping early after a job failed to deserialize; such a job now counts as failed.
 * Before forking worker processes (`--fork` and daemon modes), the parent eager loads the Rails application (rake tasks don't by default) and runs `Process.warmup` (Ruby >= 3.3) or `GC.start` + `GC.compact`, so more memory is shared copy-on-write with the workers.

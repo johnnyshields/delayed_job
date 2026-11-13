@@ -6,14 +6,12 @@ describe 'Delayed::Worker.on_thread_error' do
 
   before do
     Delayed::Job.delete_all
-    Delayed::Worker.default_queue_name = nil
     allow(Delayed::Worker).to receive(:logger).and_return(Logger.new(log))
     Delayed::Worker.on_thread_error = ->(error, info) { reported << [error, info] }
   end
 
   after do
     Delayed::Worker.reset
-    Delayed::Worker.exit_on_complete = false # Not reset by Worker.reset.
   end
 
   def contexts
