@@ -348,6 +348,108 @@ describe 'Stopping a worker' do
     end
   end
 
+  describe 'interrupts arriving after the job ran' do
+    let(:reported) { [] }
+    let(:paused) { Queue.new }
+
+    before do
+      SimpleJob.runs = 0
+      Delayed::Worker.on_thread_error = ->(error, info) { reported << [error, info] }
+    end
+
+    # Quits while the worker thread is paused at `stage` (after the job's
+    # own code ran), then lets it go on.
+    def quit_while_paused
+      thread = Thread.new { dispatcher.run }
+      Timeout.timeout(5) { paused.pop }
+      dispatcher.quit
+      sleep 0.1 # The interrupt is raised into the paused thread meanwhile.
+      yield if block_given?
+      Timeout.timeout(10) { thread.join }
+    end
+
+    def pause_in(klass, method)
+      p = paused
+      allow_any_instance_of(klass).to receive(method).and_wrap_original do |m, *args, &block|
+        p << true
+        sleep 0.3
+        m.call(*args, &block)
+      end
+    end
+
+    it 'does not release (to run again) a job interrupted while it is being finished' do
+      job = Delayed::Job.enqueue(SimpleJob.new)
+      pause_in(Delayed::Backend::Test::Job, :destroy)
+      quit_while_paused
+      expect(SimpleJob.runs).to eq 1
+      expect(Delayed::Job.all).not_to include(job)
+      expect(log.map(&:last).grep(/interrupted by shutdown/)).to be_empty
+      expect(reported).to be_empty
+    end
+
+    it 'does not release a job interrupted while it is being rescheduled after failing' do
+      job = Delayed::Job.enqueue(ErrorJob.new)
+      pause_in(Delayed::Backend::Test::Job, :save!)
+      quit_while_paused
+      job.reload
+      expect(job.attempts).to eq 1
+      expect(job.last_error).to match(/did not work/)
+      expect(job.locked_by).to be_nil
+      expect(log.map(&:last).grep(/interrupted by shutdown/)).to be_empty
+    end
+
+    it 'lets :perform callbacks after the job run uninterrupted' do
+      dispatcher # Worker.new resets the lifecycle.
+      after_perform = []
+      p = paused
+      Delayed::Worker.lifecycle.after(:perform) do |_worker, job|
+        p << true
+        sleep 0.3
+        after_perform << job.id
+      end
+      job = Delayed::Job.enqueue(SimpleJob.new)
+      quit_while_paused
+      expect(after_perform).to eq [job.id]
+      expect(Delayed::Job.all).not_to include(job)
+    end
+
+    it 'lets perform subscribers run uninterrupted' do
+      seen = []
+      p = paused
+      subscription = ActiveSupport::Notifications.subscribe('perform.delayed_job') do |*args|
+        p << true
+        sleep 0.3
+        seen << args.last[:success]
+      end
+      job = Delayed::Job.enqueue(SimpleJob.new)
+      quit_while_paused
+      expect(seen).to eq [true]
+      expect(Delayed::Job.all).not_to include(job)
+    ensure
+      ActiveSupport::Notifications.unsubscribe(subscription)
+    end
+
+    it 'still interrupts the job itself' do
+      job, = enqueue(GateJob.new(:a))
+      thread = Thread.new { dispatcher.run }
+      Timeout.timeout(5) { GateJob.started.pop }
+      dispatcher.quit
+      Timeout.timeout(10) { thread.join }
+      expect(GateJob.interrupted).to eq [:a]
+      expect(job.reload.locked_by).to be_nil
+      expect(job.attempts).to eq 0
+    end
+
+    it 'still times jobs out' do
+      job = Delayed::Job.enqueue(LongRunningJob.new)
+      allow_any_instance_of(LongRunningJob).to receive(:max_run_time).and_return(1)
+      worker = Delayed::Worker.new
+      allow(worker).to receive(:say)
+      expect(worker.work_off(1)).to eq [0, 1]
+      expect(job.reload.last_error).to match(/execution expired/)
+    end
+  end
+
   describe '#quit' do
     it 'interrupts running jobs at once, even without a shutdown timeout' do
       jobs = enqueue(GateJob.new(:a))

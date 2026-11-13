@@ -41,6 +41,14 @@ module Delayed
     # process is still alive, even while all its threads are busy.
     SUPERVISOR_CHECK_INTERVAL = 1
 
+    # Runs the block with shutdown interrupts let in: they are deferred
+    # everywhere else in worker threads (see #work). Worker#run wraps a job's
+    # own code in it. Outside of worker threads (e.g. Worker#work_off), where
+    # nothing defers them, it changes nothing.
+    def self.interruptible(&block)
+      Thread.handle_interrupt(ALLOW_SHUTDOWN_INTERRUPTS, &block)
+    end
+
     attr_reader :workers, :name_prefix
 
     # Pid of the parent process supervising this one (the forking launcher),
@@ -432,10 +440,11 @@ module Delayed
     #
     # Shutdown raises Delayed::ShutdownInterrupt (and, with
     # Worker.raise_signal_exceptions, the signal) into the threads running
-    # jobs. A thread may finish its job just before one arrives, so they are
-    # only let in while a job runs: elsewhere, they would interrupt the
-    # thread's bookkeeping or its :execute callbacks (e.g. ClearLocks) and
-    # crash it.
+    # jobs. They are only let in while a job's own code runs (see
+    # Worker#run and .interruptible): elsewhere they would interrupt the
+    # thread's bookkeeping, its :execute callbacks (e.g. ClearLocks), or a
+    # job being finished (deleted) - which would then be released and run
+    # again.
     def work(worker, inbox)
       Thread.handle_interrupt(DEFER_SHUTDOWN_INTERRUPTS) do
         Worker.lifecycle.run_callbacks(:execute, worker) do
@@ -443,7 +452,7 @@ module Delayed
             until (job = inbox.pop).equal?(STOP)
               discard_stale_interrupts
               synchronize { @running[Thread.current] = job }
-              result = track_job(worker, job) { with_reloader { interruptible { worker.perform_job(job) } } }
+              result = with_reloader { track_job(worker, job) { worker.perform_job(job) } }
               synchronize { @running.delete(Thread.current) }
               job_finished(worker, result)
             end
@@ -467,17 +476,13 @@ module Delayed
       end
     end
 
-    # Lets shutdown interrupts (deferred in worker threads, see #work) in.
-    def interruptible(&block)
-      Thread.handle_interrupt(ALLOW_SHUTDOWN_INTERRUPTS, &block)
-    end
 
     # Drops shutdown interrupts that arrived after the previous job finished:
     # they were meant for that job, not for the next one.
     def discard_stale_interrupts
       while SHUTDOWN_INTERRUPTS.any? { |klass| Thread.pending_interrupt?(klass) }
         begin
-          interruptible { Thread.pass }
+          self.class.interruptible { Thread.pass }
         rescue ShutdownInterrupt, SignalException
           nil
         end
