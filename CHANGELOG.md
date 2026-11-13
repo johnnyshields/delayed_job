@@ -25,6 +25,7 @@ Unreleased
 * `Delayed::Worker.reset` also resets `exit_on_complete`, `min_priority`, `max_priority` and `default_queue_name` to their defaults (nil).
 * `Delayed::Worker.on_thread_error` handlers may take no arguments, one (the error) or two (the error and its info).
 * `--sleep-delay` and `SLEEP_DELAY` accept fractional seconds (e.g. `0.5`) and reject negative or non-numeric values with an `ArgumentError` (`--sleep-delay giraffe` used to leave the delay unset, and `010` meant 8). A worker whose `sleep_delay` is unset uses the default of 5 seconds.
+* `--shutdown-timeout`, `--lock-heartbeat`, `--lock-timeout` and `--sleep-delay` (and their rake variables) take plain decimal seconds, e.g. `20` or `0.5`, and reject forms `Float()` accepted, such as `0x10`, `1_0` or `1e3`.
 * Fix `Worker#work_off` stopping early after a job failed to deserialize; such a job now counts as failed.
 * Before forking worker processes (`--fork` and daemon modes), the parent eager loads the Rails application (rake tasks don't by default) and runs `Process.warmup` (Ruby >= 3.3) or `GC.start` + `GC.compact`, so more memory is shared copy-on-write with the workers.
 * Fix `--fork` with `--pool`/`POOLS` and the default process count: the parent now calls `Worker.before_fork` (children previously crashed in `after_fork`) and supervises the forked workers instead of exiting immediately. `--identifier` with `-n > 1` no longer enters the supervision loop for a worker it never forked.

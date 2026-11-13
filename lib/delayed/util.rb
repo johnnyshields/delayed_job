@@ -3,6 +3,17 @@ module Delayed
     File.basename($PROGRAM_NAME)
   end
 
+  # Parses a number of seconds given as text (a command-line option or an
+  # environment variable): decimal digits, optionally negative and with a
+  # fraction, e.g. "5", "0.5", "010" (ten). Returns an Integer for whole
+  # numbers, else a Float. Raises ArgumentError for anything else, such as
+  # "0x10", "1_0", "1e2" or "soon", which Float() would accept or misread.
+  def self.parse_seconds(value)
+    text = value.to_s.strip
+    raise ArgumentError, "invalid number of seconds: #{value.inspect}" unless text =~ /\A-?\d+(\.\d+)?\z/
+    Regexp.last_match(1) ? Float(text) : Integer(text, 10)
+  end
+
   def self.root
     defined?(::Rails.root) ? ::Rails.root : Pathname.new(Dir.pwd)
   end

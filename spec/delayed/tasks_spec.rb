@@ -266,6 +266,25 @@ describe 'Rake tasks' do
       end
     end
 
+    {'SHUTDOWN_TIMEOUT' => '0x10', 'LOCK_HEARTBEAT' => '1_0', 'LOCK_TIMEOUT' => '1e3', 'SLEEP_DELAY' => '0x5'}.each do |name, value|
+      context "#{name}=#{value}, which Float() would accept" do
+        let(:env) { {name => value} }
+        it do
+          allow_any_instance_of(Delayed::Launcher::Forking).to receive(:launch) # Never start a real launcher.
+          expect { run_task }.to raise_error(ArgumentError, "invalid number of seconds: #{value.inspect}")
+        end
+      end
+    end
+
+    context 'SHUTDOWN_TIMEOUT=010' do
+      let(:env) { {'SHUTDOWN_TIMEOUT' => '010'} }
+      let(:exp_args) { {:quiet => false, :processes => 1, :shutdown_timeout => 10} }
+      it do
+        expect_success
+        run_task
+      end
+    end
+
     context 'SLEEP_DELAY not a number' do
       let(:env) { {'SLEEP_DELAY' => 'foo'} }
       it { expect { run_task }.to raise_error(ArgumentError) }

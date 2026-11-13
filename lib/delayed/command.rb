@@ -100,13 +100,13 @@ module Delayed
           @options[:monitor] = true
         end
         opt.on('--shutdown-timeout N', 'Seconds to let running jobs finish when stopping before interrupting and releasing them (default: wait for them)') do |n|
-          @options[:shutdown_timeout] = Float(n) rescue -1
+          @options[:shutdown_timeout] = seconds(n)
         end
         opt.on('--lock-heartbeat N', 'Refresh the locks of running jobs every N seconds, so a dead or hung worker\'s jobs are picked up after --lock-timeout (default: off)') do |n|
-          @options[:lock_heartbeat_interval] = Float(n) rescue 0
+          @options[:lock_heartbeat_interval] = seconds(n, 0)
         end
         opt.on('--lock-timeout N', 'With --lock-heartbeat, seconds after which a lock that was not refreshed counts as abandoned (default: 300)') do |n|
-          @options[:lock_timeout] = Float(n) rescue 0
+          @options[:lock_timeout] = seconds(n, 0)
         end
         opt.on('--count-shutdown-interrupts', 'Count a job interrupted by shutdown as a failed attempt (default: release it, attempts unchanged)') do
           @options[:count_shutdown_interrupts] = true
@@ -145,12 +145,12 @@ module Delayed
       @pool_parser ||= PoolParser.new
     end
 
-    # Parses a number of seconds: whole (Integer) or fractional (Float), or
-    # -1 (rejected by validation) if it isn't a number.
-    def seconds(value)
-      Integer(value, 10)
+    # Parses a number of seconds (see Delayed.parse_seconds), or returns
+    # `invalid` - a value the option's validation rejects with its message.
+    def seconds(value, invalid = -1)
+      Delayed.parse_seconds(value)
     rescue ArgumentError
-      Float(value) rescue -1
+      invalid
     end
 
     def validate_options!

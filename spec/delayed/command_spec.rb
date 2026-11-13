@@ -349,6 +349,13 @@ describe Delayed::Command do
       let(:options) { %w[--shutdown-timeout soon] }
       it { expect { output_options }.to raise_error(ArgumentError, /--shutdown-timeout/) }
     end
+
+    %w[0x10 1_0 1e2].each do |value|
+      context "given #{value}, which Float() would accept" do
+        let(:options) { ['--shutdown-timeout', value] }
+        it { expect { output_options }.to raise_error(ArgumentError, /--shutdown-timeout/) }
+      end
+    end
   end
 
   describe '--lock-heartbeat and --lock-timeout args' do
@@ -387,6 +394,24 @@ describe Delayed::Command do
 
     context 'lock timeout not positive' do
       let(:options) { %w[--lock-timeout 0] }
+      it { expect { output_options }.to raise_error(ArgumentError, /--lock-timeout must be greater than 0/) }
+    end
+
+    context 'fractional and with leading zeros' do
+      let(:options) { %w[--lock-heartbeat 0.5 --lock-timeout 010] }
+      it do
+        expect(output_options[:lock_heartbeat_interval]).to eql 0.5
+        expect(output_options[:lock_timeout]).to eql 10
+      end
+    end
+
+    context 'heartbeat in hex, which Float() would accept' do
+      let(:options) { %w[--lock-heartbeat 0x10] }
+      it { expect { output_options }.to raise_error(ArgumentError, /--lock-heartbeat must be greater than 0/) }
+    end
+
+    context 'lock timeout with an exponent, which Float() would accept' do
+      let(:options) { %w[--lock-timeout 1e3] }
       it { expect { output_options }.to raise_error(ArgumentError, /--lock-timeout must be greater than 0/) }
     end
   end

@@ -24,13 +24,13 @@ namespace :jobs do
     }
     @options[:min_priority] = Integer(ENV['MIN_PRIORITY']) if ENV['MIN_PRIORITY']
     @options[:max_priority] = Integer(ENV['MAX_PRIORITY']) if ENV['MAX_PRIORITY']
-    # Whole or fractional seconds.
-    @options[:sleep_delay] = (Integer(ENV['SLEEP_DELAY'], 10) rescue Float(ENV['SLEEP_DELAY'])) if ENV['SLEEP_DELAY']
+    # Numbers of seconds: whole or fractional (see Delayed.parse_seconds).
+    @options[:sleep_delay] = Delayed.parse_seconds(ENV['SLEEP_DELAY']) if ENV['SLEEP_DELAY']
     @options[:read_ahead] = Integer(ENV['READ_AHEAD']) if ENV['READ_AHEAD']
     @options[:threads] = Integer(ENV['NUM_THREADS']) if ENV['NUM_THREADS']
-    @options[:shutdown_timeout] = Float(ENV['SHUTDOWN_TIMEOUT']) if ENV['SHUTDOWN_TIMEOUT']
-    @options[:lock_heartbeat_interval] = Float(ENV['LOCK_HEARTBEAT']) if ENV['LOCK_HEARTBEAT']
-    @options[:lock_timeout] = Float(ENV['LOCK_TIMEOUT']) if ENV['LOCK_TIMEOUT']
+    @options[:shutdown_timeout] = Delayed.parse_seconds(ENV['SHUTDOWN_TIMEOUT']) if ENV['SHUTDOWN_TIMEOUT']
+    @options[:lock_heartbeat_interval] = Delayed.parse_seconds(ENV['LOCK_HEARTBEAT']) if ENV['LOCK_HEARTBEAT']
+    @options[:lock_timeout] = Delayed.parse_seconds(ENV['LOCK_TIMEOUT']) if ENV['LOCK_TIMEOUT']
     @options[:silence_polling] = true if ENV['SILENCE_POLLING'] && ENV['SILENCE_POLLING'] !~ /\A(?:|0|f|false)\z/i
     @options[:count_shutdown_interrupts] = true if ENV['COUNT_SHUTDOWN_INTERRUPTS'] && ENV['COUNT_SHUTDOWN_INTERRUPTS'] !~ /\A(?:|0|f|false)\z/i
     # PIDFILE=path, or PIDFILE=1 for tmp/pids/delayed_job.pid.
