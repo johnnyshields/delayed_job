@@ -128,7 +128,7 @@ module Delayed
         queues = options[:queues]
         queue_msg = " queues=#{queues.empty? ? '*' : queues.join(',')}" if queues
         thread_msg = " threads=#{threads(options)}" if threads(options) > 1
-        logger.info "Worker #{worker_name} started - pid #{worker_pid}#{queue_msg}#{thread_msg}"
+        logger.info "Child process #{worker_name} (pid #{worker_pid}) started#{queue_msg}#{thread_msg}"
 
         workers[worker_pid] = [worker_name, options]
         @worker_index += 1
@@ -186,14 +186,14 @@ module Delayed
           worker_pid, child_status = Process.wait2
           next unless workers.key?(worker_pid)
           worker_name, options = workers.delete(worker_pid)
-          logger.info "Worker #{worker_name} exited - #{child_status}"
+          logger.info "Child process #{worker_name} (pid #{worker_pid}) exited: #{child_status}"
           recover_jobs_of_worker(worker_name, worker_pid, options, child_status)
 
           # A child process SIGKILLed by someone else (e.g. the OOM killer)
           # is replaced like any other that died, its jobs recovered (above);
           # the other worker processes carry on.
           if child_status.termsig == 9 && !@killed
-            logger.warn "Worker process #{worker_name} (pid #{worker_pid}) was SIGKILLed (e.g. by the OOM killer)" \
+            logger.warn "Child process #{worker_name} (pid #{worker_pid}) was SIGKILLed (e.g. by the OOM killer)" \
                         "#{'; replacing it' unless @stopped}"
           end
 
@@ -203,7 +203,7 @@ module Delayed
           Delayed.instrument(:fork_replaced, :worker => worker_name, :pid => worker_pid, :status => child_status, :new_pid => new_pid)
         end
       rescue Errno::ECHILD
-        logger.warn 'No worker processes found'
+        logger.warn 'No child processes found'
       end
 
       # Waits for the given SIGKILLed workers and recovers their jobs. The main
@@ -229,9 +229,9 @@ module Delayed
         return if status.success?
         lock_names = Delayed::Worker.lock_names("#{worker_name} ", pid, threads(options))
         count = Delayed::Worker.recover_jobs_of(lock_names, ProcessExitError.new(worker_name, pid, status))
-        logger.warn "Recovered #{count} job(s) left locked by worker #{worker_name} (pid #{pid})" if count > 0
+        logger.warn "Recovered #{count} job(s) left locked by child process #{worker_name} (pid #{pid})" if count > 0
       rescue StandardError => error
-        logger.error "Could not recover the jobs of worker #{worker_name} (pid #{pid}): #{error.class}: #{error.message}. " \
+        logger.error "Could not recover the jobs of child process #{worker_name} (pid #{pid}): #{error.class}: #{error.message}. " \
                      'Their locks will expire after max_run_time.'
         Delayed::Worker.thread_error(error, :context => 'Recovering jobs', :worker => worker_name, :pid => pid)
       ensure
@@ -263,9 +263,9 @@ module Delayed
       def signal_workers(signal)
         workers.dup.each do |pid, (worker_name, _)|
           Process.kill(signal, pid)
-          logger.info "Sent SIG#{signal} to worker #{worker_name}"
+          logger.info "Sent SIG#{signal} to child process #{worker_name} (pid #{pid})"
         rescue Errno::ESRCH
-          logger.info "Worker #{worker_name} (pid #{pid}) already exited; not sent SIG#{signal}"
+          logger.info "Child process #{worker_name} (pid #{pid}) already exited; not sent SIG#{signal}"
         end
       end
 

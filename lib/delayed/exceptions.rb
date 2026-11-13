@@ -42,7 +42,7 @@ module Delayed
       @pid = pid
       @status = status
       reason = status.signaled? ? "was killed by signal #{status.termsig}" : "exited with status #{status.exitstatus}"
-      super("Worker process #{worker_name} (pid #{pid}) #{reason}")
+      super("Child process #{worker_name} (pid #{pid}) #{reason}")
       set_backtrace([])
     end
   end

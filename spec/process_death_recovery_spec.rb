@@ -9,13 +9,13 @@ describe 'Recovering the jobs of a dead worker process' do
   describe Delayed::ProcessExitError do
     it 'describes a worker killed by a signal' do
       error = described_class.new('delayed_job.1', 123, killed)
-      expect(error.message).to eq 'Worker process delayed_job.1 (pid 123) was killed by signal 9'
+      expect(error.message).to eq 'Child process delayed_job.1 (pid 123) was killed by signal 9'
       expect([error.worker_name, error.pid, error.status]).to eq ['delayed_job.1', 123, killed]
     end
 
     it 'describes a worker that exited with a failure status' do
       error = described_class.new('delayed_job.0', 456, crashed)
-      expect(error.message).to eq 'Worker process delayed_job.0 (pid 456) exited with status 3'
+      expect(error.message).to eq 'Child process delayed_job.0 (pid 456) exited with status 3'
     end
 
     it 'has an empty backtrace, so it can be recorded as a job error' do
@@ -61,7 +61,7 @@ describe 'Recovering the jobs of a dead worker process' do
       expect(job.locked_by).to be_nil
       expect(job.locked_at).to be_nil
       expect(job.run_at).to be > now
-      expect(job.last_error).to start_with 'Worker process dj.1 (pid 77) was killed by signal 9'
+      expect(job.last_error).to start_with 'Child process dj.1 (pid 77) was killed by signal 9'
       expect(job.failed_at).to be_nil
       expect(Delayed::Job.all).to include(job)
     end
@@ -149,10 +149,10 @@ describe 'Recovering the jobs of a dead worker process' do
         expect(Delayed::Worker).to receive(:recover_jobs_of) do |lock_names, error|
           expect(lock_names).to eq names
           expect(error).to be_a Delayed::ProcessExitError
-          expect(error.message).to eq 'Worker process delayed_job.1 (pid 99) was killed by signal 9'
+          expect(error.message).to eq 'Child process delayed_job.1 (pid 99) was killed by signal 9'
           2
         end
-        expect(logger).to receive(:warn).with('Recovered 2 job(s) left locked by worker delayed_job.1 (pid 99)')
+        expect(logger).to receive(:warn).with('Recovered 2 job(s) left locked by child process delayed_job.1 (pid 99)')
         launcher.send(:recover_jobs_of_worker, 'delayed_job.1', 99, options, killed)
       end
 
@@ -169,7 +169,7 @@ describe 'Recovering the jobs of a dead worker process' do
 
       it 'logs and carries on when the database cannot be reached' do
         allow(Delayed::Worker).to receive(:recover_jobs_of).and_raise(IOError, 'connection refused')
-        expect(logger).to receive(:error).with(/Could not recover the jobs of worker delayed_job.1 \(pid 99\): IOError: connection refused/)
+        expect(logger).to receive(:error).with(/Could not recover the jobs of child process delayed_job.1 \(pid 99\): IOError: connection refused/)
         expect { launcher.send(:recover_jobs_of_worker, 'delayed_job.1', 99, options, killed) }.not_to raise_error
       end
 
@@ -221,7 +221,7 @@ describe 'Recovering the jobs of a dead worker process' do
         allow(launcher).to receive(:recover_jobs_of_worker)
         allow(launcher).to receive(:add_worker)
         launcher.send(:run_loop)
-        expect(logger).to have_received(:warn).with('Worker process delayed_job.1 (pid 99) was SIGKILLed (e.g. by the OOM killer); replacing it')
+        expect(logger).to have_received(:warn).with('Child process delayed_job.1 (pid 99) was SIGKILLed (e.g. by the OOM killer); replacing it')
       end
 
       it 'never shuts down the other worker processes, however often one is SIGKILLed' do

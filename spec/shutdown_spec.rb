@@ -827,15 +827,15 @@ describe Delayed::Launcher::Forking, 'stopping worker processes' do
       expect(Process).to receive(:kill).with('KILL', 11)
       expect(Process).to receive(:kill).with('KILL', 12)
       launcher.send(:signal_workers, 'KILL')
-      expect(logger).to have_received(:info).with('Sent SIGKILL to worker delayed_job.0')
+      expect(logger).to have_received(:info).with('Sent SIGKILL to child process delayed_job.0 (pid 11)')
     end
 
     it 'skips workers that already exited, and still signals the others' do
       allow(Process).to receive(:kill).with('KILL', 11).and_raise(Errno::ESRCH)
       expect(Process).to receive(:kill).with('KILL', 12)
       expect { launcher.send(:signal_workers, 'KILL') }.not_to raise_error
-      expect(logger).to have_received(:info).with('Worker delayed_job.0 (pid 11) already exited; not sent SIGKILL')
-      expect(logger).to have_received(:info).with('Sent SIGKILL to worker delayed_job.1')
+      expect(logger).to have_received(:info).with('Child process delayed_job.0 (pid 11) already exited; not sent SIGKILL')
+      expect(logger).to have_received(:info).with('Sent SIGKILL to child process delayed_job.1 (pid 12)')
     end
 
     it 'is not disturbed by the run loop reaping a worker meanwhile' do

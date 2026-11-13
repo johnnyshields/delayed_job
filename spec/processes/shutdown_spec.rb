@@ -23,8 +23,8 @@ describe 'Stopping a forking launcher', :processes do
 
     expect(status).to be_success
     expect(output).to include 'Received SIGTERM'
-    expect(output).to match(/Worker delayed_job\.0 exited - pid \d+ exit 0/)
-    expect(output).to match(/Worker delayed_job\.1 exited - pid \d+ exit 0/)
+    expect(output).to match(/Child process delayed_job\.0 \(pid \d+\) exited: pid \d+ exit 0/)
+    expect(output).to match(/Child process delayed_job\.1 \(pid \d+\) exited: pid \d+ exit 0/)
     expect(ProcessHelpers::Run.where(:key => 'finishes').count).to eq 1
     expect(reload_job(job)).to be_nil
   end
@@ -81,8 +81,8 @@ describe 'Signalling a forking launcher while a worker process starts up', :proc
 
     expect(status).to be_success
     expect(output.scan(/Received SIGTERM while starting/).size).to eq 2
-    expect(output).to match(/Worker delayed_job\.0 exited - pid \d+ exit 0/)
-    expect(output).to match(/Worker delayed_job\.1 exited - pid \d+ exit 0/)
+    expect(output).to match(/Child process delayed_job\.0 \(pid \d+\) exited: pid \d+ exit 0/)
+    expect(output).to match(/Child process delayed_job\.1 \(pid \d+\) exited: pid \d+ exit 0/)
     # Only the parent logs and forwards; the workers no longer run its trap.
     expect(output.scan(/Received SIGTERM\. Waiting for workers/).size).to eq 1
   end

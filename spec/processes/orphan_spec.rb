@@ -26,7 +26,7 @@ describe 'A forking launcher that is SIGKILLed', :processes do
     wait_for { reload_job(job).locked_by }
     busy_child = worker_pids(job).first
     output = read_available(reader)
-    idle_child = (output.scan(/Worker delayed_job\.\d started - pid (\d+)/).flatten.map(&:to_i) - [busy_child]).first
+    idle_child = (output.scan(/Child process delayed_job\.\d \(pid (\d+)\) started/).flatten.map(&:to_i) - [busy_child]).first
 
     Process.kill('KILL', pid)
     Process.waitpid(pid)

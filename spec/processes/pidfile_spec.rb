@@ -23,7 +23,7 @@ describe 'A forking launcher with a pidfile', :processes do
     status, output = run_launcher({:processes => 2, :pid_file => pid_file}, 20)
     expect(status).not_to be_success
     expect(output).to include "delayed_job is already running (pid #{pid}): pidfile #{pid_file} exists"
-    expect(output).not_to include 'started - pid'
+    expect(output).not_to include ') started'
     # The first launcher is unaffected.
     expect(File.read(pid_file)).to eq "#{pid}\n"
     expect(alive?(pid)).to be true
@@ -37,7 +37,7 @@ describe 'A forking launcher with a pidfile', :processes do
 
   it 'starts when a stale pidfile was left by a launcher that was SIGKILLed along with its workers' do
     pid, reader = spawn_launcher(:processes => 2, :pid_file => pid_file, :worker => {:sleep_delay => 0.1})
-    wait_for { read_available(reader).include?('started - pid') && File.exist?(pid_file) }
+    wait_for { read_available(reader).include?(') started') && File.exist?(pid_file) }
     Process.kill('KILL', -pid) # The whole process group.
     Process.waitpid(pid)
     reader.close

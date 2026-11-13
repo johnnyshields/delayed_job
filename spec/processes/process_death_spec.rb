@@ -17,7 +17,7 @@ describe 'A worker process dying while running jobs', :processes do
       pid, reader = spawn_launcher(:processes => 2, :worker => worker_settings)
       wait_for { reload_job(job).attempts == 1 }
       output = +''
-      wait_for { (output << read_available(reader)) =~ /Worker delayed_job\.2 started - pid \d+/ }
+      wait_for { (output << read_available(reader)) =~ /Child process delayed_job\.2 \(pid \d+\) started/ }
       later = enqueue_process_job(ProcessJobs::SleepJob.new('after the kill', 0))
       wait_for { reload_job(later).nil? } # The launcher still works jobs.
       Process.kill('TERM', -pid)
@@ -25,12 +25,12 @@ describe 'A worker process dying while running jobs', :processes do
       output << rest
 
       expect(status).to be_success
-      expect(output).to match(/Worker process delayed_job\.\d \(pid \d+\) was SIGKILLed \(e\.g\. by the OOM killer\); replacing it/)
+      expect(output).to match(/Child process delayed_job\.\d \(pid \d+\) was SIGKILLed \(e\.g\. by the OOM killer\); replacing it/)
       expect(output).not_to match(/SIGKILL detected/)
-      expect(output).to match(/Recovered 1 job\(s\) left locked by worker delayed_job\.\d \(pid \d+\)/)
+      expect(output).to match(/Recovered 1 job\(s\) left locked by child process delayed_job\.\d \(pid \d+\)/)
       job = reload_job(job)
       expect([job.locked_by, job.attempts]).to eq [nil, 1]
-      expect(job.last_error).to match(/\AWorker process delayed_job\.\d \(pid \d+\) was killed by signal 9/)
+      expect(job.last_error).to match(/\AChild process delayed_job\.\d \(pid \d+\) was killed by signal 9/)
       expect(ProcessHelpers::Run.where(:key => 'after the kill').count).to eq 1
     end
   end
@@ -45,12 +45,12 @@ describe 'A worker process dying while running jobs', :processes do
       status, output = wait_for_launcher(pid, reader)
 
       expect(status).to be_success
-      expect(output).to match(/Worker delayed_job\.0 exited - pid \d+ exit 3/)
-      expect(output).to match(/Recovered 1 job\(s\) left locked by worker delayed_job\.0 \(pid \d+\)/)
-      expect(output).to match(/Worker delayed_job\.1 started - pid \d+/)
+      expect(output).to match(/Child process delayed_job\.0 \(pid \d+\) exited: pid \d+ exit 3/)
+      expect(output).to match(/Recovered 1 job\(s\) left locked by child process delayed_job\.0 \(pid \d+\)/)
+      expect(output).to match(/Child process delayed_job\.1 \(pid \d+\) started/)
       job = reload_job(job)
       expect(job.attempts).to eq 1
-      expect(job.last_error).to match(/\AWorker process delayed_job\.0 \(pid \d+\) exited with status 3/)
+      expect(job.last_error).to match(/\AChild process delayed_job\.0 \(pid \d+\) exited with status 3/)
       expect(job.locked_by).to be_nil
       expect(job.run_at).to be > job.created_at
     end
@@ -69,8 +69,8 @@ describe 'A worker process dying while running jobs', :processes do
       output << rest
 
       expect(status).to be_success
-      dead = output[/Worker delayed_job\.0 started - pid (\d+)/, 1]
-      new_pid = output[/Worker delayed_job\.1 started - pid (\d+)/, 1]
+      dead = output[/Child process delayed_job\.0 \(pid (\d+)\) started/, 1]
+      new_pid = output[/Child process delayed_job\.1 \(pid (\d+)\) started/, 1]
       expect(output).to include "Replaced worker process delayed_job.0 (pid #{dead}, pid #{dead} exit 3) with pid #{new_pid}"
       expect(output).to match(/Released 1 job\(s\) of delayed_job\.0 host:\S+ pid:#{dead} \(process exit\)/)
       expect(output).to match(/Job ProcessJobs::ExitJob \(id=#{job.id}\) failed attempt 1 on delayed_job\.0 .* with Delayed::ProcessExitError/)
@@ -88,7 +88,7 @@ describe 'A worker process dying while running jobs', :processes do
       output = +''
       wait_for do
         output << read_available(reader)
-        output =~ /Worker delayed_job\.1 started/ && (j = reload_job(job)).failed_at && j.locked_by.nil?
+        output =~ /Child process delayed_job\.1 \(pid \d+\) started/ && (j = reload_job(job)).failed_at && j.locked_by.nil?
       end
       Process.kill('TERM', -pid) # the process group, as a terminal or init system does
       status, rest = wait_for_launcher(pid, reader)
@@ -117,11 +117,11 @@ describe 'A worker process dying while running jobs', :processes do
       status, output = wait_for_launcher(pid, reader)
 
       expect(status).to be_success
-      expect(output).to include 'Recovered 3 job(s) left locked by worker delayed_job.0'
+      expect(output).to include 'Recovered 3 job(s) left locked by child process delayed_job.0'
       jobs = jobs.map { |j| reload_job(j) }
       expect(jobs.map(&:locked_by)).to eq [nil, nil, nil]
       expect(jobs.map(&:attempts)).to eq [1, 1, 1]
-      expect(jobs.map(&:last_error)).to all(start_with('Worker process delayed_job.0'))
+      expect(jobs.map(&:last_error)).to all(start_with('Child process delayed_job.0'))
     end
   end
 
@@ -139,13 +139,13 @@ describe 'A worker process dying while running jobs', :processes do
     status, output = wait_for_launcher(pid, reader)
 
     expect(status).to be_success
-    expect(output).to match(/Recovered 1 job\(s\) left locked by worker delayed_job\.1/)
+    expect(output).to match(/Recovered 1 job\(s\) left locked by child process delayed_job\.1/)
     # The healthy worker finished its job, undisturbed.
     expect(ProcessHelpers::Run.where(:key => 'survivor').count).to eq 1
     expect(reload_job(slow)).to be_nil
     victim = reload_job(victim)
     expect(victim.attempts).to eq 1
-    expect(victim.last_error).to start_with 'Worker process delayed_job.1'
+    expect(victim.last_error).to start_with 'Child process delayed_job.1'
     expect(healthy).to start_with 'delayed_job.0'
   end
 end

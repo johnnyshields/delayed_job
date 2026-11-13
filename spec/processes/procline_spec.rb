@@ -14,7 +14,7 @@ describe 'The process titles of forked worker processes', :processes do
   end
 
   def worker_pids(output)
-    output.scan(/Worker (delayed_job\.\d) started - pid (\d+)/).to_h { |name, pid| [name, pid.to_i] }
+    output.scan(/Child process (delayed_job\.\d) \(pid (\d+)\) started/).to_h { |name, pid| [name, pid.to_i] }
   end
 
   it 'shows each worker, its busy threads and its queues, live' do
