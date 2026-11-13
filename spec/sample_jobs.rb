@@ -5,14 +5,36 @@ class NamedJob
   end
 end
 
+# Shared state of these jobs uses concurrent-ruby: they run on parallel
+# threads (JRuby), where `+= 1` and Array#<< aren't atomic.
+require 'concurrent'
+
+# A count of runs: `runs` reads it, `runs = 0` resets it.
+module CountsRuns
+  def runs
+    run_count.value
+  end
+
+  def runs=(value)
+    run_count.value = value
+  end
+
+  def count_run
+    run_count.increment
+  end
+
+  private
+
+  def run_count
+    @run_count ||= Concurrent::AtomicFixnum.new
+  end
+end
+
 class SimpleJob
-  cattr_accessor :runs
-  @runs = 0
-  # runs += 1 isn't atomic: jobs run on parallel threads (JRuby).
-  RUNS_LOCK = Mutex.new
+  extend CountsRuns
 
   def perform
-    RUNS_LOCK.synchronize { self.class.runs += 1 }
+    SimpleJob.count_run
   end
 end
 
@@ -67,10 +89,10 @@ end
 
 module M
   class ModuleJob
-    cattr_accessor :runs
-    @runs = 0
+    extend CountsRuns
+
     def perform
-      self.class.runs += 1
+      self.class.count_run
     end
   end
 end
@@ -115,13 +137,14 @@ end
 
 # Records which thread/worker ran it and how many jobs ran at once.
 class ConcurrencyJob
+  # running and max_running change together, under the mutex.
   cattr_accessor :mutex, :running, :max_running, :runs, :delay
   self.mutex = Mutex.new
 
   def self.reset(delay = 0.05)
     self.running = 0
     self.max_running = 0
-    self.runs = Hash.new(0)
+    self.runs = Concurrent::Map.new
     self.delay = delay
   end
   reset
@@ -136,8 +159,8 @@ class ConcurrencyJob
     self.class.mutex.synchronize do
       self.class.running += 1
       self.class.max_running = [self.class.max_running, self.class.running].max
-      self.class.runs[key] += 1
     end
+    self.class.runs.compute(key) { |count| count.to_i + 1 }
     sleep self.class.delay
   ensure
     self.class.mutex.synchronize { self.class.running -= 1 }
@@ -147,9 +170,8 @@ end
 # Enqueues the next link of a chain of `length` jobs, then finishes after a
 # short (random) time; records each link it runs.
 class ChainJob
-  cattr_accessor :runs, :mutex, :fixed_sleep
-  self.mutex = Mutex.new
-  self.runs = []
+  cattr_accessor :runs, :fixed_sleep
+  self.runs = Concurrent::Array.new
 
   attr_accessor :chain, :link, :length, :max_sleep
 
@@ -163,15 +185,14 @@ class ChainJob
   def perform
     Delayed::Job.enqueue(ChainJob.new(chain, link + 1, length, max_sleep)) if link + 1 < length
     sleep(fixed_sleep || (rand * max_sleep))
-    self.class.mutex.synchronize { self.class.runs << [chain, link] }
+    self.class.runs << [chain, link]
   end
 end
 
 # Runs for `seconds`, then records that it completed.
 class FuzzJob
-  cattr_accessor :completed, :mutex
-  self.mutex = Mutex.new
-  self.completed = Hash.new(0)
+  cattr_accessor :completed
+  self.completed = Concurrent::Map.new
 
   attr_accessor :key, :seconds
 
@@ -182,7 +203,7 @@ class FuzzJob
 
   def perform
     sleep seconds
-    self.class.mutex.synchronize { self.class.completed[key] += 1 }
+    self.class.completed.compute(key) { |count| count.to_i + 1 }
   end
 end
 
@@ -205,17 +226,11 @@ end
 # A job that runs until told to finish, recording what happened to it.
 class GateJob
   cattr_accessor :started, :finished, :interrupted, :release
-  # Jobs record their outcomes from parallel threads (JRuby).
-  MUTEX = Mutex.new
-
-  def self.record(list, key)
-    MUTEX.synchronize { list << key }
-  end
 
   def self.reset
     self.started = Queue.new
-    self.finished = []
-    self.interrupted = []
+    self.finished = Concurrent::Array.new
+    self.interrupted = Concurrent::Array.new
     self.release = false
   end
   reset
@@ -243,11 +258,11 @@ class GateJob
       rescue StandardError
         raise 'a StandardError rescue must not catch the interrupt'
       rescue Exception # rubocop:disable Lint/RescueException
-        self.class.record(self.class.interrupted, key)
+        self.class.interrupted << key
         raise
       end
     end
-    self.class.record(self.class.finished, key)
+    self.class.finished << key
   end
 end
 

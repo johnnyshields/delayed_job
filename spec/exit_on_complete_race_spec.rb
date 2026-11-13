@@ -6,7 +6,7 @@ require 'helper'
 describe 'Exiting on complete, with jobs that enqueue jobs' do
   before do
     Delayed::Job.delete_all
-    ChainJob.runs = []
+    ChainJob.runs = Concurrent::Array.new
     Delayed::Worker.exit_on_complete = true
   end
 
@@ -46,7 +46,7 @@ describe 'Exiting on complete, with jobs that enqueue jobs' do
       seed = Random.new_seed
       srand(seed)
       25.times do |round|
-        ChainJob.runs = []
+        ChainJob.runs = Concurrent::Array.new
         chains = Array.new(3) { |c| [c, rand(2..6)] }
         chains.each { |c, length| Delayed::Job.enqueue(ChainJob.new(c, 0, length, 0.01)) }
         Timeout.timeout(20) { dispatcher(threads).run }

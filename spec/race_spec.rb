@@ -9,7 +9,7 @@ describe 'Races' do
 
   before do
     Delayed::Job.delete_all
-    FuzzJob.completed = Hash.new(0)
+    FuzzJob.completed = Concurrent::Map.new
     Delayed::Worker.on_thread_error = ->(error, info) { reported << [error, info] }
   end
 
@@ -26,7 +26,7 @@ describe 'Races' do
       random = Random.new(seed)
       30.times do |round|
         Delayed::Job.delete_all
-        FuzzJob.completed = Hash.new(0)
+        FuzzJob.completed = Concurrent::Map.new
         Delayed::Worker.shutdown_timeout = [nil, 0, 0.05].sample(:random => random)
         jobs = Array.new(8) { |i| Delayed::Job.enqueue(FuzzJob.new(i, random.rand * 0.1)) }
         d = quiet_dispatcher(:threads => 3, :sleep_delay => 0.01)
@@ -50,7 +50,7 @@ describe 'Races' do
         expect(left.map(&:id) & done).to be_empty, "#{context}: jobs #{left.map(&:id) & done} were released while being deleted"
 
         jobs.each_with_index do |job, key|
-          runs = FuzzJob.completed[key]
+          runs = FuzzJob.completed.fetch(key, 0)
           if left.include?(job)
             job.reload
             # A job interrupted right after its last line still counts as run:
