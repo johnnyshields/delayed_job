@@ -53,6 +53,16 @@ module Delayed
           reserved
         end
 
+        # Whether reserve_batch may reserve fewer jobs than it was asked for
+        # while jobs are still available - e.g. because candidates it picked
+        # were reserved by other processes meanwhile. If so, Delayed::Dispatcher
+        # polls again at once after such a partial batch; otherwise a
+        # partial batch means the queue ran dry, and it waits sleep_delay.
+        # The default reserve_batch stops only when reserve finds no job.
+        def partial_batch_may_leave_jobs?
+          false
+        end
+
         # Returns the jobs locked by the named worker, or nil if the backend
         # can't list them. Backends implement this so that Delayed Job can
         # recover the jobs of a worker process that died (see

@@ -18,7 +18,7 @@ Unreleased
 * `Delayed::Worker.on_thread_error = ->(error, info) { ... }` is called with errors raised outside of a job's own handling: failed reservations and lock heartbeats, crashed worker threads and dispatchers, failing `failure` hooks, failed recovery of a dead worker process' jobs.
 * `Delayed::Worker.silence_polling = true` (`--silence-polling`, `SILENCE_POLLING=1`) keeps the queries of polling for jobs and refreshing locks out of the log, on the polling thread only. Backend hook: `Delayed::Job.silence_polling(&block)`, which by default silences `ActiveRecord::Base.logger` below `WARN`.
 * Live process titles: each worker process shows its busy threads, queues and state, e.g. `delayed_job.0: 3/4 busy, queues=mailers` or `delayed_job.1: stopping, 1/4 busy, queues=*` (`Dispatcher#procline`, `:procline` option).
-* After a poll that reserved some jobs but fewer than its idle threads, a worker polls again at once instead of sleeping `sleep_delay`: a batch-reserving backend may have lost jobs to other processes. Only a poll that reserves nothing sleeps.
+* After a poll that reserved some jobs but fewer than its idle threads, a worker polls again at once if the backend says such a batch may leave jobs behind (new hook `Delayed::Job.partial_batch_may_leave_jobs?`, default false: e.g. a batch-reserving backend that lost candidates to other processes). Otherwise idle threads poll again after `sleep_delay`.
 * Workers wake up immediately from their idle sleep when stopped.
 * `Delayed::Worker.reset` also resets `exit_on_complete`, `min_priority`, `max_priority` and `default_queue_name` to their defaults (nil).
 * `Delayed::Worker.on_thread_error` handlers may take no arguments, one (the error) or two (the error and its info).

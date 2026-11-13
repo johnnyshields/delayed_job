@@ -199,15 +199,88 @@ describe Delayed::Dispatcher do
         polls
       end
 
-      it 'polls again at once, as a batch reservation may have lost jobs to other processes' do
-        enqueue_jobs(3)
-        polls = reserve_in_polls(1, 2) { |p| dispatcher.stop if p.size == 3 }
-        Timeout.timeout(3) { dispatcher.run }
+      context 'with a backend whose partial batches may leave jobs' do
+        before { allow(Delayed::Job).to receive(:partial_batch_may_leave_jobs?).and_return(true) }
 
-        expect(polls.map(&:last)).to eq [4, 3, 1]
-        expect(polls[1].first - polls[0].first).to be < 1
-        expect(polls[2].first - polls[1].first).to be < 1
+        it 'polls again at once, as a batch reservation may have lost jobs to other processes' do
+          enqueue_jobs(3)
+          polls = reserve_in_polls(1, 2) { |p| dispatcher.stop if p.size == 3 }
+          Timeout.timeout(3) { dispatcher.run }
+
+          expect(polls.map(&:last)).to eq [4, 3, 1]
+          expect(polls[1].first - polls[0].first).to be < 1
+          expect(polls[2].first - polls[1].first).to be < 1
+        end
+
+        it 'still waits sleep_delay after a poll that reserved nothing' do
+          polls = reserve_in_polls { |p| dispatcher.stop if p.size == 2 }
+          thread = Thread.new { dispatcher.run }
+          sleep 0.5
+          expect(polls.size).to eq 1
+          dispatcher.stop
+          Timeout.timeout(3) { thread.join }
+        end
       end
+
+      context 'with a backend whose partial batches mean the queue ran dry (the default)' do
+        it 'is the default' do
+          expect(Delayed::Job.partial_batch_may_leave_jobs?).to be false
+          expect(Delayed::Backend::Base::ClassMethods.instance_method(:partial_batch_may_leave_jobs?).owner)
+            .to eq Delayed::Backend::Base::ClassMethods
+        end
+
+        it 'does not poll again at once, saving a query each time the queue drains' do
+          ConcurrencyJob.reset(1) # Busy for the whole check: no thread frees up.
+          enqueue_jobs(1)
+          polls = reserve_in_polls(1)
+          thread = Thread.new { dispatcher.run }
+          sleep 0.5
+          expect(polls.size).to eq 1 # Not 2: no immediate empty re-poll.
+          dispatcher.stop
+          Timeout.timeout(3) { thread.join }
+        end
+
+        it 'still polls every sleep_delay for new jobs while some threads are busy' do
+          d = described_class.new(:threads => 2, :sleep_delay => 0.1)
+          allow(d).to receive(:say)
+          ConcurrencyJob.reset(3) # The first job keeps one thread busy throughout.
+          Delayed::Job.enqueue(ConcurrencyJob.new(1))
+          thread = Thread.new { d.run }
+          Timeout.timeout(3) { sleep 0.01 until ConcurrencyJob.running == 1 }
+          late = Delayed::Job.enqueue(ConcurrencyJob.new(2))
+          # Picked up by the idle thread within sleep_delay, not after the 3s job.
+          Timeout.timeout(1.5) { sleep 0.01 until ConcurrencyJob.running == 2 }
+          expect(ConcurrencyJob.runs[2]).to eq 1
+          expect(late.reload.locked_by).not_to be_nil
+          d.quit
+          Timeout.timeout(10) { thread.join }
+        end
+
+        it 'polls again once a thread frees up' do
+          ConcurrencyJob.reset(0.2)
+          enqueue_jobs(2)
+          polls = reserve_in_polls(1)
+          thread = Thread.new { dispatcher.run }
+          Timeout.timeout(3) { sleep 0.01 until polls.size >= 2 }
+          expect(polls[1].first - polls[0].first).to be >= 0.15 # Only after the job finished.
+          dispatcher.stop
+          Timeout.timeout(3) { thread.join }
+        end
+      end
+
+      it 'does not poll again at once with a backend predating the hook' do
+        allow(Delayed::Job).to receive(:respond_to?).and_call_original
+        allow(Delayed::Job).to receive(:respond_to?).with(:partial_batch_may_leave_jobs?).and_return(false)
+        ConcurrencyJob.reset(1)
+        enqueue_jobs(1)
+        polls = reserve_in_polls(1)
+        thread = Thread.new { dispatcher.run }
+        sleep 0.5
+        expect(polls.size).to eq 1 # Treated as the default: no re-poll.
+        dispatcher.stop
+        Timeout.timeout(3) { thread.join }
+      end
+
 
       it 'waits sleep_delay after a poll that reserved nothing' do
         polls = reserve_in_polls { |p| dispatcher.stop if p.size == 2 }
@@ -308,6 +381,8 @@ describe Delayed::Dispatcher do
             k = klass
             m = message
             ConcurrencyJob.reset(5)
+            # Poll again while the job runs (after the partial first batch).
+            allow(Delayed::Job).to receive(:partial_batch_may_leave_jobs?).and_return(true)
             job = Delayed::Job.enqueue(ConcurrencyJob.new(1))
             calls = 0
             allow(Delayed::Job).to receive(:reserve_batch).and_wrap_original do |orig, *args|

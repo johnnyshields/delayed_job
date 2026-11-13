@@ -276,14 +276,24 @@ module Delayed
         end
 
         update_procline
-        # Fewer jobs than idle workers doesn't prove the queue ran dry: a
-        # batch reservation may have lost some to other processes. Poll
-        # again at once; only a poll that reserves nothing waits.
-        next if !reserved.empty? && reserved.size < idle.size
+        # Fewer jobs than idle workers may not mean the queue ran dry, with
+        # a backend whose batch reservation can lose candidates to other
+        # processes: poll again at once then.
+        next if repoll_after?(reserved, idle)
 
-        wait_before_next_poll(seen, !idle.empty? && reserved.empty?)
+        # Fewer jobs than idle workers: the queue ran dry, so idle workers
+        # wait at most sleep_delay for new jobs (not until a busy one frees up).
+        wait_before_next_poll(seen, !idle.empty? && reserved.size < idle.size)
       end
       raise_thread_error
+    end
+
+    # Whether to poll again at once: after a partial batch (some jobs, but
+    # fewer than idle workers), if the backend says jobs may be left (see
+    # Delayed::Job.partial_batch_may_leave_jobs?).
+    def repoll_after?(reserved, idle)
+      return false if reserved.empty? || reserved.size >= idle.size
+      Delayed::Job.respond_to?(:partial_batch_may_leave_jobs?) && Delayed::Job.partial_batch_may_leave_jobs?
     end
 
     # Waits until a worker frees up (or dies) or the dispatcher is stopped,
