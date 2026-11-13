@@ -638,10 +638,19 @@ module Delayed
       @stop_requested_at ||= monotonic_now
       update_procline
       @inboxes.each_value { |inbox| inbox << STOP }
-      if error.is_a?(SignalException)
-        @threads.each { |thread| thread.raise(error.class, error.message) if thread.alive? }
+      raise_in_threads(error) if error.is_a?(SignalException)
+      begin
+        wait_for_threads
+      rescue SignalException => late
+        # Raised while waiting: on JRuby, signal traps run on a thread of
+        # their own, so the trap's stop can end the poll loop before the
+        # signal exception reaches this thread (see #raise_signal). Raise
+        # it in the running jobs too, as if it had arrived first; then
+        # finish stopping and let it propagate.
+        raise_in_threads(late)
+        wait_for_threads
+        raise
       end
-      wait_for_threads
       return unless shutdown_deadline
       interrupt_threads(synchronize { @running.keys.select(&:alive?) })
       # Also wait for the threads that weren't running a job: they may still
@@ -653,6 +662,10 @@ module Delayed
 
     def join_threads(deadline)
       @threads.each { |thread| thread.join([deadline - monotonic_now, 0].max) }
+    end
+
+    def raise_in_threads(signal_exception)
+      @threads.each { |thread| thread.raise(signal_exception.class, signal_exception.message) if thread.alive? }
     end
 
     # Waits until every thread exits or the shutdown deadline passes. The
