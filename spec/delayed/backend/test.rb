@@ -9,7 +9,9 @@ module Delayed
 
         include Delayed::Backend::Base
 
-        cattr_accessor :id
+        # The id counter: class-level only (an instance reader would make every
+        # job report the last id given out).
+        cattr_accessor :id, :instance_accessor => false
         self.id = 0
 
         # Guards the in-memory job list so the backend can be used by
