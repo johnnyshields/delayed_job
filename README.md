@@ -343,7 +343,8 @@ With `--prefetch-dynamic` (`PREFETCH_DYNAMIC=1`, `Delayed::Worker.prefetch_dynam
 the queue depth adapts: it starts at 0 (idle threads only), grows by one level
 after each poll that got every job it asked for (up to `--prefetch`), and drops
 back to 0 after a poll that got fewer, as the queue ran dry. Jobs already queued
-still run.
+still run. At depth 0 only idle threads get jobs, so the depth grows again once
+threads have worked through their queues and polls keep finding jobs for them.
 
 A queued job waits behind its thread's current job, so prefetch suits many
 short jobs; keep it at 0 for queues with long ones, or use `--prefetch-dynamic`

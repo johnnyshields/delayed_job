@@ -217,7 +217,8 @@ describe 'Prefetching jobs (Worker.prefetch)' do
       slots = d.instance_variable_get(:@slots)
       queued = slots[d.workers.first][1]
       d.send(:dispatch, queued, Delayed::Job.enqueue(SimpleJob.new))
-      expect(d.send(:heartbeat_names)).to eq d.workers.map(&:name) + [queued.name]
+      # Only slot names: no job is locked under the plain worker names.
+      expect(d.send(:heartbeat_names)).to eq [queued.name]
     end
 
     it 'stops refreshing the lock of an overrun job, not of queued ones' do
@@ -332,6 +333,31 @@ describe 'Prefetching jobs (Worker.prefetch)' do
     end
   end
 
+  describe 'a crashed worker thread' do
+    before { Delayed::Worker.prefetch = 1 }
+
+    it 'releases its queued jobs and frees its slots' do
+      gate_jobs(4)
+      d = dispatcher(2)
+      crash = Queue.new
+      crash_error = Class.new(Exception) # rubocop:disable Lint/InheritException -- not rescued by job handling
+      allow(d.workers.first).to receive(:perform_job) do
+        crash.pop
+        raise crash_error, 'boom'
+      end
+      thread = run_in_thread(d)
+      wait_until { locked_jobs.size == 4 }
+      crash << :go
+      GateJob.release = true # The other worker's job finishes as it stops.
+      expect { Timeout.timeout(10) { thread.join } }.to raise_error(crash_error, 'boom')
+      running.clear
+      expect(d.send(:in_flight)).to eq 0
+      expect(d.send(:free_slots)).to all(satisfy { |slot| d.instance_variable_get(:@slot_owner)[slot] != d.workers.first })
+      left = Delayed::Job.all.reject { |job| GateJob.finished.include?(job.payload_object.key) }
+      expect(left).to all(satisfy { |job| job.reload.locked_by.nil? })
+    end
+  end
+
   describe 'shutdown with queued jobs' do
     before { Delayed::Worker.prefetch = 2 }
 
@@ -409,6 +435,45 @@ describe 'Prefetching jobs (Worker.prefetch)' do
       job = Delayed::Job.all.first
       expect([job.locked_by, job.locked_at, job.attempts]).to eq [nil, nil, 0]
       expect(log.map(&:last).grep(/not started before shutdown/).size).to eq 1
+    end
+
+    it 'clears the slot locks as threads exit, after releasing queued jobs failed' do
+      gate_jobs(6)
+      d = dispatcher(2)
+      thread = run_in_thread(d)
+      wait_until { GateJob.started.size == 2 && locked_jobs.size == 6 }
+      # Stubs are set up here, on this thread: rspec-mocks isn't thread-safe.
+      failing = Concurrent::AtomicBoolean.new(false)
+      allow(Delayed::Job).to receive(:clear_locks!).and_wrap_original do |orig, name|
+        raise IOError, 'down' if failing.true?
+        orig.call(name)
+      end
+      allow(d).to receive(:release_queued).and_wrap_original do |m|
+        failing.make_true
+        m.call
+      ensure
+        failing.make_false
+      end
+      d.stop
+      GateJob.release = true
+      Timeout.timeout(10) { thread.join }
+      expect(log.map(&:last)).to include 'Could not release the queued jobs: IOError: down'
+      expect(Delayed::Job.all.size).to eq 4
+      expect(Delayed::Job.all).to all(satisfy { |job| unlocked?(job) })
+    end
+
+    it 'clears the slot locks of a reserved job that was never handed over' do
+      jobs = gate_jobs(2)
+      d = dispatcher(1)
+      allow(d).to receive(:dispatch).and_wrap_original do |m, slot, job|
+        next m.call(slot, job) unless job.id == jobs[1].id
+        d.stop
+        raise SignalException, 'TERM' # Raised by the trap as the jobs are handed over.
+      end
+      expect { Timeout.timeout(10) { d.run } }.to raise_error(SignalException)
+      # The first job may have started (on JRuby, in parallel) and then been
+      # interrupted by the signal; the second one never reached its thread.
+      expect(unlocked?(jobs[1])).to be true
     end
 
     it 'logs and reports a failure to release queued jobs' do

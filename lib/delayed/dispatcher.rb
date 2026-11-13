@@ -111,7 +111,10 @@ module Delayed
       @slot_owner = {} # slot => worker
       @slot_jobs = {} # slot => job it holds (queued or running)
       @running_slot = {} # worker => slot of the job it is running
+      @dead = [] # workers whose thread crashed: no more jobs for them
       @prefetch = 0
+      # The queue depth (see #adjust_depth). Only the dispatcher's thread
+      # writes it; others (the reserve event, procline) just read it.
       @depth = 0
       @threads = []
       @running = {} # thread => job it is running
@@ -311,6 +314,10 @@ module Delayed
         break if supervisor_gone?
         free, seen = snapshot
         reserved = free.empty? ? [] : poll(free)
+        # A signal exception (see Worker.raise_signal_exceptions) may stop
+        # this part way: jobs not handed over yet stay locked under their
+        # worker's names, which are cleared as its thread exits (see
+        # Plugins::ClearLocks and #clear_slot_locks).
         reserved.each { |slot, job| dispatch(slot, job) }
         deeper = adjust_depth(free.size, reserved.size)
 
@@ -508,12 +515,12 @@ module Delayed
         @jobs_started.select { |_worker, (_job, started, limit)| limit && now - started > limit }
       end
       overrun.each { |worker, (job, _, limit, label)| report_overrun(worker, job, limit, label) }
-      names = (workers - overrun.keys).map(&:name)
-      return names if @prefetch.zero?
-      # And the slots holding jobs (running or queued), but an overrun one.
+      return (workers - overrun.keys).map(&:name) if @prefetch.zero?
+      # With prefetch, jobs are only locked under slot names: those holding
+      # a job (running or queued), but an overrun one.
       synchronize do
         stuck = overrun.keys.map { |worker| @running_slot[worker] }
-        names + (@slot_jobs.keys - stuck).map(&:name)
+        (@slot_jobs.keys - stuck).map(&:name)
       end
     end
 
@@ -601,21 +608,9 @@ module Delayed
     def work(worker, inbox)
       self.class.deferring_interrupts do
         Worker.lifecycle.run_callbacks(:execute, worker) do
-          until (item = inbox.pop).equal?(STOP)
-            slot, job = item
-            discard_stale_interrupts
-            next release_unstarted(worker, slot, job) if past_shutdown_deadline? || (@prefetch > 0 && stop?)
-            synchronize do
-              @running[Thread.current] = job
-              @running_slot[worker] = slot
-            end
-            result = with_reloader { untrack_job_after(worker) { worker.perform_job(job) } }
-            synchronize { @running.delete(Thread.current) }
-            job_finished(worker, slot, result)
-          end
-        rescue ShutdownInterrupt => error
-          job, slot = synchronize { [@running.delete(Thread.current), @running_slot.delete(worker)] }
-          release_interrupted(worker, job, error, slot)
+          work_jobs(worker, inbox)
+        ensure
+          clear_slot_locks(worker)
         end
       end
     rescue *SHUTDOWN_INTERRUPTS
@@ -628,9 +623,53 @@ module Delayed
       thread_error(error, 'Worker thread', worker.name)
       synchronize do
         @running.delete(Thread.current)
+        retire(worker)
         @thread_error ||= error
         signal_event
       end
+    end
+
+    # Runs the jobs handed to the worker until told to stop (see #work).
+    def work_jobs(worker, inbox)
+      until (item = inbox.pop).equal?(STOP)
+        slot, job = item
+        discard_stale_interrupts
+        next release_unstarted(worker, slot, job) if past_shutdown_deadline? || (@prefetch > 0 && stop?)
+        synchronize do
+          @running[Thread.current] = job
+          @running_slot[worker] = slot
+        end
+        result = with_reloader { untrack_job_after(worker) { worker.perform_job(job) } }
+        synchronize { @running.delete(Thread.current) }
+        job_finished(worker, slot, result)
+      end
+    rescue ShutdownInterrupt => error
+      job, slot = synchronize { [@running.delete(Thread.current), @running_slot.delete(worker)] }
+      release_interrupted(worker, job, error, slot)
+    end
+
+    # As the worker's thread exits (also on a crash), with prefetch: clears
+    # the locks of its slots, as Plugins::ClearLocks does for its own name,
+    # under which it locks no job then. Its queued jobs were released
+    # already (see #release_queued); any job still locked under them is
+    # left over, e.g. from a release that failed. A thread stuck in a job
+    # never gets here, so that job stays locked (see #interrupt_threads).
+    def clear_slot_locks(worker)
+      return if @prefetch.zero?
+      names = @slots[worker].map(&:name)
+      with_executor { names.each { |slot_name| Delayed::Job.clear_locks!(slot_name) } }
+    rescue StandardError => error
+      say "Could not release the jobs of #{worker.name}: #{error.class}: #{error.message}", 'error'
+      thread_error(error, 'Releasing interrupted jobs', worker.name)
+    end
+
+    # Under the mutex: the worker's thread crashed. Frees its slots (its
+    # jobs' locks were cleared as it exited, see #clear_slot_locks) and
+    # reserves no more jobs for it.
+    def retire(worker)
+      @dead << worker
+      @running_slot.delete(worker)
+      (@slots[worker] || [worker]).each { |slot| free_slot(slot) }
     end
 
     # Drops shutdown interrupts that arrived after the previous job finished:
@@ -699,10 +738,15 @@ module Delayed
     def stop_threads(error)
       @stop_requested_at ||= monotonic_now
       update_procline
-      release_queued if @prefetch > 0
-      @inboxes.each_value { |inbox| inbox << STOP }
-      raise_in_threads(error) if error.is_a?(SignalException)
       begin
+        # A late signal exception (see below) is deferred until the threads
+        # have all been told to stop: on JRuby, one raised in Queue#push
+        # comes out as a ThreadError, and the STOP would be lost.
+        self.class.deferring_interrupts do
+          release_queued if @prefetch > 0
+          @inboxes.each_value { |inbox| inbox << STOP }
+        end
+        raise_in_threads(error) if error.is_a?(SignalException)
         wait_for_threads
       rescue SignalException => late_signal # rubocop:disable Naming/RescuedExceptionsVariableName -- `error` is the parameter
         # Raised while waiting: on JRuby, signal traps run on a thread of
@@ -755,8 +799,13 @@ module Delayed
       @threads.each { |thread| thread.join([deadline - monotonic_now, 0].max) }
     end
 
+    # Raises the signal exception in the threads running a job, to interrupt
+    # it. Not in the others: they stop when they get STOP, and one that
+    # has only just started could be killed before it can run its :execute
+    # callbacks (e.g. ClearLocks), leaving its locks behind.
     def raise_in_threads(signal_exception)
-      @threads.each { |thread| thread.raise(signal_exception.class, signal_exception.message) if thread.alive? }
+      busy = synchronize { @running.keys }
+      busy.each { |thread| thread.raise(signal_exception.class, signal_exception.message) if thread.alive? }
     end
 
     # Waits until every thread exits or the shutdown deadline passes. The
@@ -894,7 +943,7 @@ module Delayed
     end
 
     def free_slots
-      plan = workers.map do |worker|
+      plan = (workers - @dead).map do |worker|
         slots = @slots[worker] || [worker]
         held = slots.count { |slot| @slot_jobs.key?(slot) }
         [slots.reject { |slot| @slot_jobs.key?(slot) }, held]
