@@ -220,10 +220,17 @@ module Delayed
       Delayed.instrument(:thread_error, info.merge(:error => error))
       handler = on_thread_error
       return unless handler
-      handler.arity == 1 ? handler.call(error) : handler.call(error, info)
+      handler_arity(handler) == 1 ? handler.call(error) : handler.call(error, info)
     rescue StandardError => handler_error
       logger.error("Error in Delayed::Worker.on_thread_error: #{handler_error.class}: #{handler_error.message}") if logger
     end
+
+    # The arity of an on_thread_error handler: of the handler itself (a
+    # Proc, Method), else of its #call method (any object responding to it).
+    def self.handler_arity(handler)
+      handler.respond_to?(:arity) ? handler.arity : handler.method(:call).arity
+    end
+    private_class_method :handler_arity
 
     # Whether lock heartbeats are enabled and supported by the backend.
     def self.lock_heartbeats?

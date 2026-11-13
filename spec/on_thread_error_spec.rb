@@ -47,6 +47,85 @@ describe 'Delayed::Worker.on_thread_error' do
       Delayed::Worker.thread_error(IOError.new, :context => 'Test')
     end
 
+    describe 'handlers that are not Procs' do
+      let(:error) { IOError.new('x') }
+
+      it 'calls an object whose #call takes the error and the info' do
+        handler = Class.new do
+          attr_reader :calls
+
+          def call(error, info)
+            (@calls ||= []) << [error, info]
+          end
+        end.new
+        Delayed::Worker.on_thread_error = handler
+        Delayed::Worker.thread_error(error, :context => 'Test')
+        expect(handler.calls).to eq [[error, {:context => 'Test'}]]
+      end
+
+      it 'calls an object whose #call takes the error only' do
+        handler = Class.new do
+          attr_reader :calls
+
+          def call(error)
+            (@calls ||= []) << error
+          end
+        end.new
+        Delayed::Worker.on_thread_error = handler
+        Delayed::Worker.thread_error(error, :context => 'Test')
+        expect(handler.calls).to eq [error]
+      end
+
+      it 'calls an object whose #call takes optional or splat arguments with both' do
+        handler = Class.new do
+          attr_reader :calls
+
+          def call(*args)
+            (@calls ||= []) << args
+          end
+        end.new
+        Delayed::Worker.on_thread_error = handler
+        Delayed::Worker.thread_error(error, :context => 'Test')
+        expect(handler.calls).to eq [[error, {:context => 'Test'}]]
+      end
+
+      it 'calls a Method object' do
+        calls = []
+        receiver = Object.new
+        receiver.define_singleton_method(:report) { |e| calls << e }
+        Delayed::Worker.on_thread_error = receiver.method(:report)
+        Delayed::Worker.thread_error(error, :context => 'Test')
+        expect(calls).to eq [error]
+      end
+
+      it 'calls a module function given as a Method' do
+        mod = Module.new do
+          def self.calls
+            @calls ||= []
+          end
+
+          def self.report(error, info)
+            calls << [error, info]
+          end
+        end
+        Delayed::Worker.on_thread_error = mod.method(:report)
+        Delayed::Worker.thread_error(error, :context => 'Test')
+        expect(mod.calls).to eq [[error, {:context => 'Test'}]]
+      end
+
+      it 'logs and ignores a handler that does not respond to #call' do
+        Delayed::Worker.on_thread_error = Object.new
+        expect { Delayed::Worker.thread_error(error, :context => 'Test') }.not_to raise_error
+        expect(log.string).to include 'Error in Delayed::Worker.on_thread_error: NameError'
+      end
+
+      it 'does not log anything for a working handler' do
+        Delayed::Worker.on_thread_error = Class.new { def call(_e, _i); end }.new
+        Delayed::Worker.thread_error(error, :context => 'Test')
+        expect(log.string).not_to include 'on_thread_error'
+      end
+    end
+
     it 'publishes a thread_error event as well' do
       events = []
       subscription = ActiveSupport::Notifications.subscribe('thread_error.delayed_job') { |*args| events << args.last }
