@@ -101,7 +101,10 @@ describe 'Delayed::Worker.silence_polling' do
       Delayed::Worker.lock_heartbeat_interval = 0.05
       Delayed::Worker.lock_timeout = 1
       touched = 0
-      allow(job_class).to receive(:touch_locks).and_wrap_original { |m, names| touched += 1; m.call(names) }
+      allow(job_class).to(receive(:touch_locks).and_wrap_original do |m, names|
+        touched += 1
+        m.call(names)
+      end)
       job_class.create!(:payload_object => ProcessJobs::SleepJob.new('long', 0.3))
       run_to_completion(Delayed::Dispatcher.new(:threads => 1))
       expect(touched).to be >= 2
@@ -178,7 +181,10 @@ describe 'Delayed::Worker.silence_polling' do
 
     it 'can be overridden by backends' do
       calls = []
-      allow(job_class).to receive(:silence_polling) { |&block| calls << :silenced; block.call }
+      allow(job_class).to receive(:silence_polling) { |&block|
+        calls << :silenced
+        block.call
+      }
       Delayed::Worker.silence_polling = true
       run_to_completion(Delayed::Dispatcher.new(:threads => 1))
       expect(calls).not_to be_empty

@@ -1,21 +1,11 @@
 require 'monitor'
 
-
 # An in-memory backend suitable only for testing. Tries to behave as if it were an ORM.
 module Delayed
   module Backend
     module Test
       class Job
-        attr_accessor :id
-        attr_accessor :priority
-        attr_accessor :attempts
-        attr_accessor :handler
-        attr_accessor :last_error
-        attr_accessor :run_at
-        attr_accessor :locked_at
-        attr_accessor :locked_by
-        attr_accessor :failed_at
-        attr_accessor :queue
+        attr_accessor :id, :priority, :attempts, :handler, :last_error, :run_at, :locked_at, :locked_by, :failed_at, :queue
 
         include Delayed::Backend::Base
 
@@ -73,7 +63,7 @@ module Delayed
         end
 
         # Find a few candidate jobs to run (in case some immediately get locked by others).
-        def self.find_available(worker_name, limit = 5, max_run_time = Worker.max_run_time) # rubocop:disable CyclomaticComplexity, PerceivedComplexity
+        def self.find_available(worker_name, limit = 5, max_run_time = Worker.max_run_time) # rubocop:disable Metrics/CyclomaticComplexity, Metrics/PerceivedComplexity
           jobs = synchronize do
             all.select do |j|
               j.run_at <= db_time_now &&

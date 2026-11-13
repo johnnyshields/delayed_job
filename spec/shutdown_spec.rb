@@ -175,8 +175,8 @@ describe 'Stopping a worker' do
       thread = run_until_started(1)
       dispatcher.stop
       Timeout.timeout(5) { thread.join }
-      expect(log.select { |level, _| level == 'error' }.map(&:last))
-        .to include(/\ACould not release the jobs of .+ thread:\d: IOError: db down\z/)
+      expect(log.select { |level, _| level == 'error' }.map(&:last)).
+        to include(/\ACould not release the jobs of .+ thread:\d: IOError: db down\z/)
     end
   end
 
@@ -259,7 +259,7 @@ describe 'Stopping a worker' do
       expect(log.map(&:last).grep(/interrupted by shutdown/)).to be_empty
     end
 
-    it "lets the :execute callbacks (e.g. ClearLocks) finish when interrupted" do
+    it 'lets the :execute callbacks (e.g. ClearLocks) finish when interrupted' do
       dispatcher # Worker.new resets the lifecycle.
       exiting = Queue.new
       gate = Queue.new
@@ -1008,7 +1008,10 @@ describe 'Signals received while a worker process starts up' do
 
     it 'is called first in the forked worker, and its signals are passed to the worker' do
       pending = ['TERM']
-      allow(launcher).to receive(:fork) { |&block| block.call; 123 }
+      allow(launcher).to receive(:fork) { |&block|
+        block.call
+        123
+      }
       expect(launcher).to receive(:capture_signals).ordered.and_return(pending)
       expect(launcher).to receive(:run_worker).with('delayed_job.0', {}, pending).ordered
       expect(launcher.send(:fork_worker, 'delayed_job.0', {})).to eq 123

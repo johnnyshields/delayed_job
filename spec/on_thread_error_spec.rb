@@ -255,6 +255,7 @@ describe 'Delayed::Worker.on_thread_error' do
       def payload.max_attempts
         1
       end
+
       def payload.perform
         raise 'job failed'
       end

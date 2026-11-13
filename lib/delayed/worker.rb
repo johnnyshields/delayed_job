@@ -11,7 +11,7 @@ module Delayed
   # Runs jobs. In a worker process, Delayed::Dispatcher runs each Worker on its
   # own thread and hands it jobs. Worker#work_off runs jobs inline on the
   # calling thread instead (e.g. in tests or a console).
-  class Worker # rubocop:disable ClassLength
+  class Worker # rubocop:disable Metrics/ClassLength
     include Logging
 
     DEFAULT_LOG_LEVEL        = 'info'.freeze
@@ -25,7 +25,7 @@ module Delayed
     DEFAULT_READ_AHEAD       = 5
     DEFAULT_SHUTDOWN_TIMEOUT = nil
     DEFAULT_LOCK_HEARTBEAT_INTERVAL = nil
-    DEFAULT_LOCK_TIMEOUT     = 5.minutes
+    DEFAULT_LOCK_TIMEOUT = 5.minutes
 
     cattr_accessor :min_priority, :max_priority, :max_attempts, :max_run_time,
                    :default_priority, :sleep_delay, :logger, :delay_jobs, :queues,
@@ -112,7 +112,7 @@ module Delayed
       self.min_priority      = nil
       self.max_priority      = nil
       self.default_queue_name = nil
-      @lifecycle             = nil
+      @lifecycle = nil
     end
 
     # Add or remove plugins in this list before the worker is instantiated
@@ -137,13 +137,12 @@ module Delayed
         require "delayed/backend/#{backend}"
         backend = "Delayed::Backend::#{backend.to_s.classify}::Job".constantize
       end
-      @@backend = backend # rubocop:disable ClassVars
+      @@backend = backend # rubocop:disable Style/ClassVars
       silence_warnings { ::Delayed.const_set(:Job, backend) }
     end
 
-    # rubocop:disable ClassVars
     def self.queue_attributes=(val)
-      @@queue_attributes = val.with_indifferent_access
+      @@queue_attributes = val.with_indifferent_access # rubocop:disable Style/ClassVars
     end
 
     def self.guess_backend
@@ -165,11 +164,9 @@ module Delayed
     def self.after_fork
       # Re-open file handles
       @files_to_reopen.each do |file|
-        begin
-          file.reopen file.path, 'a+'
-          file.sync = true
-        rescue ::Exception # rubocop:disable HandleExceptions, RescueException
-        end
+        file.reopen file.path, 'a+'
+        file.sync = true
+      rescue ::Exception # rubocop:disable Lint/SuppressedException, Lint/RescueException
       end
       backend.after_fork
     end
@@ -239,8 +236,8 @@ module Delayed
       when 1 then handler.call(error)
       else handler.call(error, info)
       end
-    rescue StandardError => handler_error
-      logger.error("Error in Delayed::Worker.on_thread_error: #{handler_error.class}: #{handler_error.message}") if logger
+    rescue StandardError => error
+      logger.error("Error in Delayed::Worker.on_thread_error: #{error.class}: #{error.message}") if logger
     end
 
     # The arity of an on_thread_error handler: of the handler itself (a
@@ -350,7 +347,7 @@ module Delayed
       owned_destroy(job)
       runtime = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
       job_say job, format('COMPLETED after %.4f', runtime)
-      return true # did work
+      true # did work
     rescue ShutdownInterrupt
       raise # the job didn't fail; Delayed::Dispatcher releases it
     rescue DeserializationError => error
@@ -358,10 +355,10 @@ module Delayed
 
       job.error = error
       failed(job)
-      return false # work failed
-    rescue Exception => error # rubocop:disable RescueException
+      false # work failed
+    rescue Exception => error # rubocop:disable Lint/RescueException
       fail_attempt(job, error)
-      return false # work failed
+      false # work failed
     end
 
     # Records a failed attempt of the job: runs the :error callbacks, then
@@ -388,15 +385,13 @@ module Delayed
     def failed(job)
       Delayed.instrument(:job_failed, :job => job, :worker => name, :error => job.error)
       self.class.lifecycle.run_callbacks(:failure, self, job) do
-        begin
-          job.hook(:failure)
-        rescue => error
-          say "Error when running failure callback: #{error}", 'error'
-          say error.backtrace.join("\n"), 'error'
-          self.class.thread_error(error, :context => 'Failure hook', :worker => name, :job => job)
-        ensure
-          job.destroy_failed_jobs? ? owned_destroy(job) : owned_fail(job)
-        end
+        job.hook(:failure)
+      rescue StandardError => error
+        say "Error when running failure callback: #{error}", 'error'
+        say error.backtrace.join("\n"), 'error'
+        self.class.thread_error(error, :context => 'Failure hook', :worker => name, :job => job)
+      ensure
+        job.destroy_failed_jobs? ? owned_destroy(job) : owned_fail(job)
       end
     end
 
@@ -463,7 +458,6 @@ module Delayed
       job_say job, "FAILED (#{job.attempts} prior attempts) with #{error.class.name}: #{error.message}", 'error'
       reschedule(job)
     end
-
   end
 end
 

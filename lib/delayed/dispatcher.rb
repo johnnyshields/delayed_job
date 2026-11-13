@@ -16,7 +16,7 @@ module Delayed
   #
   # Queue and priority settings are process-wide (class-level settings of
   # Delayed::Worker), so all threads of a process work the same queues.
-  class Dispatcher # rubocop:disable ClassLength
+  class Dispatcher # rubocop:disable Metrics/ClassLength
     include Logging
 
     STOP = Object.new.freeze
@@ -143,7 +143,7 @@ module Delayed
           start_threads
           begin
             poll_loop
-          rescue Exception => error # rubocop:disable RescueException
+          rescue Exception => error # rubocop:disable Lint/RescueException
             # A worker thread's crash was reported by the thread itself.
             thread_error(error, 'Dispatcher') unless stopping_error?(error)
             raise
@@ -203,8 +203,8 @@ module Delayed
     # "delayed_job.0: 3/4 busy, queues=mail,sms".
     def procline
       state = if quit? then 'quitting, '
-              elsif stop? then 'stopping, '
-              end
+      elsif stop? then 'stopping, '
+      end
       "#{@procline_name}: #{state}#{in_flight}/#{thread_count} busy, queues=#{queue_names}"
     end
 
@@ -272,7 +272,7 @@ module Delayed
       signal == 'QUIT' ? quit : stop
     end
 
-    def poll_loop # rubocop:disable CyclomaticComplexity, PerceivedComplexity
+    def poll_loop
       until stop?
         update_procline
         raise_thread_error
@@ -362,7 +362,7 @@ module Delayed
     rescue SignalException, SystemExit
       # Stopping (see Worker.raise_signal_exceptions), not a failed reservation.
       raise
-    rescue ::Exception => error # rubocop:disable RescueException
+    rescue ::Exception => error # rubocop:disable Lint/RescueException
       say "Error while reserving job: #{error}"
       thread_error(error, 'Reservation')
       Delayed::Job.recover_from(error)
@@ -425,7 +425,7 @@ module Delayed
           crashes = 0
         rescue SignalException, SystemExit
           raise
-        rescue Exception => error # rubocop:disable RescueException
+        rescue Exception => error # rubocop:disable Lint/RescueException
           crashes += 1
           thread_error(error, 'Lock heartbeat')
           if crashes >= MAX_HEARTBEAT_CRASHES
@@ -520,17 +520,15 @@ module Delayed
     def work(worker, inbox)
       self.class.deferring_interrupts do
         Worker.lifecycle.run_callbacks(:execute, worker) do
-          begin
-            until (job = inbox.pop).equal?(STOP)
-              discard_stale_interrupts
-              synchronize { @running[Thread.current] = job }
-              result = with_reloader { track_job(worker, job) { worker.perform_job(job) } }
-              synchronize { @running.delete(Thread.current) }
-              job_finished(worker, result)
-            end
-          rescue ShutdownInterrupt => interrupt
-            release_interrupted(worker, synchronize { @running.delete(Thread.current) }, interrupt)
+          until (job = inbox.pop).equal?(STOP)
+            discard_stale_interrupts
+            synchronize { @running[Thread.current] = job }
+            result = with_reloader { track_job(worker, job) { worker.perform_job(job) } }
+            synchronize { @running.delete(Thread.current) }
+            job_finished(worker, result)
           end
+        rescue ShutdownInterrupt => error
+          release_interrupted(worker, synchronize { @running.delete(Thread.current) }, error)
         end
       end
     rescue *SHUTDOWN_INTERRUPTS
@@ -539,7 +537,7 @@ module Delayed
       # job (see #stop_threads) that escaped it: the process is stopping
       # anyway, so this is no thread crash to report.
       synchronize { @running.delete(Thread.current) }
-    rescue Exception => error # rubocop:disable RescueException
+    rescue Exception => error # rubocop:disable Lint/RescueException
       thread_error(error, 'Worker thread', worker.name)
       synchronize do
         @running.delete(Thread.current)
@@ -547,7 +545,6 @@ module Delayed
         signal_event
       end
     end
-
 
     # Drops shutdown interrupts that arrived after the previous job finished:
     # they were meant for that job, not for the next one. Stops as soon as a
@@ -646,8 +643,8 @@ module Delayed
       busy.each { |thread| thread.join([deadline - monotonic_now, 0].max) }
       stuck = busy.count(&:alive?)
       return if stuck.zero?
-      say format('%d job(s) did not stop within %gs of being interrupted; ', stuck, INTERRUPT_GRACE) +
-          'leaving them locked until max_run_time expires', 'error'
+      say format('%<stuck>d job(s) did not stop within %<grace>gs of being interrupted; ' \
+                 'leaving them locked until max_run_time expires', :stuck => stuck, :grace => INTERRUPT_GRACE), 'error'
     end
 
     # When running jobs are interrupted: at once after #quit, else

@@ -50,7 +50,10 @@ describe 'Instrumentation' do
     end
 
     it 'returns the result of the block and times it' do
-      expect(Delayed.instrument(:custom) { sleep 0.02; :done }).to eq :done
+      expect(Delayed.instrument(:custom) do
+        sleep 0.02
+        :done
+      end).to eq :done
       expect(named(:custom).first.duration).to be >= 15
     end
 
@@ -61,7 +64,7 @@ describe 'Instrumentation' do
 
     it "lets the block's exceptions through, and records them in the payload" do
       expect { Delayed.instrument(:custom) { raise IOError, 'boom' } }.to raise_error(IOError, 'boom')
-      expect(payload(:custom)[:exception]).to eq ['IOError', 'boom']
+      expect(payload(:custom)[:exception]).to eq %w[IOError boom]
     end
 
     it "lets the block's non-standard exceptions through" do
@@ -78,7 +81,10 @@ describe 'Instrumentation' do
       it 'does not prevent or repeat the block when it fails as the event finishes' do
         subscribe(:custom) { raise 'subscriber bug' }
         runs = 0
-        expect(Delayed.instrument(:custom) { runs += 1; :result }).to eq :result
+        expect(Delayed.instrument(:custom) do
+          runs += 1
+          :result
+        end).to eq :result
         expect(runs).to eq 1
         expect(log.string).to include 'Error in a subscriber to custom.delayed_job'
       end
@@ -93,7 +99,10 @@ describe 'Instrumentation' do
         subscribe(:custom) {} # Keeps other subscribers' order realistic.
         @subscriptions << ActiveSupport::Notifications.subscribe('custom.delayed_job', subscriber)
         runs = 0
-        expect(Delayed.instrument(:custom) { runs += 1; :result }).to eq :result
+        expect(Delayed.instrument(:custom) do
+          runs += 1
+          :result
+        end).to eq :result
         expect(runs).to eq 1
         expect(log.string).to include 'start bug'
       end
@@ -121,8 +130,8 @@ describe 'Instrumentation' do
 
         it 'does not replace a Delayed::ShutdownInterrupt' do
           subscribe(:custom) { raise 'subscriber bug' }
-          expect { Delayed.instrument(:custom) { raise Delayed::ShutdownInterrupt, 'quitting' } }
-            .to raise_error(Delayed::ShutdownInterrupt, 'quitting')
+          expect { Delayed.instrument(:custom) { raise Delayed::ShutdownInterrupt, 'quitting' } }.
+            to raise_error(Delayed::ShutdownInterrupt, 'quitting')
         end
 
         it 'does not replace a signal' do
@@ -142,7 +151,7 @@ describe 'Instrumentation' do
           subscribe(:custom) { |*args| seen << args.last[:exception] }
           subscribe(:custom) { raise 'subscriber bug' }
           expect { Delayed.instrument(:custom) { raise IOError, 'boom' } }.to raise_error(IOError)
-          expect(seen).to eq [['IOError', 'boom']]
+          expect(seen).to eq [%w[IOError boom]]
         end
 
         it 'lets a signal raised by a subscriber through' do
@@ -153,7 +162,12 @@ describe 'Instrumentation' do
         it 'runs the block once' do
           subscribe(:custom) { raise 'subscriber bug' }
           runs = 0
-          expect { Delayed.instrument(:custom) { runs += 1; raise IOError } }.to raise_error(IOError)
+          expect do
+            Delayed.instrument(:custom) do
+              runs += 1
+              raise IOError
+            end
+          end.to raise_error(IOError)
           expect(runs).to eq 1
         end
       end
@@ -256,7 +270,7 @@ describe 'Instrumentation' do
       dispatcher.stop
       begin
         @thread.join(5)
-      rescue Exception # rubocop:disable RescueException
+      rescue Exception # rubocop:disable Lint/RescueException
         nil # Raised in the example already.
       end
     end
@@ -493,19 +507,17 @@ describe 'Instrumentation' do
     end
 
     it 'logs the events of a run once attached' do
-      begin
-        described_class.attach_to :delayed_job
-        Delayed::Job.enqueue(SimpleJob.new)
-        Delayed::Worker.new.work_off
-        expect(log.string).to match(/Job SimpleJob \(id=\d+\) succeeded on .* \(\d+\.\dms\)/)
-        Delayed::Job.enqueue(ErrorJob.new)
-        Delayed::Worker.max_attempts = 1
-        Delayed::Worker.new.work_off
-        expect(log.string).to match(/Job ErrorJob \(id=\d+\) failed attempt 1 on .* with Exception: did not work/)
-        expect(log.string).to match(/Job ErrorJob \(id=\d+\) failed permanently on /)
-      ensure
-        described_class.detach_from :delayed_job if described_class.respond_to?(:detach_from)
-      end
+      described_class.attach_to :delayed_job
+      Delayed::Job.enqueue(SimpleJob.new)
+      Delayed::Worker.new.work_off
+      expect(log.string).to match(/Job SimpleJob \(id=\d+\) succeeded on .* \(\d+\.\dms\)/)
+      Delayed::Job.enqueue(ErrorJob.new)
+      Delayed::Worker.max_attempts = 1
+      Delayed::Worker.new.work_off
+      expect(log.string).to match(/Job ErrorJob \(id=\d+\) failed attempt 1 on .* with Exception: did not work/)
+      expect(log.string).to match(/Job ErrorJob \(id=\d+\) failed permanently on /)
+    ensure
+      described_class.detach_from :delayed_job if described_class.respond_to?(:detach_from)
     end
   end
 end

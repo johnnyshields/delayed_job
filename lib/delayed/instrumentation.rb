@@ -11,7 +11,7 @@ module Delayed
   module Instrumentation
     NAMESPACE = 'delayed_job'.freeze
 
-    module_function
+  module_function
 
     def instrument(event, payload = {})
       name = "#{event}.#{NAMESPACE}"
@@ -25,12 +25,12 @@ module Delayed
           started = true
           begin
             result = yield(p)
-          rescue Exception => error # rubocop:disable RescueException
+          rescue Exception => error # rubocop:disable Lint/RescueException
             block_error = error
             raise
           end
         end
-      rescue Exception => error # rubocop:disable RescueException
+      rescue Exception => error # rubocop:disable Lint/RescueException
         # Raised by the block; or not a subscriber's bug (a signal, a
         # Delayed::ShutdownInterrupt raised into this thread).
         raise if error.equal?(block_error) || !error.is_a?(StandardError)

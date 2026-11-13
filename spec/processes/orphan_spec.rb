@@ -7,7 +7,7 @@ require_relative 'helpers'
 describe 'A forking launcher that is SIGKILLed', :processes do
   include ProcessHelpers
 
-  def worker_pids(job)
+  def worker_pids(_job)
     ProcessHelpers::Job.where.not(:locked_by => nil).pluck(:locked_by).map { |name| name[/pid:(\d+)/, 1].to_i }
   end
 
@@ -42,6 +42,6 @@ describe 'A forking launcher that is SIGKILLed', :processes do
     expect(reload_job(job)).to be_nil
   ensure
     reader.close if reader && !reader.closed?
-    [busy_child, idle_child].compact.each { |child| Process.kill('KILL', child) rescue nil } # rubocop:disable RescueModifier
+    [busy_child, idle_child].compact.each { |child| Process.kill('KILL', child) rescue nil }
   end
 end

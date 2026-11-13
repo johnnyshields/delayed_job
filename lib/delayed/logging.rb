@@ -8,9 +8,7 @@ module Delayed
       logger = Delayed::Worker.logger
       return unless logger
       # TODO: Deprecate use of Fixnum log levels
-      unless level.is_a?(String)
-        level = Logger::Severity.constants.detect { |i| Logger::Severity.const_get(i) == level }.to_s.downcase
-      end
+      level = Logger::Severity.constants.detect { |i| Logger::Severity.const_get(i) == level }.to_s.downcase unless level.is_a?(String)
       logger.send(level, "#{Time.now.strftime('%FT%T%z')}: #{text}")
     end
   end

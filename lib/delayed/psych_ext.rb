@@ -27,7 +27,7 @@ module Delayed
         end
       end
 
-      def visit_Psych_Nodes_Mapping(object) # rubocop:disable CyclomaticComplexity, MethodName, PerceivedComplexity
+      def visit_Psych_Nodes_Mapping(object) # rubocop:disable Metrics/CyclomaticComplexity, Naming/MethodName, Metrics/PerceivedComplexity
         klass = Psych.load_tags[object.tag]
         if klass
           # Implementation changed here https://github.com/ruby/psych/commit/2c644e184192975b261a81f486a04defa3172b3f
@@ -44,7 +44,7 @@ module Delayed
             id = result[klass.primary_key]
             begin
               klass.unscoped.find(id)
-            rescue ActiveRecord::RecordNotFound => error # rubocop:disable BlockNesting
+            rescue ActiveRecord::RecordNotFound => error # rubocop:disable Metrics/BlockNesting
               raise Delayed::DeserializationError, "ActiveRecord::RecordNotFound, class: #{klass}, primary key: #{id} (#{error.message})"
             end
           else
@@ -94,7 +94,7 @@ module Delayed
       def resolve_class(klass_name)
         return nil if !klass_name || klass_name.empty?
         klass_name.constantize
-      rescue
+      rescue StandardError
         super
       end
     end

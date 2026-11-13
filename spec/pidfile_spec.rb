@@ -164,14 +164,14 @@ describe Delayed::Pidfile do
     end
 
     after do
-      (@children || []).each { |child| Process.kill('KILL', child) rescue nil } # rubocop:disable RescueModifier
+      (@children || []).each { |child| Process.kill('KILL', child) rescue nil }
     end
 
     it 'keep the lock when forked without exec, until they exit' do
-      child = launcher_leaving_child("fork { sleep 30 }.tap { |c| Process.detach(c) }")
+      child = launcher_leaving_child('fork { sleep 30 }.tap { |c| Process.detach(c) }')
       expect { pidfile.setup }.to raise_error(Delayed::AlreadyRunningError)
       Process.kill('KILL', child)
-      Timeout.timeout(5) { sleep 0.05 while (Process.kill(0, child) rescue nil) } # rubocop:disable RescueModifier
+      Timeout.timeout(5) { sleep 0.05 while (Process.kill(0, child) rescue nil) }
       expect { pidfile.setup }.not_to raise_error
     end
 

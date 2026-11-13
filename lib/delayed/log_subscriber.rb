@@ -33,9 +33,9 @@ module Delayed
     def perform(event)
       p = event.payload
       outcome = if p[:exception] then "was interrupted (#{p[:exception].first})"
-                elsif p[:success] then 'succeeded'
-                else 'failed'
-                end
+      elsif p[:success] then 'succeeded'
+      else 'failed'
+      end
       log(:debug) { "#{job(p[:job])} #{outcome} on #{p[:worker]} (#{ms(event)})" }
     end
 
@@ -83,8 +83,8 @@ module Delayed
 
     # Logs through the logger directly: ActiveSupport's level helpers
     # (info, error, ...) differ between its versions.
-    def log(level)
-      logger.public_send(level) { yield } if logger
+    def log(level, &block)
+      logger.public_send(level, &block) if logger
     end
 
     # The exception raised in an instrumented block, if any.

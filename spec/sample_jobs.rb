@@ -180,19 +180,17 @@ class GateJob
     if stubborn
       # Ignores interrupts, as a job that rescues Exception would.
       loop do
-        begin
-          sleep 0.01 until self.class.release
-          break
-        rescue Exception # rubocop:disable RescueException
-          next
-        end
+        sleep 0.01 until self.class.release
+        break
+      rescue Exception # rubocop:disable Lint/RescueException
+        next
       end
     else
       begin
         sleep 0.01 until self.class.release
       rescue StandardError
         raise 'a StandardError rescue must not catch the interrupt'
-      rescue Exception # rubocop:disable RescueException
+      rescue Exception # rubocop:disable Lint/RescueException
         self.class.interrupted << key
         raise
       end
@@ -209,7 +207,7 @@ class NapJob
   def perform
     sleep 0.2
     self.class.outcomes << :finished
-  rescue Exception # rubocop:disable RescueException
+  rescue Exception # rubocop:disable Lint/RescueException
     self.class.outcomes << :interrupted
     raise
   end
@@ -233,7 +231,7 @@ class StuckJob
     deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + seconds
     begin
       sleep 0.01 while Process.clock_gettime(Process::CLOCK_MONOTONIC) < deadline
-    rescue Exception # rubocop:disable RescueException
+    rescue Exception # rubocop:disable Lint/RescueException
       retry
     end
   end

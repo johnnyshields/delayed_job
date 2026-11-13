@@ -33,7 +33,6 @@ describe 'A worker process dying while running jobs', :processes do
       expect(job.last_error).to match(/\AWorker process delayed_job\.\d \(pid \d+\) was killed by signal 9/)
       expect(ProcessHelpers::Run.where(:key => 'after the kill').count).to eq 1
     end
-
   end
 
   context 'when it exits with a failure status' do

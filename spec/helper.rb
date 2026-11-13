@@ -37,7 +37,7 @@ end
 ENV['RAILS_ENV'] = 'test'
 
 # Trigger AR to initialize
-ActiveRecord::Base # rubocop:disable Void
+ActiveRecord::Base # rubocop:disable Lint/Void
 
 module Rails
   def self.root

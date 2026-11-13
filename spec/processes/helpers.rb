@@ -55,7 +55,7 @@ module ProcessHelpers
       output << read_available(reader)
       _, status = Process.waitpid2(pid, Process::WNOHANG)
       next if status || Time.now < deadline
-      Process.kill('KILL', -pid) rescue nil # rubocop:disable RescueModifier
+      Process.kill('KILL', -pid) rescue nil
       Process.waitpid(pid)
       raise "launcher did not exit within #{timeout}s. Output:\n#{output}"
     end
@@ -75,13 +75,13 @@ module ProcessHelpers
       output << reader.read_nonblock(65_536)
     end
     output
-  rescue EOFError, IOError
+  rescue IOError # Including EOFError.
     output
   end
 
   def read_available(reader)
     reader.wait_readable(0.1) ? reader.read_nonblock(65_536) : ''
-  rescue EOFError, IOError
+  rescue IOError # Including EOFError.
     ''
   end
 

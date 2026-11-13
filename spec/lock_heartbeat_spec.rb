@@ -107,7 +107,7 @@ describe 'Lock heartbeats' do
     after do
       next unless @dispatcher_thread && @dispatcher_thread.alive?
       dispatcher.quit
-      @dispatcher_thread.join(10) rescue nil # rubocop:disable RescueModifier
+      @dispatcher_thread.join(10) rescue nil
       @dispatcher_thread.kill
     end
 
@@ -127,7 +127,10 @@ describe 'Lock heartbeats' do
 
     it 'refreshes the locks of every worker thread in one call per heartbeat' do
       names = []
-      allow(job_class).to receive(:touch_locks) { |n| names << n; 0 }
+      allow(job_class).to receive(:touch_locks) { |n|
+        names << n
+        0
+      }
       thread = run_dispatcher
       sleep 0.35
       dispatcher.stop
@@ -275,7 +278,10 @@ describe 'Lock heartbeats' do
         events = []
         subscription = ActiveSupport::Notifications.subscribe('thread_error.delayed_job') { |*args| events << args.last }
         calls = 0
-        allow(job_class).to receive(:touch_locks) { raise ScriptError, 'broken' if (calls += 1) == 1; 0 }
+        allow(job_class).to receive(:touch_locks) {
+          raise ScriptError, 'broken' if (calls += 1) == 1
+          0
+        }
         run_briefly
         expect(events.map { |p| p[:context] }).to eq ['Lock heartbeat']
       ensure
@@ -290,7 +296,10 @@ describe 'Lock heartbeats' do
           m.call
         end
         touched = 0
-        allow(job_class).to receive(:touch_locks) { touched += 1; 0 }
+        allow(job_class).to receive(:touch_locks) {
+          touched += 1
+          0
+        }
         run_briefly
         expect(calls).to be >= 2
         expect(touched).to be >= 1
@@ -437,8 +446,6 @@ describe 'Lock heartbeats' do
           expect(job).not_to receive(:payload_object)
           dispatcher.send(:heartbeat_names)
         end
-
-
       end
 
       describe '#job_timed' do
@@ -479,7 +486,10 @@ describe 'Lock heartbeats' do
 
         it 'works the limit out once, on the thread that runs the job' do
           threads = []
-          allow(worker).to receive(:max_run_time).and_wrap_original { |m, job| threads << Thread.current; m.call(job) }
+          allow(worker).to(receive(:max_run_time).and_wrap_original do |m, job|
+            threads << Thread.current
+            m.call(job)
+          end)
           allow_any_instance_of(SimpleJob).to receive(:perform) { 3.times { dispatcher.send(:heartbeat_names) } }
           job_class.create!(:payload_object => SimpleJob.new)
           expect(dispatcher.work_off(1, worker)).to eq [1, 0]
@@ -506,9 +516,12 @@ describe 'Lock heartbeats' do
         end
       end
 
-      it "fails a job whose max_run_time raises, as before, while the heartbeat refreshes every lock" do
+      it 'fails a job whose max_run_time raises, as before, while the heartbeat refreshes every lock' do
         touched = Queue.new
-        allow(job_class).to receive(:touch_locks).and_wrap_original { |m, names| touched << names; m.call(names) }
+        allow(job_class).to(receive(:touch_locks).and_wrap_original do |m, names|
+          touched << names
+          m.call(names)
+        end)
         allow_any_instance_of(StuckJob).to receive(:max_run_time).and_raise(ArgumentError, 'broken job')
         broken = job_class.create!(:payload_object => StuckJob.new(0, 1))
         long = job_class.create!(:payload_object => ProcessJobs::SleepJob.new('long', 0.5))
@@ -577,7 +590,10 @@ describe 'Lock heartbeats' do
 
       it 'stops refreshing the lock of a job stuck past its max_run_time, so another worker can take it over' do
         touched = Queue.new
-        allow(job_class).to receive(:touch_locks).and_wrap_original { |m, names| touched << names; m.call(names) }
+        allow(job_class).to(receive(:touch_locks).and_wrap_original do |m, names|
+          touched << names
+          m.call(names)
+        end)
         runs = Queue.new
         # Stuck (2.5s, past its 1s max_run_time) on its first run only.
         allow_any_instance_of(StuckJob).to receive(:perform).and_wrap_original do |m|
@@ -635,7 +651,10 @@ describe 'Lock heartbeats' do
       it 'refreshes locks while running jobs inline' do
         job = job_class.create!(:payload_object => ProcessJobs::SleepJob.new('inline', 0.5))
         touched = []
-        allow(job_class).to receive(:touch_locks).and_wrap_original { |m, n| touched << n; m.call(n) }
+        allow(job_class).to(receive(:touch_locks).and_wrap_original do |m, n|
+          touched << n
+          m.call(n)
+        end)
         expect(dispatcher.work_off(1, dispatcher.workers.first)).to eq [1, 0]
         expect(touched).not_to be_empty
         expect(job_class.where(:id => job.id)).to be_empty

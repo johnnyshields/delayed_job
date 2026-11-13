@@ -102,11 +102,9 @@ module Delayed
       # Signal-trap safe: doesn't log.
       def forward_signal(signal)
         workers.each_key do |pid|
-          begin
-            Process.kill(signal, pid)
-          rescue Errno::ESRCH
-            nil
-          end
+          Process.kill(signal, pid)
+        rescue Errno::ESRCH
+          nil
         end
       end
 
@@ -183,7 +181,7 @@ module Delayed
         @supervisor_pid ||= Process.pid
       end
 
-      def run_loop # rubocop:disable CyclomaticComplexity, PerceivedComplexity
+      def run_loop # rubocop:disable Metrics/CyclomaticComplexity, Metrics/PerceivedComplexity
         loop do
           worker_pid, child_status = Process.wait2
           next unless workers.key?(worker_pid)
@@ -264,12 +262,10 @@ module Delayed
       # the run loop) are skipped: signalling them must not abort a kill.
       def signal_workers(signal)
         workers.dup.each do |pid, (worker_name, _)|
-          begin
-            Process.kill(signal, pid)
-            logger.info "Sent SIG#{signal} to worker #{worker_name}"
-          rescue Errno::ESRCH
-            logger.info "Worker #{worker_name} (pid #{pid}) already exited; not sent SIG#{signal}"
-          end
+          Process.kill(signal, pid)
+          logger.info "Sent SIG#{signal} to worker #{worker_name}"
+        rescue Errno::ESRCH
+          logger.info "Worker #{worker_name} (pid #{pid}) already exited; not sent SIG#{signal}"
         end
       end
 

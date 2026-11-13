@@ -25,7 +25,7 @@ namespace :jobs do
     @options[:min_priority] = Integer(ENV['MIN_PRIORITY']) if ENV['MIN_PRIORITY']
     @options[:max_priority] = Integer(ENV['MAX_PRIORITY']) if ENV['MAX_PRIORITY']
     # Whole or fractional seconds.
-    @options[:sleep_delay] = (Integer(ENV['SLEEP_DELAY'], 10) rescue Float(ENV['SLEEP_DELAY'])) if ENV['SLEEP_DELAY'] # rubocop:disable RescueModifier
+    @options[:sleep_delay] = (Integer(ENV['SLEEP_DELAY'], 10) rescue Float(ENV['SLEEP_DELAY'])) if ENV['SLEEP_DELAY']
     @options[:read_ahead] = Integer(ENV['READ_AHEAD']) if ENV['READ_AHEAD']
     @options[:threads] = Integer(ENV['NUM_THREADS']) if ENV['NUM_THREADS']
     @options[:shutdown_timeout] = Float(ENV['SHUTDOWN_TIMEOUT']) if ENV['SHUTDOWN_TIMEOUT']
@@ -44,21 +44,13 @@ namespace :jobs do
     pools = Delayed::PoolParser.new.add(ENV['POOLS'] || ENV['POOL'] || '').pools
     @options[:pools] = pools unless pools.empty?
 
-    if @options[:processes] < 1
-      raise ArgumentError, 'NUM_PROCESSES must be 1 or greater'
-    end
+    raise ArgumentError, 'NUM_PROCESSES must be 1 or greater' if @options[:processes] < 1
 
-    if @options[:sleep_delay] && @options[:sleep_delay] < 0
-      raise ArgumentError, 'SLEEP_DELAY must be 0 or greater'
-    end
+    raise ArgumentError, 'SLEEP_DELAY must be 0 or greater' if @options[:sleep_delay] && @options[:sleep_delay] < 0
 
-    if @options[:threads] && @options[:threads] < 1
-      raise ArgumentError, 'NUM_THREADS must be 1 or greater'
-    end
+    raise ArgumentError, 'NUM_THREADS must be 1 or greater' if @options[:threads] && @options[:threads] < 1
 
-    if @options[:shutdown_timeout] && @options[:shutdown_timeout] < 0
-      raise ArgumentError, 'SHUTDOWN_TIMEOUT must be 0 or greater'
-    end
+    raise ArgumentError, 'SHUTDOWN_TIMEOUT must be 0 or greater' if @options[:shutdown_timeout] && @options[:shutdown_timeout] < 0
 
     if @options[:lock_heartbeat_interval]
       timeout = @options.fetch(:lock_timeout, Delayed::Worker::DEFAULT_LOCK_TIMEOUT)
@@ -66,17 +58,11 @@ namespace :jobs do
       raise ArgumentError, 'LOCK_TIMEOUT must be at least twice LOCK_HEARTBEAT' if timeout < 2 * @options[:lock_heartbeat_interval]
     end
 
-    if @options[:min_priority] && @options[:max_priority] && @options[:min_priority] > @options[:max_priority]
-      raise ArgumentError, 'MIN_PRIORITY must be less than or equal to MAX_PRIORITY'
-    end
+    raise ArgumentError, 'MIN_PRIORITY must be less than or equal to MAX_PRIORITY' if @options[:min_priority] && @options[:max_priority] && @options[:min_priority] > @options[:max_priority]
 
-    if num_processes && @options[:pools]
-      raise ArgumentError, 'Cannot specify both NUM_PROCESSES and POOLS'
-    end
+    raise ArgumentError, 'Cannot specify both NUM_PROCESSES and POOLS' if num_processes && @options[:pools]
 
-    if @options[:queues] && @options[:pools]
-      raise ArgumentError, 'Cannot specify both QUEUES and POOLS'
-    end
+    raise ArgumentError, 'Cannot specify both QUEUES and POOLS' if @options[:queues] && @options[:pools]
   end
 
   desc "Exit with error status if any jobs older than max_age seconds haven't been attempted yet."
@@ -85,8 +71,6 @@ namespace :jobs do
 
     unprocessed_jobs = Delayed::Job.where('attempts = 0 AND created_at < ?', Time.now - args[:max_age].to_i).count
 
-    if unprocessed_jobs > 0
-      raise "#{unprocessed_jobs} jobs older than #{args[:max_age]} seconds have not been processed yet"
-    end
+    raise "#{unprocessed_jobs} jobs older than #{args[:max_age]} seconds have not been processed yet" if unprocessed_jobs > 0
   end
 end

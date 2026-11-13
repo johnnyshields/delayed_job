@@ -79,8 +79,8 @@ module Delayed
 
         def lock_exclusively!(max_run_time, name)
           now = self.class.db_time_now
-          locked = self.class.where('id = ? AND (locked_at IS NULL OR locked_at < ? OR locked_by = ?)', id, now - max_run_time, name)
-                       .update_all(:locked_at => now, :locked_by => name)
+          locked = self.class.where('id = ? AND (locked_at IS NULL OR locked_at < ? OR locked_by = ?)', id, now - max_run_time, name).
+                   update_all(:locked_at => now, :locked_by => name)
           return false unless locked == 1
           self.locked_at = now
           self.locked_by = name

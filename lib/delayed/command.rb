@@ -1,7 +1,7 @@
 require 'optparse'
 
 module Delayed
-  class Command # rubocop:disable ClassLength
+  class Command # rubocop:disable Metrics/ClassLength
     def initialize(args)
       @options = {
         :quiet => true,
@@ -41,7 +41,7 @@ module Delayed
       end
     end
 
-    def option_parser # rubocop:disable MethodLength, CyclomaticComplexity
+    def option_parser # rubocop:disable Metrics/MethodLength, Metrics/CyclomaticComplexity
       @option_parser ||= OptionParser.new do |opt|
         opt.banner = "Usage: #{Delayed.program_name} [options] start|stop|restart|run"
         opt.on('-h', '--help', 'Show this message') do
@@ -150,7 +150,7 @@ module Delayed
     def seconds(value)
       Integer(value, 10)
     rescue ArgumentError
-      Float(value) rescue -1 # rubocop:disable RescueModifier
+      Float(value) rescue -1
     end
 
     def validate_options!

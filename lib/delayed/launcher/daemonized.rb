@@ -2,9 +2,7 @@ module Delayed
   module Launcher
     class Daemonized < Base
       def initialize(options)
-        if options[:pid_file]
-          raise ArgumentError, '--pid-file is for --fork mode; daemonized workers write their pidfiles in --pid-dir'
-        end
+        raise ArgumentError, '--pid-file is for --fork mode; daemonized workers write their pidfiles in --pid-dir' if options[:pid_file]
         super
       end
 

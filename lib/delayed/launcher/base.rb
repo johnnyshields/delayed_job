@@ -7,8 +7,8 @@ module Delayed
                     :process_identifier
 
       # Deprecated alias of #processes.
-      alias worker_count processes
-      alias worker_count= processes=
+      alias_method :worker_count, :processes
+      alias_method :worker_count=, :processes=
 
       # options[:processes] is the number of worker processes to run;
       # options[:worker_count] is accepted as an alias.
@@ -112,10 +112,10 @@ module Delayed
         dispatcher = Delayed::Dispatcher.new(options.merge(:supervisor_pid => supervisor_pid, :procline => $0))
         dispatcher.name_prefix = "#{worker_name} "
         dispatcher.start(pending_signals)
-      rescue => e
-        STDERR.puts e.message
-        STDERR.puts e.backtrace
-        logger.fatal(e)
+      rescue StandardError => error
+        STDERR.puts error.message
+        STDERR.puts error.backtrace
+        logger.fatal(error)
         exit_with_error_status
       end
 
@@ -131,7 +131,7 @@ module Delayed
         (options[:threads] || 1).to_i
       end
 
-      def set_process_name(name) # rubocop:disable AccessorMethodName
+      def set_process_name(name) # rubocop:disable Naming/AccessorMethodName
         $0 = process_prefix ? File.join(process_prefix, name) : name
       end
 

@@ -258,7 +258,6 @@ describe 'Recovering the jobs of a dead worker process' do
         expect(launcher).not_to receive(:shutdown)
         launcher.send(:run_loop)
       end
-
     end
 
     describe '#kill' do

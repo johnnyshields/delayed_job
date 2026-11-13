@@ -188,10 +188,10 @@ shared_examples_for 'launcher shared examples' do
       let(:options) { {:queues => %w[mailers misc], :processes => 4} }
       let(:exp) do
         [
-          ['delayed_job.0', {:pid_dir => './tmp/pids', :log_dir => './log', :queues =>  %w[mailers misc]}],
-          ['delayed_job.1', {:pid_dir => './tmp/pids', :log_dir => './log', :queues =>  %w[mailers misc]}],
-          ['delayed_job.2', {:pid_dir => './tmp/pids', :log_dir => './log', :queues =>  %w[mailers misc]}],
-          ['delayed_job.3', {:pid_dir => './tmp/pids', :log_dir => './log', :queues =>  %w[mailers misc]}]
+          ['delayed_job.0', {:pid_dir => './tmp/pids', :log_dir => './log', :queues => %w[mailers misc]}],
+          ['delayed_job.1', {:pid_dir => './tmp/pids', :log_dir => './log', :queues => %w[mailers misc]}],
+          ['delayed_job.2', {:pid_dir => './tmp/pids', :log_dir => './log', :queues => %w[mailers misc]}],
+          ['delayed_job.3', {:pid_dir => './tmp/pids', :log_dir => './log', :queues => %w[mailers misc]}]
         ]
       end
       it { verify_worker_processes }

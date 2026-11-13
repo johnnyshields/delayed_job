@@ -66,7 +66,10 @@ describe 'Worker processes whose parent goes away' do
       it 'returns true when woken up by an event' do
         d = dispatcher
         _, seen = d.send(:snapshot)
-        Thread.new { sleep 0.05; d.send(:synchronize) { d.send(:signal_event) } }
+        Thread.new do
+          sleep 0.05
+          d.send(:synchronize) { d.send(:signal_event) }
+        end
         expect(Timeout.timeout(5) { d.send(:wait_for_event, seen, nil) }).to be true
       end
     end
@@ -105,7 +108,10 @@ describe 'Worker processes whose parent goes away' do
         d = dispatcher
         timeouts = waits_of(d)
         _, seen = d.send(:snapshot)
-        Thread.new { sleep 0.1; d.send(:synchronize) { d.send(:signal_event) } }
+        Thread.new do
+          sleep 0.1
+          d.send(:synchronize) { d.send(:signal_event) }
+        end
         Timeout.timeout(5) { d.send(:wait_before_next_poll, seen, false) }
         expect(timeouts).to eq [nil]
       end
@@ -130,7 +136,10 @@ describe 'Worker processes whose parent goes away' do
         d = dispatcher(:supervisor_pid => Process.ppid)
         timeouts = waits_of(d)
         _, seen = d.send(:snapshot)
-        Thread.new { sleep 0.3; d.send(:synchronize) { d.send(:signal_event) } }
+        Thread.new do
+          sleep 0.3
+          d.send(:synchronize) { d.send(:signal_event) }
+        end
         Timeout.timeout(5) { d.send(:wait_before_next_poll, seen, false) }
         expect(timeouts.size).to be >= 3
         expect(timeouts).to all(eq 0.05)
@@ -141,7 +150,10 @@ describe 'Worker processes whose parent goes away' do
         Delayed::Worker.sleep_delay = 30
         d = dispatcher(:supervisor_pid => Process.ppid)
         _, seen = d.send(:snapshot)
-        Thread.new { sleep 0.1; allow(Process).to receive(:ppid).and_return(1) }
+        Thread.new do
+          sleep 0.1
+          allow(Process).to receive(:ppid).and_return(1)
+        end
         expect(timed { Timeout.timeout(5) { d.send(:wait_before_next_poll, seen, true) } }).to be < 1
         expect(d).to be_stop
       end
@@ -150,7 +162,10 @@ describe 'Worker processes whose parent goes away' do
         Delayed::Worker.sleep_delay = 30
         d = dispatcher(:supervisor_pid => Process.ppid)
         _, seen = d.send(:snapshot)
-        Thread.new { sleep 0.1; d.send(:synchronize) { d.send(:signal_event) } }
+        Thread.new do
+          sleep 0.1
+          d.send(:synchronize) { d.send(:signal_event) }
+        end
         expect(timed { Timeout.timeout(5) { d.send(:wait_before_next_poll, seen, true) } }).to be < 1
       end
 
@@ -161,7 +176,10 @@ describe 'Worker processes whose parent goes away' do
           d = dispatcher(:supervisor_pid => Process.ppid)
           timeouts = waits_of(d)
           _, seen = d.send(:snapshot)
-          Thread.new { sleep 0.2; d.stop }
+          Thread.new do
+            sleep 0.2
+            d.stop
+          end
           expect { Timeout.timeout(5) { d.send(:wait_before_next_poll, seen, true) } }.not_to raise_error
           expect(timeouts.first).to be <= described_class::SUPERVISOR_CHECK_INTERVAL
         end
@@ -170,7 +188,10 @@ describe 'Worker processes whose parent goes away' do
           d = dispatcher
           timeouts = waits_of(d)
           _, seen = d.send(:snapshot)
-          Thread.new { sleep 0.1; d.stop }
+          Thread.new do
+            sleep 0.1
+            d.stop
+          end
           Timeout.timeout(5) { d.send(:wait_before_next_poll, seen, true) }
           expect(timeouts.first).to be_within(0.5).of(Delayed::Worker::DEFAULT_SLEEP_DELAY)
         end
@@ -197,7 +218,10 @@ describe 'Worker processes whose parent goes away' do
         Delayed::Worker.sleep_delay = 30
         d = dispatcher(:supervisor_pid => Process.ppid)
         _, seen = d.send(:snapshot)
-        Thread.new { sleep 0.1; d.stop }
+        Thread.new do
+          sleep 0.1
+          d.stop
+        end
         expect(timed { Timeout.timeout(5) { d.send(:wait_before_next_poll, seen, true) } }).to be < 1
       end
     end
@@ -210,7 +234,10 @@ describe 'Worker processes whose parent goes away' do
       def polls_in(seconds, options)
         stub_const('Delayed::Dispatcher::SUPERVISOR_CHECK_INTERVAL', 0.05)
         polls = 0
-        allow(Delayed::Job).to receive(:reserve_batch).and_wrap_original { |m, *args| polls += 1; m.call(*args) }
+        allow(Delayed::Job).to(receive(:reserve_batch).and_wrap_original do |m, *args|
+          polls += 1
+          m.call(*args)
+        end)
         d = dispatcher(options.merge(:threads => 2, :sleep_delay => 0.4))
         thread = Thread.new { d.run }
         sleep seconds
@@ -272,8 +299,8 @@ describe 'Worker processes whose parent goes away' do
       allow(Dir).to receive(:chdir)
       allow(Delayed::Worker).to receive(:after_fork)
       allow(launcher).to receive(:setup_logger)
-      expect(Delayed::Dispatcher).to receive(:new).with(hash_including(:supervisor_pid => Process.pid))
-                                                  .and_return(double(:name_prefix= => nil, :start => nil))
+      expect(Delayed::Dispatcher).to receive(:new).with(hash_including(:supervisor_pid => Process.pid)).
+        and_return(double(:name_prefix= => nil, :start => nil))
       launcher.send(:run_worker, 'delayed_job.0', {})
     end
 

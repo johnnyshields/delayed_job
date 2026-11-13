@@ -10,7 +10,6 @@ describe Delayed::Dispatcher do
     Delayed::Worker.exit_on_complete = true
   end
 
-
   def enqueue_jobs(count)
     count.times { |i| Delayed::Job.enqueue(ConcurrencyJob.new(i)) }
   end
@@ -225,8 +224,8 @@ describe Delayed::Dispatcher do
       context 'with a backend whose partial batches mean the queue ran dry (the default)' do
         it 'is the default' do
           expect(Delayed::Job.partial_batch_may_leave_jobs?).to be false
-          expect(Delayed::Backend::Base::ClassMethods.instance_method(:partial_batch_may_leave_jobs?).owner)
-            .to eq Delayed::Backend::Base::ClassMethods
+          expect(Delayed::Backend::Base::ClassMethods.instance_method(:partial_batch_may_leave_jobs?).owner).
+            to eq Delayed::Backend::Base::ClassMethods
         end
 
         it 'does not poll again at once, saving a query each time the queue drains' do
@@ -280,7 +279,6 @@ describe Delayed::Dispatcher do
         dispatcher.stop
         Timeout.timeout(3) { thread.join }
       end
-
 
       it 'waits sleep_delay after a poll that reserved nothing' do
         polls = reserve_in_polls { |p| dispatcher.stop if p.size == 2 }

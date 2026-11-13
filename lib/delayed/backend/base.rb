@@ -113,6 +113,7 @@ module Delayed
       end
 
       attr_reader :error
+
       def error=(error)
         @error = error
         self.last_error = "#{error.message}\n#{error.backtrace.join("\n")}" if respond_to?(:last_error=)
@@ -123,7 +124,7 @@ module Delayed
       end
       alias_method :failed, :failed?
 
-      ParseObjectFromYaml = %r{\!ruby/\w+\:([^\s]+)} # rubocop:disable ConstantName
+      ParseObjectFromYaml = %r{!ruby/\w+:([^\s]+)} # rubocop:disable Naming/ConstantName
 
       def name
         @name ||= payload_object.respond_to?(:display_name) ? payload_object.display_name : payload_object.class.name
@@ -138,22 +139,20 @@ module Delayed
 
       def payload_object
         @payload_object ||= YAML.load_dj(handler)
-      rescue TypeError, LoadError, NameError, ArgumentError, SyntaxError, Psych::SyntaxError => e
-        raise DeserializationError, "Job failed to load: #{e.message}. Handler: #{handler.inspect}"
+      rescue TypeError, LoadError, NameError, ArgumentError, SyntaxError, Psych::SyntaxError => error
+        raise DeserializationError, "Job failed to load: #{error.message}. Handler: #{handler.inspect}"
       end
 
       def invoke_job
         Delayed::Worker.lifecycle.run_callbacks(:invoke_job, self) do
-          begin
-            hook :before
-            payload_object.perform
-            hook :success
-          rescue Exception => e # rubocop:disable RescueException
-            hook :error, e
-            raise e
-          ensure
-            hook :after
-          end
+          hook :before
+          payload_object.perform
+          hook :success
+        rescue Exception => error # rubocop:disable Lint/RescueException
+          hook :error, error
+          raise error
+        ensure
+          hook :after
         end
       end
 
@@ -168,7 +167,7 @@ module Delayed
           method = payload_object.method(name)
           method.arity.zero? ? method.call : method.call(self, *args)
         end
-      rescue DeserializationError # rubocop:disable HandleExceptions
+      rescue DeserializationError # rubocop:disable Lint/SuppressedException
       end
 
       def reschedule_at
