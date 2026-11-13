@@ -46,6 +46,12 @@ module Delayed
     # Errors raised by the handler are logged and ignored.
     cattr_accessor :on_thread_error
 
+    # Silences the backend's query log while polling for jobs and refreshing
+    # job locks (see Delayed::Job.silence_polling), so an idle worker
+    # doesn't log a reservation query every sleep_delay seconds. Queries made
+    # by jobs, and by workers finishing jobs, are logged as usual.
+    cattr_accessor :silence_polling
+
     # Seconds a stopping worker waits for running jobs to finish before
     # interrupting them (see Delayed::ShutdownInterrupt). nil, the default,
     # waits for as long as they take.
@@ -91,6 +97,7 @@ module Delayed
       self.lock_heartbeat_interval = DEFAULT_LOCK_HEARTBEAT_INTERVAL
       self.lock_timeout      = DEFAULT_LOCK_TIMEOUT
       self.on_thread_error   = nil
+      self.silence_polling   = false
       @lifecycle             = nil
     end
 
@@ -260,7 +267,7 @@ module Delayed
       @quiet = options.key?(:quiet) ? options[:quiet] : true
 
       [:min_priority, :max_priority, :sleep_delay, :read_ahead, :queues, :exit_on_complete, :shutdown_timeout,
-       :lock_heartbeat_interval, :lock_timeout].each do |option|
+       :lock_heartbeat_interval, :lock_timeout, :silence_polling].each do |option|
         self.class.send("#{option}=", options[option]) if options.key?(option)
       end
 

@@ -35,6 +35,7 @@ Principles: no schema changes for existing backends; new hooks are optional with
 8. **`Delayed::Worker.on_thread_error`** for errors outside job handling (reservation, plugins, thread crashes). (SQ: `AppExecutor#handle_thread_error`.)
    - Implemented: `Worker.thread_error(error, info)` publishes `thread_error` and calls the handler (arity 1 or 2); reports reservation, heartbeat, worker-thread and dispatcher crashes (not signals/exits, and a re-raised thread crash once), failure hooks, and failed recovery in the forking parent. Handler errors are logged and ignored.
 9. **`Delayed::Worker.silence_polling`** wraps each poll in `ActiveRecord::Base.logger.silence` — core version of the Mongoid `MongoSilencer` idea. (SQ: `with_polling_volume`.)
+   - Implemented as backend hook `Job.silence_polling(&block)` (default: thread-local `ActiveRecord::Base.logger.silence(WARN)`), applied to reservation and lock-refresh queries only; `delayed_job_mongoid` overrides it for the Mongo driver logger.
 10. **Live procline**, e.g. `delayed_job.0: 3/4 busy, queues=*`. (SQ: `procline`.)
 
 ## Phase 2b — batched reservation (opt-in flag)

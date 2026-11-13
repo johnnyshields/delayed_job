@@ -108,6 +108,9 @@ module Delayed
         opt.on('--lock-timeout N', 'With --lock-heartbeat, seconds after which a lock that was not refreshed counts as abandoned (default: 300)') do |n|
           @options[:lock_timeout] = Float(n) rescue 0
         end
+        opt.on('--silence-polling', "Don't log the database queries of polling for jobs and refreshing their locks") do
+          @options[:silence_polling] = true
+        end
         opt.on('--sleep-delay N', 'Amount of time to sleep when no jobs are found') do |n|
           @options[:sleep_delay] = Integer(n) rescue nil
         end

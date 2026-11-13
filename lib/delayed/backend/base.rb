@@ -76,6 +76,17 @@ module Delayed
           raise NotImplementedError, "#{name} does not support lock heartbeats"
         end
 
+        # Runs the block with the backend's query logging silenced on the
+        # calling thread only (see Delayed::Worker.silence_polling).
+        # The default silences ActiveRecord::Base.logger below WARN, if it
+        # supports ActiveSupport's thread-local #silence. Backends logging
+        # through another logger (e.g. the Mongo driver's) override this.
+        def silence_polling(&block)
+          logger = defined?(::ActiveRecord::Base) && ::ActiveRecord::Base.logger
+          return yield unless logger.respond_to?(:silence)
+          logger.silence(::Logger::WARN, &block)
+        end
+
         # Allow the backend to attempt recovery from reserve errors
         def recover_from(_error); end
 

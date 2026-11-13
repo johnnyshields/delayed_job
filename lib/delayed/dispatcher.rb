@@ -257,7 +257,7 @@ module Delayed
     def reserve(workers)
       reserved = Delayed.instrument(:reserve, :dispatcher => name, :requested => workers.size) do |payload|
         payload[:reserved] = 0
-        with_executor { Delayed::Job.reserve_batch(workers, Worker.lock_expiry) }.tap { |r| payload[:reserved] = r.size }
+        polling { Delayed::Job.reserve_batch(workers, Worker.lock_expiry) }.tap { |r| payload[:reserved] = r.size }
       end
       @failed_reserve_count = 0
       reserved
@@ -321,7 +321,7 @@ module Delayed
     # Errors are logged and the next heartbeat tries again; the locks only
     # expire if heartbeats keep failing for lock_timeout seconds.
     def touch_locks(names)
-      with_executor { Delayed::Job.touch_locks(names) }
+      polling { Delayed::Job.touch_locks(names) }
     rescue StandardError => error
       say "Error while refreshing job locks: #{error.class}: #{error.message}", 'error'
       thread_error(error, 'Lock heartbeat')
@@ -365,6 +365,13 @@ module Delayed
     # Worker.on_thread_error); job errors go through the :error lifecycle.
     def thread_error(error, context, worker_name = nil)
       Worker.thread_error(error, :context => context, :dispatcher => name, :worker => worker_name)
+    end
+
+    # Runs a polling query (reservation, lock refresh) in the Rails executor,
+    # with the backend's query log silenced if Worker.silence_polling.
+    def polling(&block)
+      return with_executor(&block) unless Worker.silence_polling
+      with_executor { Delayed::Job.silence_polling(&block) }
     end
 
     # Errors that stop a dispatcher without being failures: signals and
