@@ -18,20 +18,29 @@ module Delayed
       return notify(name, payload) unless block_given?
 
       started = false
-      finished = false
+      block_error = nil
       result = nil
       begin
         ActiveSupport::Notifications.instrument(name, payload) do |p|
           started = true
-          result = yield(p)
-          finished = true
-          result
+          begin
+            result = yield(p)
+          rescue Exception => error # rubocop:disable RescueException
+            block_error = error
+            raise
+          end
         end
       rescue Exception => error # rubocop:disable RescueException
         # Raised by the block; or not a subscriber's bug (a signal, a
         # Delayed::ShutdownInterrupt raised into this thread).
-        raise if (started && !finished) || !error.is_a?(StandardError)
+        raise if error.equal?(block_error) || !error.is_a?(StandardError)
         subscriber_failed(name, error)
+        # A subscriber failed as the event finished, while the block's own
+        # exception propagated: ActiveSupport raises the subscriber's
+        # instead. Raise the block's, so that e.g. a
+        # Delayed::ShutdownInterrupt still reaches the worker thread, which
+        # releases its job, instead of turning into a RuntimeError.
+        raise block_error if block_error
         result = yield(payload) unless started # A subscriber failed before the block ran.
       end
       result

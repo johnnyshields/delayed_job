@@ -121,6 +121,61 @@ describe 'Instrumentation' do
         expect { Delayed.instrument(:custom) { :result } }.to raise_error(Interrupt)
       end
 
+      describe 'while the block raises' do
+        it "does not replace the block's exception, and is logged" do
+          subscribe(:custom) { raise 'subscriber bug' }
+          expect { Delayed.instrument(:custom) { raise IOError, 'boom' } }.to raise_error(IOError, 'boom')
+          expect(log.string).to include 'Error in a subscriber to custom.delayed_job: RuntimeError: subscriber bug'
+        end
+
+        it "raises the block's very exception, with its backtrace" do
+          subscribe(:custom) { raise 'subscriber bug' }
+          raised = IOError.new('boom')
+          expect { Delayed.instrument(:custom) { raise raised } }.to raise_error do |error|
+            expect(error).to equal raised
+            expect(error.backtrace.first).to include __FILE__
+          end
+        end
+
+        it 'does not replace a Delayed::ShutdownInterrupt' do
+          subscribe(:custom) { raise 'subscriber bug' }
+          expect { Delayed.instrument(:custom) { raise Delayed::ShutdownInterrupt, 'quitting' } }
+            .to raise_error(Delayed::ShutdownInterrupt, 'quitting')
+        end
+
+        it 'does not replace a signal' do
+          subscribe(:custom) { raise 'subscriber bug' }
+          expect { Delayed.instrument(:custom) { raise Interrupt } }.to raise_error(Interrupt)
+        end
+
+        it "raises the block's exception when several subscribers fail" do
+          subscribe(:custom) { raise 'first bug' }
+          subscribe(:custom) { raise ArgumentError, 'second bug' }
+          expect { Delayed.instrument(:custom) { raise IOError, 'boom' } }.to raise_error(IOError, 'boom')
+          expect(log.string).to include 'Error in a subscriber to custom.delayed_job'
+        end
+
+        it 'still records the exception in the payload for the other subscribers' do
+          seen = []
+          subscribe(:custom) { |*args| seen << args.last[:exception] }
+          subscribe(:custom) { raise 'subscriber bug' }
+          expect { Delayed.instrument(:custom) { raise IOError, 'boom' } }.to raise_error(IOError)
+          expect(seen).to eq [['IOError', 'boom']]
+        end
+
+        it 'lets a signal raised by a subscriber through' do
+          subscribe(:custom) { raise Interrupt }
+          expect { Delayed.instrument(:custom) { raise IOError, 'boom' } }.to raise_error(Interrupt)
+        end
+
+        it 'runs the block once' do
+          subscribe(:custom) { raise 'subscriber bug' }
+          runs = 0
+          expect { Delayed.instrument(:custom) { runs += 1; raise IOError } }.to raise_error(IOError)
+          expect(runs).to eq 1
+        end
+      end
+
       it 'does not fail the job it reports on' do
         subscribe(:perform) { raise 'subscriber bug' }
         job = Delayed::Job.enqueue(SimpleJob.new)
@@ -304,6 +359,22 @@ describe 'Instrumentation' do
       perform = named(:perform).first.payload
       expect(perform[:exception].first).to eq 'Delayed::ShutdownInterrupt'
       expect(perform).not_to have_key(:success)
+    end
+
+    it 'still releases an interrupted job when a perform subscriber fails' do
+      subscribe(:perform) { raise 'subscriber bug' }
+      job = Delayed::Job.enqueue(BlockingJob.new)
+      thread = run_in_thread
+      Timeout.timeout(5) { BlockingJob.started.pop }
+      dispatcher.quit
+      expect(Timeout.timeout(10) { thread.join }).to eq thread # No crash.
+
+      job.reload
+      expect([job.locked_by, job.locked_at, job.attempts]).to eq [nil, nil, 0]
+      expect(payload(:locks_released)[:reason]).to eq 'shutdown'
+      expect(named(:thread_error)).to be_empty
+      expect(payload(:stop_process)[:error]).to be_nil
+      expect(log.string).to include 'Error in a subscriber to perform.delayed_job: RuntimeError: subscriber bug'
     end
 
     it 'publishes no thread_error for a clean run' do
