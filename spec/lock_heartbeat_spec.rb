@@ -325,7 +325,9 @@ describe 'Lock heartbeats' do
       end
 
       def job_running(worker, job, seconds_ago)
-        dispatcher.instance_variable_get(:@jobs_started)[worker] = [job, dispatcher.send(:monotonic_now) - seconds_ago]
+        limit = dispatcher.send(:run_time_limit, worker, job)
+        label = dispatcher.send(:job_label, job)
+        dispatcher.instance_variable_get(:@jobs_started)[worker] = [job, dispatcher.send(:monotonic_now) - seconds_ago, limit, label]
       end
 
       def job_with_max_run_time(limit)
@@ -350,6 +352,13 @@ describe 'Lock heartbeats' do
           Delayed::Worker.max_run_time = 10
           job_running(worker, job_with_max_run_time(nil), 11)
           expect(dispatcher.send(:heartbeat_names)).to eq [other.name]
+        end
+
+        it 'names the job in its log message as job_say does' do
+          job = job_class.create!(:payload_object => StuckJob.new(0, 1), :queue => 'mail')
+          job_running(worker, job, 2)
+          dispatcher.send(:heartbeat_names)
+          expect(overrun_messages.first).to start_with "Job StuckJob (id=#{job.id}) (queue=mail) has run for longer"
         end
 
         it "uses the job's own max_run_time" do
@@ -385,6 +394,80 @@ describe 'Lock heartbeats' do
           dispatcher.send(:heartbeat_names)
           expect(overrun_messages.size).to eq 2
         end
+
+        it 'never calls into running jobs (it runs on the heartbeat thread)' do
+          job = job_with_max_run_time(1)
+          job_running(worker, job, 2)
+          expect(worker).not_to receive(:max_run_time)
+          expect(job).not_to receive(:max_run_time)
+          expect(job).not_to receive(:payload_object)
+          dispatcher.send(:heartbeat_names)
+        end
+
+        it "keeps refreshing every lock when a job's max_run_time raises" do
+          job = job_with_max_run_time(1)
+          allow(job).to receive(:max_run_time).and_raise(ArgumentError, 'broken job')
+          job_running(worker, job, 3600)
+          expect(dispatcher.send(:heartbeat_names)).to eq dispatcher.workers.map(&:name)
+          expect(overrun_messages).to be_empty
+        end
+      end
+
+      describe '#run_time_limit' do
+        it "is the job's max_run_time in whole seconds" do
+          expect(dispatcher.send(:run_time_limit, worker, job_with_max_run_time(7.9))).to eq 7
+        end
+
+        it 'falls back to Worker.max_run_time' do
+          Delayed::Worker.max_run_time = 42
+          expect(dispatcher.send(:run_time_limit, worker, job_with_max_run_time(nil))).to eq 42
+        end
+
+        it 'is nil (no limit) under one second, as Worker#run sets no timeout then' do
+          expect(dispatcher.send(:run_time_limit, worker, job_with_max_run_time(0.9))).to be_nil
+          expect(dispatcher.send(:run_time_limit, worker, job_with_max_run_time(0))).to be_nil
+        end
+
+        it 'is nil (no limit) when working it out raises' do
+          job = job_with_max_run_time(1)
+          allow(job).to receive(:max_run_time).and_raise(ArgumentError, 'broken job')
+          expect(dispatcher.send(:run_time_limit, worker, job)).to be_nil
+        end
+
+        it 'is worked out once, on the thread that runs the job' do
+          threads = []
+          allow(worker).to receive(:max_run_time).and_wrap_original { |m, job| threads << Thread.current; m.call(job) }
+          allow(worker).to receive(:perform_job) do |_job|
+            3.times { dispatcher.send(:heartbeat_names) }
+            true
+          end
+          job_class.create!(:payload_object => SimpleJob.new)
+          expect(dispatcher.work_off(1, worker)).to eq [1, 0]
+          expect(threads).to eq [Thread.current]
+        end
+      end
+
+      it "keeps the heartbeat refreshing locks while a job whose max_run_time raises runs" do
+        touched = Queue.new
+        allow(job_class).to receive(:touch_locks).and_wrap_original { |m, names| touched << names; m.call(names) }
+        broken = job_class.create!(:payload_object => ProcessJobs::SleepJob.new('broken', 0.6))
+        calls = 0
+        allow_any_instance_of(job_class).to receive(:max_run_time).and_wrap_original do |m|
+          # Broken whenever the heartbeat thread asks, and the first time the
+          # worker thread does (tracking the job); Worker#run's call works.
+          raise ArgumentError, 'broken job' if Thread.current.name == 'delayed_job heartbeat'
+          calls += 1
+          raise ArgumentError, 'broken job' if calls == 1
+          m.call
+        end
+        thread = run_dispatcher
+        wait_for(5) { job_class.where(:id => broken.id).empty? }
+        dispatcher.stop
+        Timeout.timeout(5) { thread.join }
+        names = Array.new(touched.size) { touched.pop }
+        expect(names).not_to be_empty
+        expect(names).to all(eq(dispatcher.workers.map(&:name)))
+        expect(messages.map(&:last).grep(/Error while refreshing job locks/)).to be_empty
       end
 
       describe '#track_job' do
@@ -393,7 +476,7 @@ describe 'Lock heartbeats' do
           seen = nil
           dispatcher.send(:track_job, worker, job) { seen = dispatcher.instance_variable_get(:@jobs_started)[worker] }
           expect(seen.first).to equal job
-          expect(seen.last).to be_within(1).of(dispatcher.send(:monotonic_now))
+          expect(seen[1]).to be_within(1).of(dispatcher.send(:monotonic_now))
           expect(dispatcher.instance_variable_get(:@jobs_started)).to be_empty
         end
 

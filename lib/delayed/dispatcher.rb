@@ -81,7 +81,7 @@ module Delayed
       @inboxes = {}
       @threads = []
       @running = {} # thread => job it is running
-      @jobs_started = {} # worker => [job it is running, when it started]
+      @jobs_started = {} # worker => [job it is running, when it started, its time limit, its log label]
       @overrun_reported = {} # worker => its job reported as overrun
       @in_flight = 0
       @events = 0
@@ -381,37 +381,56 @@ module Delayed
     def heartbeat_names
       now = monotonic_now
       overrun = synchronize do
-        @jobs_started.select do |worker, (job, started)|
-          limit = worker.max_run_time(job).to_i # As Worker#run times jobs out.
-          limit > 0 && now - started > limit
-        end
+        @jobs_started.select { |_worker, (_job, started, limit)| limit && now - started > limit }
       end
-      overrun.each { |worker, (job, _)| report_overrun(worker, job) }
+      overrun.each { |worker, (job, _, limit, label)| report_overrun(worker, job, limit, label) }
       (workers - overrun.keys).map(&:name)
     end
 
     # Logs, once per job, that its lock is no longer refreshed.
-    def report_overrun(worker, job)
+    def report_overrun(worker, job, limit, label)
       first = synchronize do
         next false if @overrun_reported[worker].equal?(job)
         @overrun_reported[worker] = job
         true
       end
       return unless first
-      worker.job_say(job, format('has run for longer than its max_run_time (%ds) without stopping; no longer ' \
-                                 'refreshing its lock, so another worker may run it after lock_timeout (%gs)',
-                                 worker.max_run_time(job).to_i, Worker.lock_timeout), 'error')
+      worker.say(format('%s has run for longer than its max_run_time (%ds) without stopping; no longer ' \
+                        'refreshing its lock, so another worker may run it after lock_timeout (%gs)',
+                        label, limit, Worker.lock_timeout), 'error')
     end
 
-    # Records which job the worker runs, and since when (see #heartbeat_names).
+    # Records which job the worker runs, since when, and for how long it may
+    # run (see #heartbeat_names). The limit (and the job's log label) are
+    # worked out here, on the worker's thread, so the heartbeat thread
+    # never calls into the job.
     def track_job(worker, job)
-      synchronize { @jobs_started[worker] = [job, monotonic_now] }
+      limit = run_time_limit(worker, job)
+      label = limit && job_label(job)
+      synchronize { @jobs_started[worker] = [job, monotonic_now, limit, label] }
       yield
     ensure
       synchronize do
         @jobs_started.delete(worker)
         @overrun_reported.delete(worker)
       end
+    end
+
+    # The job's max_run_time in whole seconds, as Worker#run times jobs out,
+    # or nil for no limit: when it is under a second (no timeout), or when
+    # working it out fails (Worker#run will then fail the job).
+    def run_time_limit(worker, job)
+      limit = worker.max_run_time(job).to_i
+      limit if limit > 0
+    rescue StandardError
+      nil
+    end
+
+    # How Worker#job_say names the job.
+    def job_label(job)
+      "Job #{job.name} (id=#{job.id})#{" (queue=#{job.queue})" if job.queue}"
+    rescue StandardError
+      "Job (id=#{job.id})"
     end
 
     # Refreshes the locks of the workers that need it. Errors are logged and
