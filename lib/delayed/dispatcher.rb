@@ -46,7 +46,21 @@ module Delayed
     # own code in it. Outside of worker threads (e.g. Worker#work_off), where
     # nothing defers them, it changes nothing.
     def self.interruptible(&block)
+      return yield unless interrupt_masking?
       Thread.handle_interrupt(ALLOW_SHUTDOWN_INTERRUPTS, &block)
+    end
+
+    # Runs the block with shutdown interrupts deferred (see #work).
+    def self.deferring_interrupts(&block)
+      return yield unless interrupt_masking?
+      Thread.handle_interrupt(DEFER_SHUTDOWN_INTERRUPTS, &block)
+    end
+
+    # Whether this Ruby can defer interrupts (Thread.handle_interrupt and
+    # Thread.pending_interrupt?). Without, shutdown interrupts are let into
+    # worker threads at any time, as they were before deferring them.
+    def self.interrupt_masking?
+      Thread.respond_to?(:handle_interrupt) && Thread.respond_to?(:pending_interrupt?)
     end
 
     attr_reader :workers, :name_prefix
@@ -471,7 +485,7 @@ module Delayed
     # job being finished (deleted) - which would then be released and run
     # again.
     def work(worker, inbox)
-      Thread.handle_interrupt(DEFER_SHUTDOWN_INTERRUPTS) do
+      self.class.deferring_interrupts do
         Worker.lifecycle.run_callbacks(:execute, worker) do
           begin
             until (job = inbox.pop).equal?(STOP)
@@ -517,6 +531,7 @@ module Delayed
     end
 
     def stale_interrupt_pending?
+      return false unless self.class.interrupt_masking? # Nothing is deferred.
       SHUTDOWN_INTERRUPTS.any? { |klass| Thread.pending_interrupt?(klass) }
     end
 
