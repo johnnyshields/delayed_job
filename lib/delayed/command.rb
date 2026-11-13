@@ -111,8 +111,8 @@ module Delayed
         opt.on('--silence-polling', "Don't log the database queries of polling for jobs and refreshing their locks") do
           @options[:silence_polling] = true
         end
-        opt.on('--sleep-delay N', 'Amount of time to sleep when no jobs are found') do |n|
-          @options[:sleep_delay] = Integer(n) rescue nil
+        opt.on('--sleep-delay N', 'Seconds to sleep when no jobs are found (default: 5)') do |n|
+          @options[:sleep_delay] = seconds(n)
         end
         opt.on('--read-ahead N', 'Number of jobs from the queue to consider') do |n|
           @options[:read_ahead] = Integer(n) rescue nil
@@ -142,8 +142,17 @@ module Delayed
       @pool_parser ||= PoolParser.new
     end
 
+    # Parses a number of seconds: whole (Integer) or fractional (Float), or
+    # -1 (rejected by validation) if it isn't a number.
+    def seconds(value)
+      Integer(value, 10)
+    rescue ArgumentError
+      Float(value) rescue -1 # rubocop:disable RescueModifier
+    end
+
     def validate_options!
       validate_process_count!
+      validate_sleep_delay!
       validate_thread_count!
       validate_shutdown_timeout!
       validate_lock_heartbeat!
@@ -156,6 +165,11 @@ module Delayed
     def validate_process_count!
       return unless @options[:processes] < 1
       STDERR.puts 'WARNING: --processes must be 1 or greater. This will raise an ArgumentError in the next major version.'
+    end
+
+    def validate_sleep_delay!
+      return unless @options.key?(:sleep_delay) && @options[:sleep_delay] < 0
+      raise ArgumentError, '--sleep-delay must be a number of seconds, 0 or greater'
     end
 
     def validate_thread_count!

@@ -24,7 +24,8 @@ namespace :jobs do
     }
     @options[:min_priority] = Integer(ENV['MIN_PRIORITY']) if ENV['MIN_PRIORITY']
     @options[:max_priority] = Integer(ENV['MAX_PRIORITY']) if ENV['MAX_PRIORITY']
-    @options[:sleep_delay] = Integer(ENV['SLEEP_DELAY']) if ENV['SLEEP_DELAY']
+    # Whole or fractional seconds.
+    @options[:sleep_delay] = (Integer(ENV['SLEEP_DELAY'], 10) rescue Float(ENV['SLEEP_DELAY'])) if ENV['SLEEP_DELAY'] # rubocop:disable RescueModifier
     @options[:read_ahead] = Integer(ENV['READ_AHEAD']) if ENV['READ_AHEAD']
     @options[:threads] = Integer(ENV['NUM_THREADS']) if ENV['NUM_THREADS']
     @options[:shutdown_timeout] = Float(ENV['SHUTDOWN_TIMEOUT']) if ENV['SHUTDOWN_TIMEOUT']
@@ -44,6 +45,10 @@ namespace :jobs do
 
     if @options[:processes] < 1
       raise ArgumentError, 'NUM_PROCESSES must be 1 or greater'
+    end
+
+    if @options[:sleep_delay] && @options[:sleep_delay] < 0
+      raise ArgumentError, 'SLEEP_DELAY must be 0 or greater'
     end
 
     if @options[:threads] && @options[:threads] < 1

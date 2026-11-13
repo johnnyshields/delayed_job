@@ -387,12 +387,37 @@ describe Delayed::Command do
 
     context 'set' do
       let(:options) { %w[--sleep-delay 5] }
-      it { expect(output_options[:sleep_delay]).to eq(5) }
+      it { expect(output_options[:sleep_delay]).to eql(5) }
+    end
+
+    context 'set to fractional seconds' do
+      let(:options) { %w[--sleep-delay 0.5] }
+      it { expect(output_options[:sleep_delay]).to eql(0.5) }
+    end
+
+    context 'set with =' do
+      let(:options) { %w[--sleep-delay=2.25] }
+      it { expect(output_options[:sleep_delay]).to eql(2.25) }
+    end
+
+    context 'set to 0' do
+      let(:options) { %w[--sleep-delay 0] }
+      it { expect(output_options[:sleep_delay]).to eql(0) }
+    end
+
+    context 'with a leading zero' do
+      let(:options) { %w[--sleep-delay 010] }
+      it { expect(output_options[:sleep_delay]).to eql(10) } # Not octal.
+    end
+
+    context 'negative' do
+      let(:options) { %w[--sleep-delay -1] }
+      it { expect { output_options }.to raise_error(ArgumentError, '--sleep-delay must be a number of seconds, 0 or greater') }
     end
 
     context 'not a number' do
       let(:options) { %w[--sleep-delay giraffe] }
-      it { expect(output_options[:sleep_delay]).to eq nil }
+      it { expect { output_options }.to raise_error(ArgumentError, /--sleep-delay/) }
     end
   end
 

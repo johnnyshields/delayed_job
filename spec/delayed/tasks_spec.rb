@@ -220,6 +220,32 @@ describe 'Rake tasks' do
       end
     end
 
+    context 'SLEEP_DELAY=0.5' do
+      let(:env) { {'SLEEP_DELAY' => '0.5'} }
+      let(:exp_args) { {:quiet => false, :sleep_delay => 0.5, :processes => 1} }
+      it do
+        expect_success
+        run_task
+      end
+    end
+
+    context 'SLEEP_DELAY=08' do
+      let(:env) { {'SLEEP_DELAY' => '08'} }
+      let(:exp_args) { {:quiet => false, :sleep_delay => 8, :processes => 1} }
+      it do
+        expect_success
+        run_task
+      end
+    end
+
+    context 'SLEEP_DELAY negative' do
+      let(:env) { {'SLEEP_DELAY' => '-1'} }
+      it do
+        allow_any_instance_of(Delayed::Launcher::Forking).to receive(:launch) # Never start a real launcher.
+        expect { run_task }.to raise_error(ArgumentError, 'SLEEP_DELAY must be 0 or greater')
+      end
+    end
+
     context 'SLEEP_DELAY not a number' do
       let(:env) { {'SLEEP_DELAY' => 'foo'} }
       it { expect { run_task }.to raise_error(ArgumentError) }

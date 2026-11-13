@@ -150,6 +150,45 @@ describe 'Worker processes whose parent goes away' do
         expect(timed { Timeout.timeout(5) { d.send(:wait_before_next_poll, seen, true) } }).to be < 1
       end
 
+      describe 'with no sleep_delay set (nil)' do
+        before { Delayed::Worker.sleep_delay = nil }
+
+        it 'waits the default sleep_delay instead of crashing' do
+          d = dispatcher(:supervisor_pid => Process.ppid)
+          timeouts = waits_of(d)
+          _, seen = d.send(:snapshot)
+          Thread.new { sleep 0.2; d.stop }
+          expect { Timeout.timeout(5) { d.send(:wait_before_next_poll, seen, true) } }.not_to raise_error
+          expect(timeouts.first).to be <= described_class::SUPERVISOR_CHECK_INTERVAL
+        end
+
+        it 'sets its deadline from the default' do
+          d = dispatcher
+          timeouts = waits_of(d)
+          _, seen = d.send(:snapshot)
+          Thread.new { sleep 0.1; d.stop }
+          Timeout.timeout(5) { d.send(:wait_before_next_poll, seen, true) }
+          expect(timeouts.first).to be_within(0.1).of(Delayed::Worker::DEFAULT_SLEEP_DELAY)
+        end
+
+        it 'keeps an idle (supervised) dispatcher running' do
+          d = dispatcher(:supervisor_pid => Process.ppid, :threads => 2)
+          Delayed::Worker.sleep_delay = nil # Worker.new may have set it.
+          thread = Thread.new { d.run }
+          sleep 0.3
+          expect(thread).to be_alive
+          d.stop
+          expect { Timeout.timeout(5) { thread.join } }.not_to raise_error
+        end
+      end
+
+      it 'waits a fractional sleep_delay' do
+        Delayed::Worker.sleep_delay = 0.25
+        d = dispatcher
+        _, seen = d.send(:snapshot)
+        expect(timed { d.send(:wait_before_next_poll, seen, true) }).to be >= 0.24
+      end
+
       it 'returns early when stopped' do
         Delayed::Worker.sleep_delay = 30
         d = dispatcher(:supervisor_pid => Process.ppid)

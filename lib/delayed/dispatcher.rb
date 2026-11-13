@@ -270,7 +270,7 @@ module Delayed
     # parent every SUPERVISOR_CHECK_INTERVAL seconds meanwhile - without
     # polling for jobs, so the database is still polled every sleep_delay.
     def wait_before_next_poll(seen, queue_dry)
-      deadline = monotonic_now + Worker.sleep_delay if queue_dry
+      deadline = monotonic_now + sleep_delay if queue_dry
       loop do
         remaining = deadline && deadline - monotonic_now
         return if remaining && remaining <= 0
@@ -278,6 +278,12 @@ module Delayed
         return if wait_for_event(seen, timeout)
         return if supervisor_gone?
       end
+    end
+
+    # Worker.sleep_delay, or the default if it isn't set (e.g. nil, from
+    # an option that failed to parse).
+    def sleep_delay
+      Worker.sleep_delay || Worker::DEFAULT_SLEEP_DELAY
     end
 
     # Whether the parent process went away (this process was re-parented).
