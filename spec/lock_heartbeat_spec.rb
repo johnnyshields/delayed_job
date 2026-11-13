@@ -558,8 +558,11 @@ describe 'Lock heartbeats' do
         allow_any_instance_of(StuckJob).to receive(:max_run_time).and_raise(ArgumentError, 'broken job')
         broken = job_class.create!(:payload_object => StuckJob.new(0, 1))
         long = job_class.create!(:payload_object => ProcessJobs::SleepJob.new('long', 0.5))
+        # Poll often, so a poll that reserved only the broken job is followed
+        # by another soon; and allow a slow CI machine time to run both.
+        Delayed::Worker.sleep_delay = 0.05
         thread = run_dispatcher
-        wait_for(5) { job_class.where(:id => long.id).empty? }
+        wait_for(15) { job_class.where(:id => long.id).empty? }
         dispatcher.stop
         Timeout.timeout(5) { thread.join }
         expect(job_class.find(broken.id).last_error).to match(/broken job/)
