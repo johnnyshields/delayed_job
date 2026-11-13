@@ -41,7 +41,8 @@ module Delayed
     #   Delayed::Worker.on_thread_error = ->(error, info) { Sentry.capture_exception(error, extra: info) }
     #
     # `info` holds :context (what failed) and, where known, :dispatcher,
-    # :worker and :job. A handler taking one argument gets only the error.
+    # :worker and :job. A handler taking one argument gets only the error,
+    # and one taking none is just called.
     # Job errors are not reported here: see the :error lifecycle callback.
     # Errors raised by the handler are logged and ignored.
     cattr_accessor :on_thread_error
@@ -220,7 +221,11 @@ module Delayed
       Delayed.instrument(:thread_error, info.merge(:error => error))
       handler = on_thread_error
       return unless handler
-      handler_arity(handler) == 1 ? handler.call(error) : handler.call(error, info)
+      case handler_arity(handler)
+      when 0 then handler.call
+      when 1 then handler.call(error)
+      else handler.call(error, info)
+      end
     rescue StandardError => handler_error
       logger.error("Error in Delayed::Worker.on_thread_error: #{handler_error.class}: #{handler_error.message}") if logger
     end

@@ -40,6 +40,42 @@ describe 'Delayed::Worker.on_thread_error' do
       expect(errors).to eq [error]
     end
 
+    it 'calls a handler taking no arguments with none' do
+      calls = 0
+      Delayed::Worker.on_thread_error = -> { calls += 1 }
+      Delayed::Worker.thread_error(IOError.new('x'), :context => 'Test')
+      expect(calls).to eq 1
+      expect(log.string).not_to include 'on_thread_error'
+    end
+
+    it 'calls an object whose #call takes no arguments with none' do
+      handler = Class.new do
+        attr_reader :calls
+
+        def call
+          @calls = (@calls || 0) + 1
+        end
+      end.new
+      Delayed::Worker.on_thread_error = handler
+      Delayed::Worker.thread_error(IOError.new('x'), :context => 'Test')
+      expect(handler.calls).to eq 1
+    end
+
+    it 'calls a proc without parameters' do
+      calls = 0
+      Delayed::Worker.on_thread_error = proc { calls += 1 }
+      Delayed::Worker.thread_error(IOError.new('x'), :context => 'Test')
+      expect(calls).to eq 1
+    end
+
+    it 'calls a handler with an optional argument with the error and the info' do
+      received = nil
+      Delayed::Worker.on_thread_error = ->(error, info = nil) { received = [error, info] }
+      error = IOError.new('x')
+      Delayed::Worker.thread_error(error, :context => 'Test')
+      expect(received).to eq [error, {:context => 'Test'}]
+    end
+
     it 'accepts any callable' do
       handler = double('handler', :arity => 2)
       expect(handler).to receive(:call).with(kind_of(IOError), {:context => 'Test'})
