@@ -332,10 +332,12 @@ module Delayed
     def run(job)
       job_say job, 'RUNNING'
       started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      limit = max_run_time(job).to_i
+      dispatcher.job_timed(self, job, limit) if dispatcher
       # Only the job's own code can be interrupted by shutdown (see
       # Dispatcher#work): never finishing it, below, so a job that ran
       # is never released to run again.
-      Timeout.timeout(max_run_time(job).to_i, WorkerTimeout) { Dispatcher.interruptible { job.invoke_job } }
+      Timeout.timeout(limit, WorkerTimeout) { Dispatcher.interruptible { job.invoke_job } }
       owned_destroy(job)
       runtime = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
       job_say job, format('COMPLETED after %.4f', runtime)

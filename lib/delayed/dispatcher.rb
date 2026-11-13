@@ -204,6 +204,18 @@ module Delayed
       "#{@procline_name}: #{state}#{in_flight}/#{thread_count} busy, queues=#{queue_names}"
     end
 
+    # Called by Worker#run as the job's own code starts, with its time limit
+    # in seconds (as Worker#run times it out): records them for the lock
+    # heartbeat (see #heartbeat_names), with the job's log label. Worker#run
+    # works them out on the worker's thread, inside the job's :perform
+    # callbacks (which may set up what deserializing it needs), so the
+    # heartbeat thread never calls into the job.
+    def job_timed(worker, job, limit)
+      limit = nil unless limit > 0 # No timeout under a second.
+      label = limit && job_label(job)
+      synchronize { @jobs_started[worker] = [job, monotonic_now, limit, label] }
+    end
+
   private
 
     def build_workers(options)
@@ -438,30 +450,15 @@ module Delayed
                         label, limit, Worker.lock_timeout), 'error')
     end
 
-    # Records which job the worker runs, since when, and for how long it may
-    # run (see #heartbeat_names). The limit (and the job's log label) are
-    # worked out here, on the worker's thread, so the heartbeat thread
-    # never calls into the job.
-    def track_job(worker, job)
-      limit = run_time_limit(worker, job)
-      label = limit && job_label(job)
-      synchronize { @jobs_started[worker] = [job, monotonic_now, limit, label] }
+    # Forgets, once the worker is done with the job, when it started and
+    # its time limit (recorded by #job_timed).
+    def track_job(worker, _job)
       yield
     ensure
       synchronize do
         @jobs_started.delete(worker)
         @overrun_reported.delete(worker)
       end
-    end
-
-    # The job's max_run_time in whole seconds, as Worker#run times jobs out,
-    # or nil for no limit: when it is under a second (no timeout), or when
-    # working it out fails (Worker#run will then fail the job).
-    def run_time_limit(worker, job)
-      limit = worker.max_run_time(job).to_i
-      limit if limit > 0
-    rescue StandardError
-      nil
     end
 
     # How Worker#job_say names the job.

@@ -298,10 +298,10 @@ describe 'Lock heartbeats' do
         dispatcher.workers.each { |w| allow(w).to receive(:say) { |text, level = 'info'| messages << [level, text] } }
       end
 
+      # Records the job as Worker#run does, started `seconds_ago`.
       def job_running(worker, job, seconds_ago)
-        limit = dispatcher.send(:run_time_limit, worker, job)
-        label = dispatcher.send(:job_label, job)
-        dispatcher.instance_variable_get(:@jobs_started)[worker] = [job, dispatcher.send(:monotonic_now) - seconds_ago, limit, label]
+        dispatcher.job_timed(worker, job, worker.max_run_time(job).to_i)
+        dispatcher.instance_variable_get(:@jobs_started)[worker][1] -= seconds_ago
       end
 
       def job_with_max_run_time(limit)
@@ -378,66 +378,85 @@ describe 'Lock heartbeats' do
           dispatcher.send(:heartbeat_names)
         end
 
-        it "keeps refreshing every lock when a job's max_run_time raises" do
-          job = job_with_max_run_time(1)
-          allow(job).to receive(:max_run_time).and_raise(ArgumentError, 'broken job')
-          job_running(worker, job, 3600)
-          expect(dispatcher.send(:heartbeat_names)).to eq dispatcher.workers.map(&:name)
-          expect(overrun_messages).to be_empty
-        end
+
       end
 
-      describe '#run_time_limit' do
-        it "is the job's max_run_time in whole seconds" do
-          expect(dispatcher.send(:run_time_limit, worker, job_with_max_run_time(7.9))).to eq 7
+      describe '#job_timed' do
+        it 'records the job, when it started, its limit and its log label' do
+          job = job_class.create!(:payload_object => StuckJob.new(0, 3), :queue => 'mail')
+          dispatcher.job_timed(worker, job, 3)
+          recorded, started, limit, label = dispatcher.instance_variable_get(:@jobs_started)[worker]
+          expect(recorded).to equal job
+          expect(started).to be_within(1).of(dispatcher.send(:monotonic_now))
+          expect(limit).to eq 3
+          expect(label).to eq "Job StuckJob (id=#{job.id}) (queue=mail)"
         end
 
-        it 'falls back to Worker.max_run_time' do
+        it 'records no limit under one second, as Worker#run sets no timeout then' do
+          dispatcher.job_timed(worker, job_with_max_run_time(0), 0)
+          expect(dispatcher.instance_variable_get(:@jobs_started)[worker][2]).to be_nil
+        end
+
+        it "is called by Worker#run with the job's max_run_time in whole seconds" do
+          expect(dispatcher).to receive(:job_timed).with(worker, kind_of(job_class), 7)
+          job_class.create!(:payload_object => StuckJob.new(0, 7.9))
+          expect(dispatcher.work_off(1, worker)).to eq [1, 0]
+        end
+
+        it 'is called with Worker.max_run_time when the job has none' do
           Delayed::Worker.max_run_time = 42
-          expect(dispatcher.send(:run_time_limit, worker, job_with_max_run_time(nil))).to eq 42
+          expect(dispatcher).to receive(:job_timed).with(worker, kind_of(job_class), 42)
+          job_class.create!(:payload_object => SimpleJob.new)
+          dispatcher.work_off(1, worker)
         end
 
-        it 'is nil (no limit) under one second, as Worker#run sets no timeout then' do
-          expect(dispatcher.send(:run_time_limit, worker, job_with_max_run_time(0.9))).to be_nil
-          expect(dispatcher.send(:run_time_limit, worker, job_with_max_run_time(0))).to be_nil
+        it 'is not needed by a Worker running without a dispatcher' do
+          worker = Delayed::Worker.allocate.tap { |w| w.instance_variable_set(:@quiet, true) }
+          allow(worker).to receive(:say)
+          job = job_class.create!(:payload_object => SimpleJob.new)
+          expect(worker.run(job)).to be true
         end
 
-        it 'is nil (no limit) when working it out raises' do
-          job = job_with_max_run_time(1)
-          allow(job).to receive(:max_run_time).and_raise(ArgumentError, 'broken job')
-          expect(dispatcher.send(:run_time_limit, worker, job)).to be_nil
-        end
-
-        it 'is worked out once, on the thread that runs the job' do
+        it 'works the limit out once, on the thread that runs the job' do
           threads = []
           allow(worker).to receive(:max_run_time).and_wrap_original { |m, job| threads << Thread.current; m.call(job) }
-          allow(worker).to receive(:perform_job) do |_job|
-            3.times { dispatcher.send(:heartbeat_names) }
-            true
-          end
+          allow_any_instance_of(SimpleJob).to receive(:perform) { 3.times { dispatcher.send(:heartbeat_names) } }
           job_class.create!(:payload_object => SimpleJob.new)
           expect(dispatcher.work_off(1, worker)).to eq [1, 0]
           expect(threads).to eq [Thread.current]
         end
+
+        it 'deserializes the job inside its :perform callbacks, as before' do
+          dispatcher # Worker.new resets the lifecycle.
+          Delayed::Worker.lifecycle.around(:perform) do |w, j, &block|
+            Thread.current[:dj_in_perform] = true
+            block.call(w, j)
+          ensure
+            Thread.current[:dj_in_perform] = nil
+          end
+          loads = []
+          allow_any_instance_of(job_class).to receive(:payload_object).and_wrap_original do |m|
+            loads << !!Thread.current[:dj_in_perform]
+            m.call
+          end
+          job_class.create!(:payload_object => SimpleJob.new)
+          expect(dispatcher.work_off(1, worker)).to eq [1, 0]
+          expect(loads).not_to be_empty
+          expect(loads).to all(be true)
+        end
       end
 
-      it "keeps the heartbeat refreshing locks while a job whose max_run_time raises runs" do
+      it "fails a job whose max_run_time raises, as before, while the heartbeat refreshes every lock" do
         touched = Queue.new
         allow(job_class).to receive(:touch_locks).and_wrap_original { |m, names| touched << names; m.call(names) }
-        broken = job_class.create!(:payload_object => ProcessJobs::SleepJob.new('broken', 0.6))
-        calls = 0
-        allow_any_instance_of(job_class).to receive(:max_run_time).and_wrap_original do |m|
-          # Broken whenever the heartbeat thread asks, and the first time the
-          # worker thread does (tracking the job); Worker#run's call works.
-          raise ArgumentError, 'broken job' if Thread.current.name == 'delayed_job heartbeat'
-          calls += 1
-          raise ArgumentError, 'broken job' if calls == 1
-          m.call
-        end
+        allow_any_instance_of(StuckJob).to receive(:max_run_time).and_raise(ArgumentError, 'broken job')
+        broken = job_class.create!(:payload_object => StuckJob.new(0, 1))
+        long = job_class.create!(:payload_object => ProcessJobs::SleepJob.new('long', 0.5))
         thread = run_dispatcher
-        wait_for(5) { job_class.where(:id => broken.id).empty? }
+        wait_for(5) { job_class.where(:id => long.id).empty? }
         dispatcher.stop
         Timeout.timeout(5) { thread.join }
+        expect(job_class.find(broken.id).last_error).to match(/broken job/)
         names = Array.new(touched.size) { touched.pop }
         expect(names).not_to be_empty
         expect(names).to all(eq(dispatcher.workers.map(&:name)))
@@ -445,20 +464,21 @@ describe 'Lock heartbeats' do
       end
 
       describe '#track_job' do
-        it 'records the job and when it started while it runs' do
-          job = job_with_max_run_time(nil)
-          seen = nil
-          dispatcher.send(:track_job, worker, job) { seen = dispatcher.instance_variable_get(:@jobs_started)[worker] }
-          expect(seen.first).to equal job
-          expect(seen[1]).to be_within(1).of(dispatcher.send(:monotonic_now))
-          expect(dispatcher.instance_variable_get(:@jobs_started)).to be_empty
-        end
-
         it 'returns the result of the block' do
           expect(dispatcher.send(:track_job, worker, job_with_max_run_time(nil)) { :result }).to eq :result
         end
 
-        it 'forgets the job and its overrun report even when the job raises' do
+        it 'forgets the job and its overrun report once the block is done' do
+          job = job_with_max_run_time(1)
+          dispatcher.send(:track_job, worker, job) do
+            job_running(worker, job, 2)
+            dispatcher.send(:heartbeat_names)
+          end
+          expect(dispatcher.instance_variable_get(:@jobs_started)).to be_empty
+          expect(dispatcher.instance_variable_get(:@overrun_reported)).to be_empty
+        end
+
+        it 'forgets them even when the job raises' do
           job = job_with_max_run_time(1)
           expect do
             dispatcher.send(:track_job, worker, job) do
@@ -471,23 +491,27 @@ describe 'Lock heartbeats' do
           expect(dispatcher.instance_variable_get(:@overrun_reported)).to be_empty
         end
 
-        it 'tracks jobs run by worker threads' do
+        it 'has jobs run by worker threads timed while they run' do
           seen = Queue.new
-          allow(worker).to receive(:perform_job) { |_job| seen << dispatcher.instance_variable_get(:@jobs_started).keys; true }
-          allow(other).to receive(:perform_job) { |_job| seen << dispatcher.instance_variable_get(:@jobs_started).keys; true }
+          d = dispatcher
+          allow_any_instance_of(SimpleJob).to receive(:perform) { seen << d.instance_variable_get(:@jobs_started).keys }
           job_class.create!(:payload_object => SimpleJob.new)
           Delayed::Worker.exit_on_complete = true
           Timeout.timeout(5) { dispatcher.run }
-          expect(dispatcher.workers).to include(*seen.pop)
+          keys = seen.pop
+          expect(keys.size).to eq 1
+          expect(dispatcher.workers).to include(*keys)
           expect(dispatcher.instance_variable_get(:@jobs_started)).to be_empty
         end
 
-        it 'tracks jobs run inline by #work_off' do
+        it 'has jobs run inline by #work_off timed while they run' do
           seen = nil
-          allow(worker).to receive(:perform_job) { |_job| seen = dispatcher.instance_variable_get(:@jobs_started).keys; true }
+          d = dispatcher
+          allow_any_instance_of(SimpleJob).to receive(:perform) { seen = d.instance_variable_get(:@jobs_started).keys }
           job_class.create!(:payload_object => SimpleJob.new)
           expect(dispatcher.work_off(1, worker)).to eq [1, 0]
           expect(seen).to eq [worker]
+          expect(dispatcher.instance_variable_get(:@jobs_started)).to be_empty
         end
       end
 
