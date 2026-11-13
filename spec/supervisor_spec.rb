@@ -2,7 +2,7 @@ require 'helper'
 
 describe 'Worker processes whose parent goes away' do
   describe Delayed::Dispatcher do
-    let(:messages) { [] }
+    let(:messages) { Concurrent::Array.new }
 
     def dispatcher(options = {})
       described_class.new(options).tap do |d|

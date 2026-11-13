@@ -2,7 +2,7 @@ require 'helper'
 
 describe 'Stopping a worker' do
   let(:dispatcher) { Delayed::Dispatcher.new(:threads => 2, :sleep_delay => 0.05) }
-  let(:log) { [] }
+  let(:log) { Concurrent::Array.new }
 
   before do
     Delayed::Job.delete_all
@@ -181,7 +181,7 @@ describe 'Stopping a worker' do
   end
 
   describe 'interrupts arriving outside of a job' do
-    let(:reported) { [] }
+    let(:reported) { Concurrent::Array.new }
 
     before do
       NapJob.outcomes = Queue.new
@@ -449,7 +449,7 @@ describe 'Stopping a worker' do
   end
 
   describe 'interrupts arriving after the job ran' do
-    let(:reported) { [] }
+    let(:reported) { Concurrent::Array.new }
     let(:paused) { Queue.new }
 
     before do
@@ -551,7 +551,7 @@ describe 'Stopping a worker' do
   end
 
   describe 'jobs handed to a thread that has not started them by the shutdown deadline' do
-    let(:reported) { [] }
+    let(:reported) { Concurrent::Array.new }
     let(:dispatcher) { Delayed::Dispatcher.new(:threads => 1, :sleep_delay => 0.05) }
 
     before do
@@ -722,6 +722,18 @@ describe 'Stopping a worker' do
     context 'with raise_signal_exceptions' do
       before { Delayed::Worker.raise_signal_exceptions = true }
       after { Delayed::Worker.raise_signal_exceptions = false }
+
+      it 'raises the signal in the main thread when the trap runs on another thread (JRuby)' do
+        expect(Thread.main).to receive(:raise).with(SignalException, 'TERM')
+        Thread.new { traps['TERM'].call }.join
+        expect(dispatcher).to be_stop
+      end
+
+      it 'raises the signal in the trap itself on the main thread (CRuby)' do
+        skip 'needs the spec to run on the main thread' unless Thread.current == Thread.main
+        expect(Thread.main).not_to receive(:raise)
+        expect { traps['TERM'].call }.to raise_error(SignalException, 'SIGTERM')
+      end
 
       it 'raises only for the first signal, so a repeated signal cannot interrupt the shutdown' do
         expect { traps['TERM'].call }.to raise_error(SignalException)
@@ -960,6 +972,40 @@ describe Delayed::Launcher::Forking, 'stopping worker processes' do
       end
       expect { launcher.send(:signal_workers, 'KILL') }.not_to raise_error
       expect(Process).to have_received(:kill).twice
+    end
+  end
+
+  describe 'the workers list, shared with the kill timer thread' do
+    it 'is guarded by a lock created with the launcher' do
+      expect(launcher.send(:workers_lock)).to be_a Mutex
+    end
+
+    it 'forwards a signal from a copy, while the kill timer thread removes workers' do
+      allow(Process).to receive(:kill) do |_signal, pid|
+        launcher.send(:workers).delete(12) if pid == 11 # Reaped meanwhile.
+      end
+      expect { traps['TERM'].call }.not_to raise_error
+      expect(Process).to have_received(:kill).with('TERM', 11)
+    end
+
+    it 'stays consistent when the run loop and the kill timer thread change it at once' do
+      launcher.send(:workers).clear
+      pids = (1000..1199).to_a
+      allow(launcher).to receive(:fork_worker) { pids.shift }
+      reaped = Queue.new
+      allow(launcher).to receive(:recover_jobs_of_worker) { |_name, pid, *| reaped << pid }
+      allow(Process).to receive(:waitpid2) { |pid| [pid, double(:success? => true)] }
+      adder = Thread.new { 200.times { launcher.send(:add_worker, {}) } }
+      reaper = Thread.new do
+        20.times do
+          launcher.send(:reap_killed_workers, launcher.send(:workers_lock).synchronize { launcher.send(:workers).dup })
+        end
+      end
+      [adder, reaper].each(&:join)
+      gone = Array.new(reaped.size) { reaped.pop }
+      # Every child process is either still listed or was reaped, once.
+      expect(gone.uniq.size).to eq gone.size
+      expect(launcher.send(:workers).keys + gone).to match_array (1000..1199).to_a
     end
   end
 

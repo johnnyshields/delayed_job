@@ -8,8 +8,11 @@ end
 class SimpleJob
   cattr_accessor :runs
   @runs = 0
+  # runs += 1 isn't atomic: jobs run on parallel threads (JRuby).
+  RUNS_LOCK = Mutex.new
+
   def perform
-    self.class.runs += 1
+    RUNS_LOCK.synchronize { self.class.runs += 1 }
   end
 end
 

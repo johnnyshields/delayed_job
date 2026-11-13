@@ -91,6 +91,11 @@ class Story < ActiveRecord::Base
   handle_asynchronously :whatever
 end
 
+# Specs collect log lines, events and errors in Concurrent::Arrays: the stubs
+# and callbacks appending to them run on worker and heartbeat threads, in
+# parallel on JRuby, where Array#<< can lose entries.
+require 'concurrent/array'
+
 RSpec.configure do |config|
   config.after(:each) do
     Delayed::Worker.reset

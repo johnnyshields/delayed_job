@@ -340,8 +340,8 @@ describe Delayed::Dispatcher do
     end
 
     describe 'a signal or exit during a reservation' do
-      let(:reported) { [] }
-      let(:messages) { [] }
+      let(:reported) { Concurrent::Array.new }
+      let(:messages) { Concurrent::Array.new }
 
       before do
         Delayed::Worker.exit_on_complete = false

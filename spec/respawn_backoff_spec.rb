@@ -129,7 +129,7 @@ describe Delayed::Launcher::Forking, 'replacing child processes that keep dying'
   end
 
   describe 'when forking a replacement fails' do
-    let(:reported) { [] }
+    let(:reported) { Concurrent::Array.new }
 
     before { Delayed::Worker.on_thread_error = ->(error, info) { reported << [error, info] } }
 

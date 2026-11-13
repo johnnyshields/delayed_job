@@ -4,7 +4,7 @@ require_relative 'processes/helpers'
 # Races between a dispatcher's threads, its shutdown and its lock heartbeat,
 # exercised many times with random timings. Each prints its seed on failure.
 describe 'Races' do
-  let(:reported) { [] }
+  let(:reported) { Concurrent::Array.new }
   let(:seed) { Integer(ENV.fetch('RACE_SEED', Random.new_seed)) }
 
   before do

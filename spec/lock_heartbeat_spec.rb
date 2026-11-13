@@ -89,7 +89,7 @@ describe 'Lock heartbeats' do
 
   describe Delayed::Dispatcher do
     let(:dispatcher) { described_class.new(:threads => 2, :sleep_delay => 0.05) }
-    let(:messages) { [] }
+    let(:messages) { Concurrent::Array.new }
     let(:job_class) { Delayed::Backend::SqliteFile::Job }
 
     before do
@@ -171,7 +171,7 @@ describe 'Lock heartbeats' do
     end
 
     describe 'errors ending the heartbeat' do
-      let(:reported) { [] }
+      let(:reported) { Concurrent::Array.new }
 
       before { Delayed::Worker.on_thread_error = ->(error, info) { reported << [error, info] } }
 
@@ -463,13 +463,22 @@ describe 'Lock heartbeats' do
           expect(overrun_messages.first).to include 'max_run_time (1s)', 'lock_timeout (0.5s)'
         end
 
+        it 'never loads the job from the heartbeat thread to publish job_stuck' do
+          job = job_with_max_run_time(1)
+          job_running(worker, job, 2)
+          expect(job).not_to receive(:payload_object)
+          expect(job).not_to receive(:name)
+          dispatcher.send(:heartbeat_names)
+        end
+
         it 'publishes job_stuck once per stuck job' do
           events = []
           subscription = ActiveSupport::Notifications.subscribe('job_stuck.delayed_job') { |*args| events << args.last }
           job = job_with_max_run_time(1)
           job_running(worker, job, 2)
           3.times { dispatcher.send(:heartbeat_names) }
-          expect(events).to eq [{:job => job, :worker => worker.name, :max_run_time => 1, :lock_timeout => 0.5}]
+          expect(events).to eq [{:job => job, :job_name => "Job StuckJob (id=#{job.id})", :worker => worker.name,
+                                 :max_run_time => 1, :lock_timeout => 0.5}]
         ensure
           ActiveSupport::Notifications.unsubscribe(subscription)
         end
@@ -713,7 +722,7 @@ describe 'Lock heartbeats' do
   describe 'a worker whose lock was taken over' do
     let(:job_class) { Delayed::Backend::SqliteFile::Job }
     let(:stale) { Delayed::Worker.new.tap { |w| w.name = 'stale' } }
-    let(:logged) { [] }
+    let(:logged) { Concurrent::Array.new }
 
     before do
       SimpleJob.runs = 0

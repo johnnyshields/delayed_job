@@ -1,7 +1,7 @@
 require 'helper'
 
 describe 'Delayed::Worker.on_thread_error' do
-  let(:reported) { [] }
+  let(:reported) { Concurrent::Array.new }
   let(:log) { StringIO.new }
 
   before do

@@ -1,7 +1,7 @@
 require 'helper'
 
 describe 'Instrumentation' do
-  let(:events) { [] }
+  let(:events) { Concurrent::Array.new }
   let(:log) { StringIO.new }
 
   around do |example|
@@ -540,8 +540,10 @@ describe 'Instrumentation' do
         '(pid 9) exited after 5.0s: exit 0; not replaced'
       expect(logged(:child_spawned, :worker => 'delayed_job.2', :pid => 10, :replaces_pid => 9)).to include 'Child process delayed_job.2 (pid 10) spawned replacing pid 9'
       expect(logged(:child_spawned, :worker => 'delayed_job.0', :pid => 8, :replaces_pid => nil)).to include 'Child process delayed_job.0 (pid 8) spawned'
-      expect(logged(:job_stuck, :job => job, :worker => 'w', :max_run_time => 60)).to include \
-        "ERROR -- : Job SimpleJob (id=#{job.id}) (queue=mail) is stuck on w: running past its max_run_time (60s)"
+      label = "Job SimpleJob (id=#{job.id}) (queue=mail)"
+      expect(job).not_to receive(:name) # It belongs to another thread.
+      expect(logged(:job_stuck, :job => job, :job_name => label, :worker => 'w', :max_run_time => 60)).to include \
+        "ERROR -- : #{label} is stuck on w: running past its max_run_time (60s)"
     end
 
     it 'logs nothing without a logger' do

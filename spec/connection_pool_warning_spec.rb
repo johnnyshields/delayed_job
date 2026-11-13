@@ -4,7 +4,7 @@ require_relative 'processes/helpers'
 # The warning a dispatcher logs when the Active Record connection pool is
 # smaller than the number of threads that may query at once.
 describe 'The connection pool size warning' do
-  let(:messages) { [] }
+  let(:messages) { Concurrent::Array.new }
   let(:pool) { double('connection pool', :size => pool_size) }
   let(:pool_size) { 5 }
 

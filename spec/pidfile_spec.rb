@@ -131,18 +131,19 @@ describe Delayed::Pidfile do
       started = Array.new(4) do
         spawn_ruby(<<-RUBY)
           begin
-            Delayed::Pidfile.new(ARGV[0]).setup
-            print 'ok'
+            pidfile = Delayed::Pidfile.new(ARGV[0]).setup
+            stat = pidfile.instance_variable_get(:@file).stat
+            print "ok pid=\#{Process.pid} ino=\#{stat.ino} at=\#{Process.clock_gettime(Process::CLOCK_REALTIME)}"
             STDOUT.flush
             sleep 2 # Keep running while the others start.
-          rescue Delayed::AlreadyRunningError
-            print 'running'
+          rescue Delayed::AlreadyRunningError => e
+            print "running (\#{e.pid.inspect})"
           end
         RUBY
       end
       results = started.map { |_, reader| reader.read.tap { reader.close } }
       started.each { |pid, _| Process.wait(pid) }
-      expect(results.sort).to eq %w[ok running running running]
+      expect(results.map { |r| r.split.first }.sort).to eq(%w[ok running running running]), results.join("\n")
     end
   end
 
