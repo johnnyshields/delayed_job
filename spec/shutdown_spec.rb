@@ -306,37 +306,52 @@ describe 'Stopping a worker' do
   end
 
   describe 'on a Ruby without interrupt masking' do
-    # Hides Thread.handle_interrupt and Thread.pending_interrupt?.
+    # Makes the dispatcher take its paths for a Ruby without interrupt
+    # masking. Thread.handle_interrupt itself stays: the timeout gem (and
+    # with it every job's max_run_time) needs it.
     def hide_interrupt_masking
-      allow(Thread).to receive(:respond_to?).and_call_original
-      allow(Thread).to receive(:respond_to?).with(:handle_interrupt).and_return(false)
-      allow(Thread).to receive(:respond_to?).with(:pending_interrupt?).and_return(false)
-      allow(Thread).to receive(:handle_interrupt).and_raise(NoMethodError, 'no handle_interrupt')
-      allow(Thread).to receive(:pending_interrupt?).and_raise(NoMethodError, 'no pending_interrupt?')
+      allow(Delayed::Dispatcher).to receive(:interrupt_masking?).and_return(false)
+    end
+
+    # The dispatcher's own calls to the masking methods, which must not
+    # happen without masking.
+    def forbid_masking_calls
+      allow(Thread).to receive(:handle_interrupt).and_wrap_original do |m, *args, &block|
+        raise 'Thread.handle_interrupt called by the dispatcher' if caller.any? { |l| l.include?('lib/delayed/') }
+        m.call(*args, &block)
+      end
+      allow(Thread).to receive(:pending_interrupt?).and_wrap_original do |m, *args|
+        raise 'Thread.pending_interrupt? called by the dispatcher' if caller.any? { |l| l.include?('lib/delayed/') }
+        m.call(*args)
+      end
     end
 
     before { SimpleJob.runs = 0 }
 
     it 'is detected' do
       expect(Delayed::Dispatcher.interrupt_masking?).to be true
-      hide_interrupt_masking
+      allow(Thread).to receive(:respond_to?).and_call_original
+      allow(Thread).to receive(:respond_to?).with(:handle_interrupt).and_return(false)
       expect(Delayed::Dispatcher.interrupt_masking?).to be false
     end
 
     it 'is not needed by .interruptible and .deferring_interrupts, which just run the block' do
       hide_interrupt_masking
+      forbid_masking_calls
       expect(Delayed::Dispatcher.interruptible { :ran }).to eq :ran
       expect(Delayed::Dispatcher.deferring_interrupts { :ran }).to eq :ran
     end
 
     it 'finds no stale interrupts' do
       hide_interrupt_masking
+      forbid_masking_calls
       expect(dispatcher.send(:stale_interrupt_pending?)).to be false
       expect { dispatcher.send(:discard_stale_interrupts) }.not_to raise_error
     end
 
     it 'still runs jobs on worker threads' do
       hide_interrupt_masking
+      forbid_masking_calls
       jobs = Array.new(3) { Delayed::Job.enqueue(SimpleJob.new) }
       Delayed::Worker.exit_on_complete = true
       Timeout.timeout(5) { dispatcher.run }
@@ -346,6 +361,7 @@ describe 'Stopping a worker' do
 
     it 'still interrupts and releases running jobs on quit' do
       hide_interrupt_masking
+      forbid_masking_calls
       job, = enqueue(GateJob.new(:a))
       thread = run_until_started(1)
       dispatcher.quit
@@ -357,6 +373,7 @@ describe 'Stopping a worker' do
 
     it 'still runs jobs inline with Worker#work_off' do
       hide_interrupt_masking
+      forbid_masking_calls
       Delayed::Job.enqueue(SimpleJob.new)
       worker = Delayed::Worker.new
       allow(worker).to receive(:say)
