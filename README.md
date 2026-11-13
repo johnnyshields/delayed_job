@@ -216,6 +216,10 @@ jobs where a queue is not specified, set a default queue name with
 
 ## Running Jobs
 
+For production setups (systemd, Kubernetes, sizing, shutdown) see
+[docs/deployment.md](docs/deployment.md); for what to watch, see
+[docs/monitoring.md](docs/monitoring.md).
+
 ### Running as a Daemon Process
 
 `script/delayed_job` starts a background daemon process which will continually work jobs.
@@ -721,7 +725,9 @@ Workers publish `ActiveSupport::Notifications` events named `<event>.delayed_job
 | `thread_error` | `:error`, `:context`, and `:dispatcher`, `:worker`, `:job` where known - an error outside job handling (see `on_thread_error` above) |
 | `interrupt` | `:dispatcher`, `:jobs`, `:reason` - running jobs interrupted by the shutdown timeout or `SIGQUIT` |
 | `locks_released` | `:workers`, `:count`, `:reason` (`shutdown` or `process exit`) |
-| `fork_replaced` | `:worker`, `:pid`, `:status`, `:new_pid`, `:delay` - the forking parent replaced a child process that exited, after waiting `:delay` seconds (see "Worker processes that die") |
+| `child_exited` | `:worker`, `:pid`, `:status`, `:uptime` (seconds), `:respawn_in` (seconds until it is replaced; 0 at once, more after quick deaths - see "Worker processes that die"; nil if the launcher is stopping) - a forked child process exited |
+| `child_spawned` | `:worker`, `:pid`, `:replaces_pid` (the pid of the child process it replaces, or nil), `:delay` (seconds waited before forking it) - the forking parent forked a child process |
+| `job_stuck` | `:job`, `:worker`, `:max_run_time`, `:lock_timeout` - a job ran past its `max_run_time` without stopping (e.g. blocked in native code); with lock heartbeats, its lock is no longer refreshed and another worker may run it after `lock_timeout` |
 
 Timed events also carry `:exception` when their block raised. Events are
 published on worker threads; an exception raised by a subscriber is logged and
