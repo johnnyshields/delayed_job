@@ -190,48 +190,84 @@ module Delayed
         @supervisor_pid ||= Process.pid
       end
 
-      def run_loop # rubocop:disable Metrics/CyclomaticComplexity, Metrics/PerceivedComplexity
+      def run_loop
         loop do
-          worker_pid, child_status = Process.wait2
-          next unless workers.key?(worker_pid)
-          worker_name, options = workers.delete(worker_pid)
-          logger.info "Child process #{worker_name} (pid #{worker_pid}) exited: #{child_status}"
-          recover_jobs_of_worker(worker_name, worker_pid, options, child_status)
-
-          # A child process SIGKILLed by someone else (e.g. the OOM killer)
-          # is replaced like any other that died, its jobs recovered (above);
-          # the other worker processes carry on.
-          if child_status.termsig == 9 && !@killed
-            logger.warn "Child process #{worker_name} (pid #{worker_pid}) was SIGKILLed (e.g. by the OOM killer)" \
-                        "#{'; replacing it' unless @stopped}"
-          end
-
+          worker_pid, child_status = wait_for_child
+          handle_exit(worker_pid, child_status) if worker_pid
+          replace_due_workers
           break if @stopped && workers.empty?
-          next if @stopped
-          replace_worker(worker_name, worker_pid, options, child_status)
-          break if @stopped && workers.empty? # Stopped while waiting to replace it.
         end
       rescue Errno::ECHILD
         logger.warn 'No child processes found'
       end
 
-      # Forks a replacement for a child process that exited - after a delay
-      # if it died soon after starting (see RESPAWN_MIN_UPTIME), unless the
-      # launcher is stopped meanwhile. Returns the new pid, or nil.
+      # Waits for a child process to exit: returns [pid, status]. While a
+      # replacement is pending (see #replace_worker), only until it falls due
+      # or the launcher is stopped: returns nil then.
+      def wait_for_child
+        return Process.wait2 if pending_replacements.empty?
+        loop do
+          begin
+            exited = Process.wait2(-1, Process::WNOHANG)
+            return exited if exited
+          rescue Errno::ECHILD
+            nil # All children are waiting to be replaced.
+          end
+          remaining = pending_replacements.map(&:first).min - monotonic_now
+          return if @stopped || remaining <= 0
+          sleep([remaining, 0.1].min)
+        end
+      end
+
+      # Recovers the jobs of a child process that exited, then replaces it
+      # unless the launcher is stopping.
+      def handle_exit(worker_pid, child_status)
+        return unless workers.key?(worker_pid)
+        worker_name, options = workers.delete(worker_pid)
+        logger.info "Child process #{worker_name} (pid #{worker_pid}) exited: #{child_status}"
+        recover_jobs_of_worker(worker_name, worker_pid, options, child_status)
+
+        # A child process SIGKILLed by someone else (e.g. the OOM killer)
+        # is replaced like any other that died, its jobs recovered (above);
+        # the other worker processes carry on.
+        if child_status.termsig == 9 && !@killed
+          logger.warn "Child process #{worker_name} (pid #{worker_pid}) was SIGKILLed (e.g. by the OOM killer)" \
+                      "#{'; replacing it' unless @stopped}"
+        end
+        replace_worker(worker_name, worker_pid, options, child_status) unless @stopped
+      end
+
+      # Replaces a child process that exited: at once, or - if it died soon
+      # after starting (see RESPAWN_MIN_UPTIME) - after a delay, during which
+      # other children are still reaped and replaced. Returns the new pid,
+      # or nil if the replacement is delayed.
       def replace_worker(worker_name, pid, options, status)
         uptime = monotonic_now - started_at.delete(pid).to_f
         previous = respawn_streaks.delete(pid).to_i
         streak = uptime < RESPAWN_MIN_UPTIME ? previous + 1 : 0
         delay = respawn_delay(streak)
-        if delay
-          logger.warn format('Child process %<name>s (pid %<pid>d) died %<uptime>.1fs after starting (%<streak>d time(s) in a row); ' \
-                             'waiting %<delay>ds before replacing it',
-                             :name => worker_name, :pid => pid, :uptime => uptime, :streak => streak, :delay => delay)
-          return unless wait_unless_stopped(delay)
-        end
+        return respawn(worker_name, pid, options, status, streak, 0) unless delay
+        logger.warn format('Child process %<name>s (pid %<pid>d) died %<uptime>.1fs after starting (%<streak>d time(s) in a row); ' \
+                           'waiting %<delay>ds before replacing it',
+                           :name => worker_name, :pid => pid, :uptime => uptime, :streak => streak, :delay => delay)
+        pending_replacements << [monotonic_now + delay, [worker_name, pid, options, status, streak, delay]]
+        nil
+      end
+
+      # Forks the replacements that fell due, unless the launcher is stopping.
+      def replace_due_workers
+        return if pending_replacements.empty?
+        return pending_replacements.clear if @stopped
+        now = monotonic_now
+        due, pending = pending_replacements.partition { |at, _| at <= now }
+        @pending_replacements = pending
+        due.sort_by(&:first).each { |_, replacement| respawn(*replacement) }
+      end
+
+      def respawn(worker_name, pid, options, status, streak, delay) # rubocop:disable Metrics/ParameterLists
         new_pid = add_worker(options)
         respawn_streaks[new_pid] = streak
-        Delayed.instrument(:fork_replaced, :worker => worker_name, :pid => pid, :status => status, :new_pid => new_pid, :delay => delay || 0)
+        Delayed.instrument(:fork_replaced, :worker => worker_name, :pid => pid, :status => status, :new_pid => new_pid, :delay => delay)
         new_pid
       end
 
@@ -242,16 +278,10 @@ module Delayed
         [2**(streak - 1), RESPAWN_MAX_DELAY].min
       end
 
-      # Sleeps for `seconds`, or until the launcher is stopped. Returns
-      # whether it wasn't stopped.
-      def wait_unless_stopped(seconds)
-        deadline = monotonic_now + seconds
-        until @stopped
-          remaining = deadline - monotonic_now
-          return true if remaining <= 0
-          sleep([remaining, 0.1].min)
-        end
-        false
+      # [[due time, replacement], ...] of child processes waiting to be
+      # replaced (see #replace_worker).
+      def pending_replacements
+        @pending_replacements ||= []
       end
 
       def started_at

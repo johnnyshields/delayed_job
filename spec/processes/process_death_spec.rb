@@ -124,6 +124,39 @@ describe 'A worker process dying while running jobs', :processes do
       expect(ProcessHelpers::Run.where(:key => 'after the crash loop').count).to eq 1
     end
 
+    it 'does not hold up replacing a healthy sibling that dies meanwhile' do
+      job = enqueue_process_job(ProcessJobs::SleepJob.new('long', 30), :queue => 'healthy')
+      pid, reader = spawn_launcher(:pools => [[['crash'], 1], [['healthy'], 1]], :crash_queue => 'crash',
+                                   :worker => worker_settings.merge(:shutdown_timeout => 1))
+      output = +''
+      wait_for(30) { (output << read_available(reader)) =~ /waiting 8s before replacing it/ }
+      healthy = reload_job(job).locked_by[/pid:(\d+)/, 1].to_i
+      killed_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      Process.kill('KILL', healthy)
+      wait_for(5) { (output << read_available(reader)) =~ /Recovered 1 job\(s\) left locked by child process delayed_job\.\d+ \(pid #{healthy}\)/ }
+      recovered_after = Process.clock_gettime(Process::CLOCK_MONOTONIC) - killed_at
+      wait_for(5) { (output << read_available(reader)).scan(/started queues=healthy/).size == 2 }
+      replaced_after = Process.clock_gettime(Process::CLOCK_MONOTONIC) - killed_at
+      replacement = output.scan(/Child process (delayed_job\.\d+) \(pid \d+\) started queues=healthy/).last.first
+      wait_for(5) { (output << read_available(reader)) =~ /Worker\(#{replacement} .*\)\] Starting job worker/ }
+      Process.kill('TERM', -pid)
+      status, rest = wait_for_launcher(pid, reader)
+      output << rest
+
+      expect(status).to be_success, output
+      # Reaped and recovered at once, not after the crashing sibling's 8s
+      # delay; replaced after at most its own (it was up under 10s: 1s).
+      expect(recovered_after).to be < 1.5
+      expect(replaced_after).to be < 3
+      job = reload_job(job)
+      expect([job.attempts, job.locked_by]).to eq [1, nil]
+    rescue RuntimeError => error
+      raise "#{error.message}\nOutput:\n#{output}"
+    ensure
+      reader.close if reader && !reader.closed?
+      Process.kill('KILL', -pid) rescue nil
+    end
+
     it 'stops waiting when the launcher is stopped' do
       pid, reader = spawn_launcher(:processes => 1, :pools => [[[], 1]], :crash_on_start => 100, :worker => worker_settings)
       output = +''

@@ -18,6 +18,8 @@ startup_delay = options.delete(:startup_delay)
 log_events = options.delete(:log_events)
 # The first N forked worker processes crash (exit 3) as they start up.
 crash_on_start = options.delete(:crash_on_start)
+# Worker processes working this queue crash (exit 3) whenever they start.
+crash_queue = options.delete(:crash_queue)
 
 Delayed::Backend::SqliteFile::Job.connect(db_path)
 Delayed::Worker.backend = Delayed::Backend::SqliteFile::Job
@@ -42,6 +44,15 @@ if crash_on_start
     define_method(:after_fork) do
       File.open(starts, 'a') { |f| f.puts Process.pid }
       exit!(3) if File.readlines(starts).size <= crash_on_start
+      super()
+    end
+  end)
+end
+
+if crash_queue
+  Delayed::Dispatcher.prepend(Module.new do
+    define_method(:run) do
+      exit!(3) if Delayed::Worker.queues.include?(crash_queue)
       super()
     end
   end)
