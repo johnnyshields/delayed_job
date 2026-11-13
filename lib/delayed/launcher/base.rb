@@ -109,7 +109,7 @@ module Delayed
         set_process_name(worker_name)
         Delayed::Worker.after_fork
         setup_logger
-        dispatcher = Delayed::Dispatcher.new(options.merge(:supervisor_pid => supervisor_pid))
+        dispatcher = Delayed::Dispatcher.new(options.merge(:supervisor_pid => supervisor_pid, :procline => $0))
         dispatcher.name_prefix = "#{worker_name} "
         dispatcher.start(pending_signals)
       rescue => e

@@ -118,7 +118,7 @@ module Delayed
 
       def setup_single_worker
         set_process_name(get_name(process_identifier))
-        Delayed::Dispatcher.new(@options).start
+        Delayed::Dispatcher.new(@options.merge(:procline => $0)).start
       end
 
       def add_worker(options)

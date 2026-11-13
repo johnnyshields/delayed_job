@@ -37,6 +37,7 @@ Principles: no schema changes for existing backends; new hooks are optional with
 9. **`Delayed::Worker.silence_polling`** wraps each poll in `ActiveRecord::Base.logger.silence` — core version of the Mongoid `MongoSilencer` idea. (SQ: `with_polling_volume`.)
    - Implemented as backend hook `Job.silence_polling(&block)` (default: thread-local `ActiveRecord::Base.logger.silence(WARN)`), applied to reservation and lock-refresh queries only; `delayed_job_mongoid` overrides it for the Mongo driver logger.
 10. **Live procline**, e.g. `delayed_job.0: 3/4 busy, queues=*`. (SQ: `procline`.)
+    - Implemented: the dispatcher sets `$0` from its poll loop and shutdown wait (its own thread only, and only on change), adding `stopping, `/`quitting, `; launchers pass `:procline` (the process name incl. `--prefix`). `Worker#work_off` and bare dispatchers leave `$0` alone.
 
 ## Phase 2b — batched reservation (opt-in flag)
 

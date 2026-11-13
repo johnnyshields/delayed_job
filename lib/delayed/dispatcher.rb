@@ -46,12 +46,17 @@ module Delayed
     # * :threads - number of workers (threads) to run (default 1)
     # * :workers - run these workers instead of building new ones
     # * :supervisor_pid - see #supervisor_pid
+    # * :procline - the process' name, e.g. "delayed_job.0": while running,
+    #   the dispatcher keeps the process title ($0) up to date with it, e.g.
+    #   "delayed_job.0: 3/4 busy, queues=*" (see #procline). Set by the
+    #   launchers, which run each dispatcher in a process of its own.
     def initialize(options = {})
       @quiet = options.key?(:quiet) ? options[:quiet] : true
       @workers = options[:workers] || build_workers(options)
       raise ArgumentError, 'threads must be 1 or greater' if @workers.empty?
       @workers.each { |worker| worker.dispatcher = self }
       @supervisor_pid = options[:supervisor_pid]
+      @procline_name = options[:procline]
       @stopped = false
       @quit = false
       @stop_requested_at = nil
@@ -159,6 +164,16 @@ module Delayed
       @quit
     end
 
+    # The process title while running: the :procline name, the state (busy
+    # threads, or stopping/quitting) and the queues, e.g.
+    # "delayed_job.0: 3/4 busy, queues=mail,sms".
+    def procline
+      state = if quit? then 'quitting, '
+              elsif stop? then 'stopping, '
+              end
+      "#{@procline_name}: #{state}#{in_flight}/#{thread_count} busy, queues=#{queue_names}"
+    end
+
   private
 
     def build_workers(options)
@@ -204,6 +219,7 @@ module Delayed
 
     def poll_loop # rubocop:disable CyclomaticComplexity, PerceivedComplexity
       until stop?
+        update_procline
         raise_thread_error
         break if supervisor_gone?
         idle, seen = snapshot
@@ -222,6 +238,7 @@ module Delayed
 
         # Wait for a worker to free up. If the queue ran dry, poll again
         # after sleep_delay so that newly enqueued jobs get picked up.
+        update_procline
         wait_for_event(seen, poll_wait(reserved.size < idle.size))
       end
       raise_thread_error
@@ -380,6 +397,21 @@ module Delayed
       error.is_a?(SignalException) || error.is_a?(SystemExit) || error.equal?(@thread_error)
     end
 
+    # Sets the process title (see #procline) if it changed. Only with the
+    # :procline option, and only from the dispatcher's thread.
+    def update_procline
+      return unless @procline_name
+      title = procline
+      return if title == @procline_title
+      @procline_title = title
+      $0 = title
+    end
+
+    def queue_names
+      queues = Worker.queues
+      queues.nil? || queues.empty? ? '*' : queues.join(',')
+    end
+
     def process_payload
       {:dispatcher => name, :pid => Process.pid, :threads => thread_count, :queues => Worker.queues}
     end
@@ -391,6 +423,7 @@ module Delayed
     # running jobs as well.
     def stop_threads(error)
       @stop_requested_at ||= monotonic_now
+      update_procline
       @inboxes.each_value { |inbox| inbox << STOP }
       if error.is_a?(SignalException)
         @threads.each { |thread| thread.raise(error.class, error.message) if thread.alive? }
@@ -403,6 +436,7 @@ module Delayed
     # deadline is checked again on each wait, so #quit takes effect at once.
     def wait_for_threads
       loop do
+        update_procline
         busy = @threads.find(&:alive?)
         break unless busy
         deadline = shutdown_deadline

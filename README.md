@@ -346,6 +346,16 @@ Use `SIGTERM` or `SIGINT` to allow workers to finish their current job then grac
 The parent forwards these signals to its worker processes, so sending them to the
 parent alone (as `docker stop`, Kubernetes and systemd do) stops every worker.
 
+#### Process titles
+
+Each worker process keeps its title (as shown by `ps` and `top`) up to date
+with its busy threads and queues, and whether it is stopping:
+
+```
+delayed_job.0: 3/4 busy, queues=mailers
+delayed_job.1: stopping, 1/4 busy, queues=*
+```
+
 #### Pidfile
 
 With `--pid-file`, the parent process writes its pid to a file and refuses to
