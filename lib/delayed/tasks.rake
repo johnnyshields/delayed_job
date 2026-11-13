@@ -28,6 +28,8 @@ namespace :jobs do
     @options[:sleep_delay] = Delayed.parse_seconds(ENV['SLEEP_DELAY']) if ENV['SLEEP_DELAY']
     @options[:read_ahead] = Integer(ENV['READ_AHEAD']) if ENV['READ_AHEAD']
     @options[:threads] = Integer(ENV['NUM_THREADS']) if ENV['NUM_THREADS']
+    @options[:prefetch] = Integer(ENV['PREFETCH']) if ENV['PREFETCH']
+    @options[:prefetch_dynamic] = true if ENV['PREFETCH_DYNAMIC'] && ENV['PREFETCH_DYNAMIC'] !~ /\A(?:|0|f|false)\z/i
     @options[:shutdown_timeout] = Delayed.parse_seconds(ENV['SHUTDOWN_TIMEOUT']) if ENV['SHUTDOWN_TIMEOUT']
     @options[:lock_heartbeat_interval] = Delayed.parse_seconds(ENV['LOCK_HEARTBEAT']) if ENV['LOCK_HEARTBEAT']
     @options[:lock_timeout] = Delayed.parse_seconds(ENV['LOCK_TIMEOUT']) if ENV['LOCK_TIMEOUT']
@@ -49,6 +51,8 @@ namespace :jobs do
     raise ArgumentError, 'SLEEP_DELAY must be 0 or greater' if @options[:sleep_delay] && @options[:sleep_delay] < 0
 
     raise ArgumentError, 'NUM_THREADS must be 1 or greater' if @options[:threads] && @options[:threads] < 1
+
+    raise ArgumentError, 'PREFETCH must be 0 or greater' if @options[:prefetch] && @options[:prefetch] < 0
 
     raise ArgumentError, 'SHUTDOWN_TIMEOUT must be 0 or greater' if @options[:shutdown_timeout] && @options[:shutdown_timeout] < 0
 

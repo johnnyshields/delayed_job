@@ -321,6 +321,42 @@ When using threads:
 * On `SIGTERM`/`SIGINT`, running jobs finish before the process exits, as with
   single-threaded workers.
 
+#### Prefetch
+
+By default a thread that finishes a job waits for the next poll to get another.
+With `--prefetch=N` (rake: `PREFETCH`, or `Delayed::Worker.prefetch`), each
+thread also holds up to N jobs queued behind the one it runs, starts the next
+as soon as it finishes, and the dispatcher tops its queue back up:
+
+* `0` (default): jobs are reserved only for idle threads, one each.
+* `1`: an idle thread gets 2 jobs (one runs, one waits); a busy thread whose
+  queue is empty gets 1.
+* `N`: up to N queued jobs per thread.
+
+The first jobs of each poll go to idle threads, so they start at once.
+
+```
+RAILS_ENV=production script/delayed_job --fork --processes=2 --threads=5 --prefetch=2 start
+```
+
+With `--prefetch-dynamic` (`PREFETCH_DYNAMIC=1`, `Delayed::Worker.prefetch_dynamic`),
+the queue depth adapts: it starts at 0 (idle threads only), grows by one level
+after each poll that got every job it asked for (up to `--prefetch`), and drops
+back to 0 after a poll that got fewer, as the queue ran dry. Jobs already queued
+still run.
+
+A queued job waits behind its thread's current job, so prefetch suits many
+short jobs; keep it at 0 for queues with long ones, or use `--prefetch-dynamic`
+so jobs are only queued while there are plenty. Each job a thread holds is
+locked under a slot name of its own, e.g. `... pid:123 thread:2 slot:1`. Also:
+
+* On `SIGTERM`/`SIGINT`, queued jobs are released at once (unlocked, attempts
+  unchanged) while running ones finish; a `locks_released` event reports them.
+* Without lock heartbeats, the time a job waits in a queue counts toward its
+  lock's age (`max_run_time`). With heartbeats, queued jobs' locks are refreshed.
+* If a worker process dies, its queued jobs are recovered like its running ones,
+  each counting a failed attempt.
+
 Backend authors may override `Delayed::Job.reserve_batch(workers, max_run_time)`
 to reserve jobs for several threads in one query; each returned job must be
 locked under the name of the worker it is paired with. A backend whose batch
@@ -374,6 +410,7 @@ with its busy threads and queues, and whether it is stopping:
 ```
 delayed_job.0: 3/4 busy, queues=mailers
 delayed_job.1: stopping, 1/4 busy, queues=*
+delayed_job.2: 4/4 busy, 3 queued, depth 1/2, queues=*   # with --prefetch=2 --prefetch-dynamic
 ```
 
 #### Pidfile
@@ -725,8 +762,8 @@ Workers publish `ActiveSupport::Notifications` events named `<event>.delayed_job
 
 | Event | Payload |
 | --- | --- |
-| `start_process`, `stop_process` | `:dispatcher` (name), `:pid`, `:threads`, `:queues`; `stop_process` adds `:error` (what stopped it, or nil) |
-| `reserve` (timed) | `:dispatcher`, `:requested` (idle threads), `:reserved` |
+| `start_process`, `stop_process` | `:dispatcher` (name), `:pid`, `:threads`, `:queues`, `:prefetch`, `:prefetch_dynamic`; `stop_process` adds `:error` (what stopped it, or nil) |
+| `reserve` (timed) | `:dispatcher`, `:requested` (free slots: idle threads, plus queue slots with prefetch), `:depth` (queue depth), `:reserved` |
 | `perform` (timed) | `:job`, `:worker`, `:success` |
 | `attempt_failed` | `:job`, `:worker`, `:error`, `:attempts` (including this one) |
 | `job_failed` | `:job`, `:worker`, `:error` - the job failed permanently |

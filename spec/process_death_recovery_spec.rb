@@ -156,6 +156,25 @@ describe 'Recovering the jobs of a dead worker process' do
         launcher.send(:recover_jobs_of_worker, 'delayed_job.1', 99, options, killed)
       end
 
+      it "recovers the jobs in every thread's slots with prefetch" do
+        names = Delayed::Worker.lock_names('delayed_job.1 ', 99, 2, 1)
+        host = Socket.gethostname
+        expect(names).to eq(%w[0:0 0:1 1:0 1:1].map do |pair|
+          thread, slot = pair.split(':')
+          "delayed_job.1 host:#{host} pid:99 thread:#{thread} slot:#{slot}"
+        end)
+        expect(Delayed::Worker).to receive(:recover_jobs_of).with(names, anything).and_return(0)
+        launcher.send(:recover_jobs_of_worker, 'delayed_job.1', 99, options.merge(:prefetch => 1), crashed)
+      end
+
+      it 'uses Worker.prefetch when the options have none' do
+        Delayed::Worker.prefetch = 2
+        names = Delayed::Worker.lock_names('delayed_job.1 ', 99, 1, 2)
+        expect(names.size).to eq 3
+        expect(Delayed::Worker).to receive(:recover_jobs_of).with(names, anything).and_return(0)
+        launcher.send(:recover_jobs_of_worker, 'delayed_job.1', 99, {}, crashed)
+      end
+
       it 'uses the single-thread name for single-threaded workers' do
         expect(Delayed::Worker).to receive(:recover_jobs_of).with([Delayed::Worker.lock_name('delayed_job.1 ', 99)], anything).and_return(0)
         expect(logger).not_to receive(:warn)

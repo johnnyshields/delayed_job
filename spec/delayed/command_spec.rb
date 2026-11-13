@@ -213,6 +213,39 @@ describe Delayed::Command do
     end
   end
 
+  describe '--prefetch arg' do
+    context 'not set' do
+      let(:options) { [] }
+      it { expect(output_options[:prefetch]).to eq nil }
+      it { expect(output_options[:prefetch_dynamic]).to eq nil }
+    end
+
+    context 'set' do
+      let(:options) { %w[--prefetch 2] }
+      it { expect(output_options[:prefetch]).to eq 2 }
+    end
+
+    context 'zero' do
+      let(:options) { %w[--prefetch 0] }
+      it { expect(output_options[:prefetch]).to eq 0 }
+    end
+
+    context 'negative' do
+      let(:options) { %w[--prefetch -1] }
+      it { expect { output_options }.to raise_error(ArgumentError, '--prefetch must be 0 or greater') }
+    end
+
+    context 'not a number' do
+      let(:options) { %w[--prefetch zebra] }
+      it { expect { output_options }.to raise_error(ArgumentError, '--prefetch must be 0 or greater') }
+    end
+
+    context 'with --prefetch-dynamic' do
+      let(:options) { %w[--prefetch 3 --prefetch-dynamic] }
+      it { expect(output_options).to include(:prefetch => 3, :prefetch_dynamic => true) }
+    end
+  end
+
   describe '--pid-dir arg' do
     context 'not set' do
       let(:options) { [] }

@@ -385,7 +385,7 @@ module Delayed
       # attempt (see Delayed::Worker.recover_jobs_of). If the database can't
       # be reached, the locks are left to expire.
       def recover_jobs_of_worker(worker_name, pid, options, status)
-        lock_names = Delayed::Worker.lock_names("#{worker_name} ", pid, threads(options))
+        lock_names = Delayed::Worker.lock_names("#{worker_name} ", pid, threads(options), prefetch(options))
         return release_locks_of_exited(lock_names) if status.success?
         count = Delayed::Worker.recover_jobs_of(lock_names, ProcessExitError.new(worker_name, pid, status))
         logger.warn "Recovered #{count} job(s) left locked by child process #{worker_name} (pid #{pid})" if count > 0

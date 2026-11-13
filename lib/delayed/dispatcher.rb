@@ -8,6 +8,13 @@ module Delayed
   # polled once per cycle regardless of the thread count, and a job is never
   # locked while it waits for a free thread.
   #
+  # With Worker.prefetch N, each worker also holds up to N jobs queued behind
+  # the one it runs, and starts the next one as soon as it finishes; each
+  # poll tops the queues up. Each job a worker holds is locked under one of
+  # its slot names (see Worker.slot_name). With Worker.prefetch_dynamic, the
+  # queue depth adapts (see #adjust_depth). On shutdown, queued jobs are
+  # released unstarted.
+  #
   # Lifecycle callbacks:
   # * :loop wraps each poll and yields the Dispatcher.
   # * :execute wraps each worker thread's lifetime and yields the Worker
@@ -99,8 +106,13 @@ module Delayed
 
       @mutex = Mutex.new
       @cond = ConditionVariable.new
-      @idle = []
       @inboxes = {}
+      @slots = {} # worker => the names (Workers) it locks its jobs under
+      @slot_owner = {} # slot => worker
+      @slot_jobs = {} # slot => job it holds (queued or running)
+      @running_slot = {} # worker => slot of the job it is running
+      @prefetch = 0
+      @depth = 0
       @threads = []
       @running = {} # thread => job it is running
       @jobs_started = {} # worker => [job it is running, when it started, its time limit, its log label]
@@ -209,7 +221,15 @@ module Delayed
       state = if quit? then 'quitting, '
       elsif stop? then 'stopping, '
       end
-      "#{@procline_name}: #{state}#{in_flight}/#{thread_count} busy, queues=#{queue_names}"
+      busy, held = synchronize { [busy_count, @in_flight] }
+      "#{@procline_name}: #{state}#{busy}/#{thread_count} busy#{prefetch_state(held - busy)}, queues=#{queue_names}"
+    end
+
+    # Jobs queued behind running ones, and the queue depth if it adapts.
+    def prefetch_state(queued)
+      return '' unless @prefetch > 0
+      depth = ", depth #{@depth}/#{@prefetch}" if Worker.prefetch_dynamic
+      ", #{queued} queued#{depth}"
     end
 
     # Called by Worker#run as the job's own code starts, with its time limit
@@ -289,9 +309,10 @@ module Delayed
         update_procline
         raise_thread_error
         break if supervisor_gone?
-        idle, seen = snapshot
-        reserved = idle.empty? ? [] : poll(idle)
-        reserved.each { |worker, job| dispatch(worker, job) }
+        free, seen = snapshot
+        reserved = free.empty? ? [] : poll(free)
+        reserved.each { |slot, job| dispatch(slot, job) }
+        deeper = adjust_depth(free.size, reserved.size)
 
         if reserved.empty? && in_flight.zero?
           report
@@ -310,20 +331,21 @@ module Delayed
         # Fewer jobs than idle workers may not mean the queue ran dry, with
         # a backend whose batch reservation can lose candidates to other
         # processes: poll again at once then.
-        next if repoll_after?(reserved, idle)
+        # Likewise after the queue depth grew: there are free slots to fill.
+        next if deeper || repoll_after?(reserved, free)
 
-        # Fewer jobs than idle workers: the queue ran dry, so idle workers
+        # Fewer jobs than free slots: the queue ran dry, so idle workers
         # wait at most sleep_delay for new jobs (not until a busy one frees up).
-        wait_before_next_poll(seen, !idle.empty? && reserved.size < idle.size)
+        wait_before_next_poll(seen, !free.empty? && reserved.size < free.size)
       end
       raise_thread_error
     end
 
     # Whether to poll again at once: after a partial batch (some jobs, but
-    # fewer than idle workers), if the backend says jobs may be left (see
+    # fewer than free slots), if the backend says jobs may be left (see
     # Delayed::Job.partial_batch_may_leave_jobs?).
-    def repoll_after?(reserved, idle)
-      return false if reserved.empty? || reserved.size >= idle.size
+    def repoll_after?(reserved, free)
+      return false if reserved.empty? || reserved.size >= free.size
       Delayed::Job.respond_to?(:partial_batch_may_leave_jobs?) && Delayed::Job.partial_batch_may_leave_jobs?
     end
 
@@ -359,16 +381,29 @@ module Delayed
       true
     end
 
-    def poll(idle)
+    def poll(free)
       reserved = []
-      Worker.lifecycle.run_callbacks(:loop, self) { reserved = reserve(idle) }
+      Worker.lifecycle.run_callbacks(:loop, self) { reserved = reserve(free) }
       reserved
+    end
+
+    # With Worker.prefetch_dynamic, after a poll that asked for jobs: one
+    # level deeper (up to Worker.prefetch) if it got all it asked for, back
+    # to 0 (only idle workers) if it got fewer, as the queue ran dry. Jobs
+    # already queued stay queued. Returns whether the depth grew.
+    def adjust_depth(requested, reserved)
+      return false unless Worker.prefetch_dynamic && requested > 0
+      synchronize do
+        previous = @depth
+        @depth = reserved < requested ? 0 : [@depth + 1, @prefetch].min
+        @depth > previous
+      end
     end
 
     # Reserves up to one job per given worker. On error, lets the backend
     # recover and returns no jobs, until too many consecutive failures.
     def reserve(workers)
-      reserved = Delayed.instrument(:reserve, :dispatcher => name, :requested => workers.size) do |payload|
+      reserved = Delayed.instrument(:reserve, :dispatcher => name, :requested => workers.size, :depth => @depth) do |payload|
         payload[:reserved] = 0
         polling { Delayed::Job.reserve_batch(workers, Worker.lock_expiry) }.tap { |r| payload[:reserved] = r.size }
       end
@@ -473,7 +508,13 @@ module Delayed
         @jobs_started.select { |_worker, (_job, started, limit)| limit && now - started > limit }
       end
       overrun.each { |worker, (job, _, limit, label)| report_overrun(worker, job, limit, label) }
-      (workers - overrun.keys).map(&:name)
+      names = (workers - overrun.keys).map(&:name)
+      return names if @prefetch.zero?
+      # And the slots holding jobs (running or queued), but an overrun one.
+      synchronize do
+        stuck = overrun.keys.map { |worker| @running_slot[worker] }
+        names + (@slot_jobs.keys - stuck).map(&:name)
+      end
     end
 
     # Logs, once per job, that its lock is no longer refreshed.
@@ -523,13 +564,28 @@ module Delayed
     end
 
     def start_threads
-      @idle = workers.dup
+      build_slots
       @threads = workers.each_with_index.map do |worker, index|
         inbox = @inboxes[worker] = Queue.new
         Thread.new { work(worker, inbox) }.tap do |thread|
           thread.report_on_exception = false if thread.respond_to?(:report_on_exception=)
           thread.name = "delayed_job worker:#{index}" if thread.respond_to?(:name=)
         end
+      end
+    end
+
+    # Each worker's slots (see Worker.slot_name): with prefetch, one per job
+    # it may hold; else just the worker, locking under its own name.
+    def build_slots
+      Worker.validate_prefetch!
+      @prefetch = Worker.prefetch
+      @depth = Worker.prefetch_dynamic ? 0 : @prefetch
+      workers.each do |worker|
+        slots = if @prefetch.zero? then [worker]
+        else Array.new(@prefetch + 1) { |index| Worker.named(Worker.slot_name(worker.name, index)) }
+        end
+        @slots[worker] = slots
+        slots.each { |slot| @slot_owner[slot] = worker }
       end
     end
 
@@ -545,16 +601,21 @@ module Delayed
     def work(worker, inbox)
       self.class.deferring_interrupts do
         Worker.lifecycle.run_callbacks(:execute, worker) do
-          until (job = inbox.pop).equal?(STOP)
+          until (item = inbox.pop).equal?(STOP)
+            slot, job = item
             discard_stale_interrupts
-            next release_unstarted(worker, job) if past_shutdown_deadline?
-            synchronize { @running[Thread.current] = job }
+            next release_unstarted(worker, slot, job) if past_shutdown_deadline? || (@prefetch > 0 && stop?)
+            synchronize do
+              @running[Thread.current] = job
+              @running_slot[worker] = slot
+            end
             result = with_reloader { untrack_job_after(worker) { worker.perform_job(job) } }
             synchronize { @running.delete(Thread.current) }
-            job_finished(worker, result)
+            job_finished(worker, slot, result)
           end
         rescue ShutdownInterrupt => error
-          release_interrupted(worker, synchronize { @running.delete(Thread.current) }, error)
+          job, slot = synchronize { [@running.delete(Thread.current), @running_slot.delete(worker)] }
+          release_interrupted(worker, job, error, slot)
         end
       end
     rescue *SHUTDOWN_INTERRUPTS
@@ -626,7 +687,8 @@ module Delayed
     end
 
     def process_payload
-      {:dispatcher => name, :pid => Process.pid, :threads => thread_count, :queues => Worker.queues}
+      {:dispatcher => name, :pid => Process.pid, :threads => thread_count, :queues => Worker.queues,
+       :prefetch => Worker.prefetch, :prefetch_dynamic => !!Worker.prefetch_dynamic}
     end
 
     # Lets running jobs finish, then waits for every thread to exit. Jobs
@@ -637,6 +699,7 @@ module Delayed
     def stop_threads(error)
       @stop_requested_at ||= monotonic_now
       update_procline
+      release_queued if @prefetch > 0
       @inboxes.each_value { |inbox| inbox << STOP }
       raise_in_threads(error) if error.is_a?(SignalException)
       begin
@@ -658,6 +721,34 @@ module Delayed
       # and must run their :execute callbacks (e.g. ClearLocks) before the
       # process exits - which would kill them.
       join_threads(monotonic_now + INTERRUPT_GRACE)
+    end
+
+    # Releases the jobs still queued for workers (with prefetch), unstarted:
+    # unlocked, their attempts unchanged, for another worker to run. A job a
+    # worker already took is released by the worker itself (see #work).
+    def release_queued
+      queued = @inboxes.flat_map { |_worker, inbox| drain(inbox) }
+      return if queued.empty?
+      names = queued.map { |slot, _job| slot.name }
+      with_executor { names.each { |slot_name| Delayed::Job.clear_locks!(slot_name) } }
+      say "Released #{queued.size} queued job(s) on shutdown"
+      Delayed.instrument(:locks_released, :workers => names, :count => queued.size, :reason => 'shutdown')
+    rescue StandardError => error
+      say "Could not release the queued jobs: #{error.class}: #{error.message}", 'error'
+      thread_error(error, 'Releasing interrupted jobs')
+    ensure
+      synchronize do
+        (queued || []).map(&:first).each { |slot| free_slot(slot) }
+        signal_event
+      end
+    end
+
+    # Takes everything queued in the inbox, without waiting.
+    def drain(inbox)
+      items = []
+      loop { items << inbox.pop(true) }
+    rescue ThreadError # Empty.
+      items
     end
 
     def join_threads(deadline)
@@ -708,42 +799,42 @@ module Delayed
     # lock is cleared, its attempts and run_at are left as they were - or,
     # with Worker.count_shutdown_interrupts, it is recorded as a failed
     # attempt (rescheduled with back-off, or failed after max_attempts).
-    def release_interrupted(worker, job, interrupt = nil)
+    def release_interrupted(worker, job, interrupt = nil, slot = worker)
+      slot ||= worker
       if job && Worker.count_shutdown_interrupts
         worker.job_say(job, 'interrupted by shutdown; counted as a failed attempt', 'warn')
         worker.fail_attempt(job, interrupt || ShutdownInterrupt.new('interrupted by shutdown'))
       elsif job
         worker.job_say(job, 'interrupted by shutdown; released for another worker', 'warn')
       end
-      Delayed::Job.clear_locks!(worker.name)
-      Delayed.instrument(:locks_released, :workers => [worker.name], :count => job ? 1 : 0, :reason => 'shutdown') if job
+      Delayed::Job.clear_locks!(slot.name)
+      Delayed.instrument(:locks_released, :workers => [slot.name], :count => job ? 1 : 0, :reason => 'shutdown') if job
     rescue StandardError => error
-      say "Could not release the jobs of #{worker.name}: #{error.class}: #{error.message}", 'error'
+      say "Could not release the jobs of #{slot.name}: #{error.class}: #{error.message}", 'error'
       thread_error(error, 'Releasing interrupted jobs', worker.name)
     end
 
-    def dispatch(worker, job)
+    def dispatch(slot, job)
       synchronize do
-        @idle.delete(worker)
+        @slot_jobs[slot] = job
         @in_flight += 1
       end
-      @inboxes[worker] << job
+      @inboxes[@slot_owner.fetch(slot, slot)] << [slot, job]
     end
 
     # Releases a job handed to the worker that it never started, because the
     # shutdown deadline passed before it could: unlocked, its attempts
     # unchanged, for another worker to run.
-    def release_unstarted(worker, job)
+    def release_unstarted(worker, slot, job)
       worker.job_say(job, 'not started before shutdown; released for another worker', 'warn')
-      Delayed::Job.clear_locks!(worker.name)
-      Delayed.instrument(:locks_released, :workers => [worker.name], :count => 1, :reason => 'shutdown')
+      Delayed::Job.clear_locks!(slot.name)
+      Delayed.instrument(:locks_released, :workers => [slot.name], :count => 1, :reason => 'shutdown')
     rescue StandardError => error
-      say "Could not release the jobs of #{worker.name}: #{error.class}: #{error.message}", 'error'
+      say "Could not release the jobs of #{slot.name}: #{error.class}: #{error.message}", 'error'
       thread_error(error, 'Releasing interrupted jobs', worker.name)
     ensure
       synchronize do
-        @in_flight -= 1
-        @idle << worker
+        free_slot(slot)
         signal_event
       end
     end
@@ -755,13 +846,18 @@ module Delayed
       deadline ? monotonic_now >= deadline : false
     end
 
-    def job_finished(worker, result)
+    def job_finished(worker, slot, result)
       synchronize do
         result ? @success += 1 : @failure += 1
-        @in_flight -= 1
-        @idle << worker
+        @running_slot.delete(worker)
+        free_slot(slot)
         signal_event
       end
+    end
+
+    # Under the mutex: the slot's job finished or was released.
+    def free_slot(slot)
+      @in_flight -= 1 if @slot_jobs.delete(slot)
     end
 
     # Waits until a worker finishes a job (or dies), the dispatcher is stopped, or
@@ -788,8 +884,32 @@ module Delayed
       Thread.new { wake_up }
     end
 
+    # The free slots to reserve jobs into, and the event count. Slots are
+    # taken in rounds: one for each idle worker first (so the first, most
+    # urgent jobs start at once), then one more for each worker holding one
+    # job, and so on, until each holds up to the queue depth plus the job
+    # it runs.
     def snapshot
-      synchronize { [@idle.dup, @events] }
+      synchronize { [free_slots, @events] }
+    end
+
+    def free_slots
+      plan = workers.map do |worker|
+        slots = @slots[worker] || [worker]
+        held = slots.count { |slot| @slot_jobs.key?(slot) }
+        [slots.reject { |slot| @slot_jobs.key?(slot) }, held]
+      end
+      (0..@depth).each_with_object([]) do |round, free|
+        plan.each do |open, held|
+          slot = round >= held && open[round - held]
+          free << slot if slot
+        end
+      end
+    end
+
+    # Under the mutex: workers holding a job (running it or about to).
+    def busy_count
+      workers.count { |worker| (@slots[worker] || [worker]).any? { |slot| @slot_jobs.key?(slot) } }
     end
 
     # Whether a worker finished a job (or died) since the snapshot that

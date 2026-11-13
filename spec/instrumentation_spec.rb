@@ -286,7 +286,8 @@ describe 'Instrumentation' do
       Delayed::Worker.queues = %w[mail]
       run_to_completion
       start = payload(:start_process)
-      expect(start).to eq(:dispatcher => dispatcher.name, :pid => Process.pid, :threads => 2, :queues => %w[mail])
+      expect(start).to eq(:dispatcher => dispatcher.name, :pid => Process.pid, :threads => 2, :queues => %w[mail],
+                          :prefetch => 0, :prefetch_dynamic => false)
       expect(payload(:stop_process)).to eq start.merge(:error => nil)
       expect(events.first.name).to eq 'start_process.delayed_job'
       expect(events.last.name).to eq 'stop_process.delayed_job'
@@ -304,7 +305,7 @@ describe 'Instrumentation' do
       Delayed::Job.enqueue(SimpleJob.new)
       run_to_completion
       reserves = named(:reserve).map(&:payload)
-      expect(reserves.first).to eq(:dispatcher => dispatcher.name, :requested => 2, :reserved => 1)
+      expect(reserves.first).to eq(:dispatcher => dispatcher.name, :requested => 2, :depth => 0, :reserved => 1)
       expect(reserves.last[:reserved]).to eq 0
     end
 

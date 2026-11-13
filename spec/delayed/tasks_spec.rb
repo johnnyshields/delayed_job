@@ -111,6 +111,34 @@ describe 'Rake tasks' do
       it { expect { run_task }.to raise_error(ArgumentError) }
     end
 
+    context 'PREFETCH=2 PREFETCH_DYNAMIC=1' do
+      let(:env) { {'PREFETCH' => '2', 'PREFETCH_DYNAMIC' => '1'} }
+      let(:exp_args) { {:quiet => false, :processes => 1, :prefetch => 2, :prefetch_dynamic => true} }
+      it do
+        expect_success
+        run_task
+      end
+    end
+
+    context 'PREFETCH_DYNAMIC=false' do
+      let(:env) { {'PREFETCH_DYNAMIC' => 'false'} }
+      let(:exp_args) { {:quiet => false, :processes => 1} }
+      it do
+        expect_success
+        run_task
+      end
+    end
+
+    context 'PREFETCH=-1' do
+      let(:env) { {'PREFETCH' => '-1'} }
+      it { expect { run_task }.to raise_error(ArgumentError, 'PREFETCH must be 0 or greater') }
+    end
+
+    context 'PREFETCH not a number' do
+      let(:env) { {'PREFETCH' => 'foo'} }
+      it { expect { run_task }.to raise_error(ArgumentError) }
+    end
+
     context 'SHUTDOWN_TIMEOUT=30' do
       let(:env) { {'SHUTDOWN_TIMEOUT' => '30'} }
       let(:exp_args) { {:quiet => false, :processes => 1, :shutdown_timeout => 30.0} }

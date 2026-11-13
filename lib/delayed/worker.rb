@@ -26,11 +26,20 @@ module Delayed
     DEFAULT_SHUTDOWN_TIMEOUT = nil
     DEFAULT_LOCK_HEARTBEAT_INTERVAL = nil
     DEFAULT_LOCK_TIMEOUT = 5.minutes
+    DEFAULT_PREFETCH = 0
 
     cattr_accessor :min_priority, :max_priority, :max_attempts, :max_run_time,
                    :default_priority, :sleep_delay, :logger, :delay_jobs, :queues,
                    :read_ahead, :plugins, :destroy_failed_jobs, :exit_on_complete,
                    :default_log_level
+
+    # Jobs each worker thread may hold queued behind the one it runs, so
+    # that it starts its next job without waiting for a poll (see
+    # Delayed::Dispatcher). 0 (the default) reserves only for idle threads.
+    # With prefetch_dynamic, the queue depth starts at 0, grows by one after
+    # each poll that got every job it asked for (up to prefetch), and drops
+    # back to 0 after one that got fewer.
+    cattr_accessor :prefetch, :prefetch_dynamic
 
     # Called with errors raised outside of a job's own handling, which would
     # otherwise only be logged: failed reservations, failed lock heartbeats,
@@ -108,6 +117,8 @@ module Delayed
       self.on_thread_error   = nil
       self.silence_polling   = false
       self.count_shutdown_interrupts = false
+      self.prefetch          = DEFAULT_PREFETCH
+      self.prefetch_dynamic  = false
       self.exit_on_complete  = nil
       self.min_priority      = nil
       self.max_priority      = nil
@@ -196,10 +207,25 @@ module Delayed
     end
 
     # The lock names of every worker in a worker process with the given name
-    # prefix, pid and thread count (see Delayed::Dispatcher).
-    def self.lock_names(prefix, pid, threads)
-      return [lock_name(prefix, pid)] if threads <= 1
-      Array.new(threads) { |index| lock_name(prefix, pid, index) }
+    # prefix, pid, thread count and prefetch (see Delayed::Dispatcher): with
+    # prefetch, each thread's jobs are locked under its slot names.
+    def self.lock_names(prefix, pid, threads, prefetch = 0)
+      names = threads <= 1 ? [lock_name(prefix, pid)] : Array.new(threads) { |index| lock_name(prefix, pid, index) }
+      return names unless prefetch.to_i > 0
+      names.flat_map { |name| Array.new(prefetch.to_i + 1) { |slot| slot_name(name, slot) } }
+    end
+
+    # The name a worker locks the job in one of its slots under, with
+    # prefetch: each job it holds (running or queued) has a slot of its own,
+    # as reserving for a name also returns the jobs already locked under it.
+    def self.slot_name(worker_name, slot)
+      "#{worker_name} slot:#{slot}"
+    end
+
+    # Raises ArgumentError unless prefetch is a whole number, 0 or greater.
+    def self.validate_prefetch!
+      return if prefetch.is_a?(Integer) && prefetch >= 0
+      raise ArgumentError, "prefetch must be a whole number, 0 or greater (got #{prefetch.inspect})"
     end
 
     # Recovers the jobs left locked by workers whose process died while
@@ -293,7 +319,8 @@ module Delayed
       @quiet = options.key?(:quiet) ? options[:quiet] : true
 
       [:min_priority, :max_priority, :sleep_delay, :read_ahead, :queues, :exit_on_complete, :shutdown_timeout,
-       :lock_heartbeat_interval, :lock_timeout, :silence_polling, :count_shutdown_interrupts].each do |option|
+       :lock_heartbeat_interval, :lock_timeout, :silence_polling, :count_shutdown_interrupts,
+       :prefetch, :prefetch_dynamic].each do |option|
         self.class.send("#{option}=", options[option]) if options.key?(option)
       end
 

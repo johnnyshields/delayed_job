@@ -131,6 +131,11 @@ module Delayed
         (options[:threads] || 1).to_i
       end
 
+      # Jobs each thread may hold queued (see Delayed::Worker.prefetch).
+      def prefetch(options)
+        (options[:prefetch] || Delayed::Worker.prefetch).to_i
+      end
+
       def set_process_name(name) # rubocop:disable Naming/AccessorMethodName
         $0 = process_prefix ? File.join(process_prefix, name) : name
       end

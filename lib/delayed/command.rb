@@ -117,6 +117,12 @@ module Delayed
         opt.on('--sleep-delay N', 'Seconds to sleep when no jobs are found (default: 1)') do |n|
           @options[:sleep_delay] = seconds(n)
         end
+        opt.on('--prefetch N', 'Jobs each thread may hold queued behind the one it runs, to start the next one without waiting for a poll (default: 0)') do |n|
+          @options[:prefetch] = Integer(n) rescue -1
+        end
+        opt.on('--prefetch-dynamic', 'Scale the prefetch queue depth with demand: from 0, one level deeper after each poll that gets every job it asks for, back to 0 after one that gets fewer') do
+          @options[:prefetch_dynamic] = true
+        end
         opt.on('--read-ahead N', 'Number of jobs from the queue to consider') do |n|
           @options[:read_ahead] = Integer(n) rescue nil
         end
@@ -157,6 +163,7 @@ module Delayed
       validate_process_count!
       validate_sleep_delay!
       validate_thread_count!
+      validate_prefetch!
       validate_shutdown_timeout!
       validate_lock_heartbeat!
       validate_priority!
@@ -178,6 +185,11 @@ module Delayed
     def validate_thread_count!
       return unless @options[:threads] && @options[:threads] < 1
       raise ArgumentError, '--threads must be 1 or greater'
+    end
+
+    def validate_prefetch!
+      return unless @options[:prefetch] && @options[:prefetch] < 0
+      raise ArgumentError, '--prefetch must be 0 or greater'
     end
 
     def validate_shutdown_timeout!
