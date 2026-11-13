@@ -20,6 +20,9 @@ log_events = options.delete(:log_events)
 crash_on_start = options.delete(:crash_on_start)
 # Worker processes working this queue crash (exit 3) whenever they start.
 crash_queue = options.delete(:crash_queue)
+# Seconds each forked child process waits before replacing the launcher's
+# (inherited) signal traps: lets specs signal it in that window.
+capture_delay = options.delete(:capture_delay)
 
 Delayed::Backend::SqliteFile::Job.connect(db_path)
 Delayed::Worker.backend = Delayed::Backend::SqliteFile::Job
@@ -44,6 +47,16 @@ if crash_on_start
     define_method(:after_fork) do
       File.open(starts, 'a') { |f| f.puts Process.pid }
       exit!(3) if File.readlines(starts).size <= crash_on_start
+      super()
+    end
+  end)
+end
+
+if capture_delay
+  Delayed::Launcher::Forking.prepend(Module.new do
+    define_method(:capture_signals) do
+      puts "child #{Process.pid} capturing signals in #{capture_delay}s"
+      sleep capture_delay
       super()
     end
   end)

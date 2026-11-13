@@ -965,6 +965,62 @@ describe Delayed::Launcher::Forking, 'where QUIT cannot be trapped (the JVM)' do
   end
 end
 
+describe Delayed::Launcher::Forking, 'traps inherited by a freshly forked child process' do
+  subject(:launcher) { described_class.new(:processes => 2, :shutdown_timeout => 5) }
+  let(:traps) { {} }
+  let(:logger) { instance_double(Logger, :info => nil, :warn => nil, :error => nil) }
+
+  before do
+    allow(launcher).to receive(:logger).and_return(logger)
+    allow(Signal).to receive(:trap) { |signal, *_args, &block| traps[signal] = block }
+    launcher.instance_variable_set(:@launcher_pid, Process.pid)
+    launcher.send(:workers).merge!(11 => ['delayed_job.0', {}], 12 => ['delayed_job.1', {}])
+    launcher.send(:trap_signals)
+  end
+
+  %w[TERM INT QUIT].each do |signal|
+    context "on SIG#{signal}" do
+      before { skip 'no SIGQUIT on this platform' if signal == 'QUIT' && !Signal.list.key?('QUIT') }
+
+      it 'only record it, in a child process' do
+        allow(Process).to receive(:pid).and_return(Process.pid + 1)
+        expect(Process).not_to receive(:kill)
+        expect(launcher).not_to receive(:schedule_kill)
+        traps[signal].call
+        expect(launcher.instance_variable_get(:@stopped)).to be_falsey
+        expect(launcher.send(:child_signals)).to eq [signal]
+      end
+
+      it 'still stop and forward it in the launcher itself' do
+        allow(Process).to receive(:kill)
+        allow(launcher).to receive(:schedule_kill)
+        traps[signal].call
+        expect(launcher.instance_variable_get(:@stopped)).to be true
+        expect(Process).to have_received(:kill).with(signal, 11)
+        expect(launcher.send(:child_signals)).to be_empty
+      end
+    end
+  end
+
+  it 'hand the recorded signals to the child, once each, with those captured later' do
+    allow(Process).to receive(:pid).and_return(Process.pid + 1)
+    traps['TERM'].call
+    traps['TERM'].call
+    pending = launcher.send(:capture_signals)
+    expect(pending).to eq ['TERM']
+    traps['INT'].call # Now the capturing trap.
+    expect(pending).to eq %w[TERM INT]
+  end
+
+  it 'record nothing before the launcher starts (no launcher pid yet)' do
+    launcher.instance_variable_set(:@launcher_pid, nil)
+    allow(Process).to receive(:kill)
+    expect(launcher).to receive(:schedule_kill) # Stubbed: a real one would exit this process.
+    traps['TERM'].call
+    expect(launcher.instance_variable_get(:@stopped)).to be true
+  end
+end
+
 describe 'Signals received while a worker process starts up' do
   describe 'Delayed::Launcher::Forking#capture_signals' do
     subject(:launcher) { Delayed::Launcher::Forking.new(:processes => 2) }

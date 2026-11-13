@@ -28,6 +28,7 @@ module Delayed
         setup_logger
         setup_pidfile
         begin
+          @launcher_pid = Process.pid
           trap_signals
           if forking?
             supervisor_pid
@@ -84,6 +85,7 @@ module Delayed
       # any still running SHUTDOWN_GRACE seconds after that.
       def trap_shutdown_signal(signal)
         Signal.trap(signal) do
+          next child_signal(signal) if forked_child?
           Thread.new { logger.info("Received SIG#{signal}. Waiting for workers to finish current job...") }
           @stopped = true
           forward_signal(signal)
@@ -98,6 +100,7 @@ module Delayed
       # thread dumps. Without it, TERM and INT still stop the workers.
       def trap_quit_signal
         Signal.trap('QUIT') do
+          next child_signal('QUIT') if forked_child?
           Thread.new { logger.info('Received SIGQUIT. Interrupting running jobs...') }
           @stopped = true
           forward_signal('QUIT')
@@ -158,7 +161,9 @@ module Delayed
       # has installed its own traps (see Delayed::Dispatcher#start), so a
       # signal arriving while the worker starts up isn't lost.
       def capture_signals
-        pending = []
+        # Signals that arrived before this, while the inherited traps were
+        # still installed (see #child_signal).
+        pending = child_signals.dup
         %w[TERM INT QUIT].each do |signal|
           next unless Signal.list.key?(signal)
           # A signal can arrive twice: sent to the process group, and
@@ -170,6 +175,25 @@ module Delayed
           end
         end
         pending
+      end
+
+      # Whether this process is a child forked by the launcher that still runs
+      # the launcher's (inherited) signal traps, before #capture_signals
+      # replaces them. Signal-trap safe.
+      def forked_child?
+        @launcher_pid && Process.pid != @launcher_pid
+      end
+
+      # A launcher trap that ran in a freshly forked child process: only
+      # records the signal, for the child to act on once it has started (see
+      # #capture_signals) - it must not stop the child's copy of the
+      # launcher, forward the signal to siblings, or schedule a kill.
+      def child_signal(signal)
+        child_signals << signal unless child_signals.include?(signal)
+      end
+
+      def child_signals
+        @child_signals ||= []
       end
 
       # Writes the pidfile before anything else, so that a second launcher
