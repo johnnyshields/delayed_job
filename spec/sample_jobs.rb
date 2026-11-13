@@ -141,6 +141,29 @@ class ConcurrencyJob
   end
 end
 
+# Enqueues the next link of a chain of `length` jobs, then finishes after a
+# short (random) time; records each link it runs.
+class ChainJob
+  cattr_accessor :runs, :mutex, :fixed_sleep
+  self.mutex = Mutex.new
+  self.runs = []
+
+  attr_accessor :chain, :link, :length, :max_sleep
+
+  def initialize(chain, link, length, max_sleep = 0.01)
+    self.chain = chain
+    self.link = link
+    self.length = length
+    self.max_sleep = max_sleep
+  end
+
+  def perform
+    Delayed::Job.enqueue(ChainJob.new(chain, link + 1, length, max_sleep)) if link + 1 < length
+    sleep(fixed_sleep || (rand * max_sleep))
+    self.class.mutex.synchronize { self.class.runs << [chain, link] }
+  end
+end
+
 # Blocks until released, so a dispatcher can be stopped while it runs.
 class BlockingJob
   cattr_accessor :started, :release

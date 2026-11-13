@@ -283,7 +283,10 @@ module Delayed
 
         if reserved.empty? && in_flight.zero?
           report
-          if Worker.exit_on_complete
+          # A job that finished during the poll may have enqueued another
+          # after the poll looked: then poll again (at once, see
+          # #wait_before_next_poll) before concluding no job is left.
+          if Worker.exit_on_complete && !finished_since?(seen)
             say 'No more jobs available. Exiting'
             break
           end
@@ -716,6 +719,12 @@ module Delayed
 
     def snapshot
       synchronize { [@idle.dup, @events] }
+    end
+
+    # Whether a worker finished a job (or died) since the snapshot that
+    # observed `seen` events.
+    def finished_since?(seen)
+      synchronize { @events != seen }
     end
 
     def in_flight
