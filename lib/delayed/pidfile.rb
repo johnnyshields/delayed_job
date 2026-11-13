@@ -75,8 +75,12 @@ module Delayed
       end
     end
 
+    # Whether `path` still names the file open as `file`. Compares device and
+    # inode: File.identical?(path, io) compares paths on JRuby.
     def same_file?(file)
-      File.identical?(path, file)
+      on_disk = File.stat(path)
+      open = file.stat
+      on_disk.dev == open.dev && on_disk.ino == open.ino
     rescue Errno::ENOENT
       false
     end
