@@ -463,6 +463,17 @@ describe 'Lock heartbeats' do
           expect(overrun_messages.first).to include 'max_run_time (1s)', 'lock_timeout (0.5s)'
         end
 
+        it 'publishes job_stuck once per stuck job' do
+          events = []
+          subscription = ActiveSupport::Notifications.subscribe('job_stuck.delayed_job') { |*args| events << args.last }
+          job = job_with_max_run_time(1)
+          job_running(worker, job, 2)
+          3.times { dispatcher.send(:heartbeat_names) }
+          expect(events).to eq [{:job => job, :worker => worker.name, :max_run_time => 1, :lock_timeout => 0.5}]
+        ensure
+          ActiveSupport::Notifications.unsubscribe(subscription)
+        end
+
         it 'logs again for the next job that overruns on the same worker' do
           job_running(worker, job_with_max_run_time(1), 2)
           dispatcher.send(:heartbeat_names)

@@ -476,6 +476,7 @@ module Delayed
         true
       end
       return unless first
+      Delayed.instrument(:job_stuck, :job => job, :worker => worker.name, :max_run_time => limit, :lock_timeout => Worker.lock_timeout)
       worker.say(format('%s has run for longer than its max_run_time (%ds) without stopping; no longer ' \
                         'refreshing its lock, so another worker may run it after lock_timeout (%gs)',
                         label, limit, Worker.lock_timeout), 'error')

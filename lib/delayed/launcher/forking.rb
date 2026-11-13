@@ -132,7 +132,9 @@ module Delayed
         Delayed::Dispatcher.new(@options.merge(:procline => $0)).start
       end
 
-      def add_worker(options)
+      # Forks a child process. `replaces_pid` and `delay`: the pid of the child
+      # process it replaces and the seconds waited before forking it, if any.
+      def add_worker(options, replaces_pid: nil, delay: 0)
         worker_name = get_name(@worker_index)
         worker_pid = fork_worker(worker_name, options)
 
@@ -144,6 +146,7 @@ module Delayed
         workers[worker_pid] = [worker_name, options]
         started_at[worker_pid] = monotonic_now
         @worker_index += 1
+        Delayed.instrument(:child_spawned, :worker => worker_name, :pid => worker_pid, :replaces_pid => replaces_pid, :delay => delay)
         worker_pid
       end
 
@@ -251,6 +254,7 @@ module Delayed
         worker_name, options = workers.delete(worker_pid)
         logger.info "Child process #{worker_name} (pid #{worker_pid}) exited: #{child_status}"
         recover_jobs_of_worker(worker_name, worker_pid, options, child_status)
+        publish_child_exited(worker_name, worker_pid, child_status)
 
         # A child process SIGKILLed by someone else (e.g. the OOM killer)
         # is replaced like any other that died, its jobs recovered (above);
@@ -267,16 +271,31 @@ module Delayed
       # other children are still reaped and replaced. Returns the new pid,
       # or nil if the replacement is delayed.
       def replace_worker(worker_name, pid, options, status)
-        uptime = monotonic_now - started_at.delete(pid).to_f
-        previous = respawn_streaks.delete(pid).to_i
-        streak = uptime < RESPAWN_MIN_UPTIME ? previous + 1 : 0
-        delay = respawn_delay(streak)
+        uptime, streak, delay = respawn_plan(pid)
+        started_at.delete(pid)
+        respawn_streaks.delete(pid)
         return respawn(worker_name, pid, options, status, streak, 0) unless delay
         logger.warn format('Child process %<name>s (pid %<pid>d) died %<uptime>.1fs after starting (%<streak>d time(s) in a row); ' \
                            'waiting %<delay>ds before replacing it',
-                           :name => worker_name, :pid => pid, :uptime => uptime, :streak => streak, :delay => delay)
+                           :name => worker_name, :pid => pid, :uptime => uptime.to_f, :streak => streak, :delay => delay)
         pending_replacements << [monotonic_now + delay, [worker_name, pid, options, status, streak, delay]]
         nil
+      end
+
+      def publish_child_exited(worker_name, pid, status)
+        uptime, _streak, delay = respawn_plan(pid)
+        respawn_in = @stopped ? nil : delay.to_i
+        Delayed.instrument(:child_exited, :worker => worker_name, :pid => pid, :status => status, :uptime => uptime, :respawn_in => respawn_in)
+      end
+
+      # How long the child process `pid` ran (nil if its start wasn't
+      # recorded), its quick deaths in a row, and the seconds to wait before
+      # replacing it (nil for none). Changes nothing.
+      def respawn_plan(pid)
+        started = started_at[pid]
+        uptime = started && monotonic_now - started
+        streak = uptime && uptime < RESPAWN_MIN_UPTIME ? respawn_streaks[pid].to_i + 1 : 0
+        [uptime, streak, respawn_delay(streak)]
       end
 
       # Forks the replacements that fell due, unless the launcher is stopping.
@@ -293,9 +312,8 @@ module Delayed
       # of processes or memory), retries later with the back-off of a child
       # that died at once, instead of crashing the launcher.
       def respawn(worker_name, pid, options, status, streak, delay) # rubocop:disable Metrics/ParameterLists
-        new_pid = add_worker(options)
+        new_pid = add_worker(options, :replaces_pid => pid, :delay => delay)
         respawn_streaks[new_pid] = streak
-        Delayed.instrument(:fork_replaced, :worker => worker_name, :pid => pid, :status => status, :new_pid => new_pid, :delay => delay)
         new_pid
       rescue SystemCallError => error
         retry_delay = respawn_delay(streak + 1)

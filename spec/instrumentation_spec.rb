@@ -420,16 +420,40 @@ describe 'Instrumentation' do
 
       let(:crashed) { double('Process::Status', :signaled? => false, :termsig => nil, :exitstatus => 3, :success? => false) }
 
-      it 'publishes fork_replaced when it replaces a worker process that exited' do
+      it 'publishes child_exited, then child_spawned for its replacement' do
         allow(launcher).to receive(:fork_worker).and_return(123)
         launcher.send(:run_loop)
-        expect(payload(:fork_replaced)).to eq(:worker => 'delayed_job.1', :pid => 99, :status => crashed, :new_pid => 123, :delay => 0)
+        exited = payload(:child_exited)
+        expect(exited.except(:uptime)).to eq(:worker => 'delayed_job.1', :pid => 99, :status => crashed, :respawn_in => 0)
+        expect(exited[:uptime]).to be_nil # Its start wasn't recorded here.
+        expect(payload(:child_spawned)).to eq(:worker => 'delayed_job.0', :pid => 123, :replaces_pid => 99, :delay => 0)
+        expect(events.map(&:name).grep(/\Achild_/)).to eq %w[child_exited.delayed_job child_spawned.delayed_job]
       end
 
-      it 'does not publish fork_replaced while stopping' do
+      it 'publishes child_exited with its uptime and the delay before its replacement' do
+        launcher.send(:started_at)[99] = Process.clock_gettime(Process::CLOCK_MONOTONIC) - 2
+        allow(launcher).to receive(:sleep) { launcher.instance_variable_set(:@stopped, true) }
+        launcher.send(:run_loop)
+        exited = payload(:child_exited)
+        expect(exited[:uptime]).to be_within(1).of(2)
+        expect(exited[:respawn_in]).to eq 1
+      end
+
+      it 'publishes child_exited without a replacement while stopping' do
         launcher.instance_variable_set(:@stopped, true)
         launcher.send(:run_loop)
-        expect(named(:fork_replaced)).to be_empty
+        expect(payload(:child_exited)[:respawn_in]).to be_nil
+        expect(named(:child_spawned)).to be_empty
+      end
+
+      it 'publishes child_spawned for each initial child process' do
+        allow(launcher).to receive(:fork_worker).and_return(201, 202)
+        launcher.send(:workers).clear
+        launcher.send(:setup_multiple_workers)
+        expect(named(:child_spawned).map(&:payload)).to eq [
+          {:worker => 'delayed_job.0', :pid => 201, :replaces_pid => nil, :delay => 0},
+          {:worker => 'delayed_job.1', :pid => 202, :replaces_pid => nil, :delay => 0}
+        ]
       end
     end
   end
@@ -493,12 +517,24 @@ describe 'Instrumentation' do
       expect(logged(:job_failed, :job => nil, :worker => 'w')).to include 'Job failed permanently on w'
     end
 
-    it 'logs thread_error, interrupt, locks_released and fork_replaced' do
+    it 'logs thread_error, interrupt and locks_released' do
       expect(logged(:thread_error, :context => 'Reservation', :dispatcher => 'dj', :error => IOError.new('x'))).to include 'ERROR -- : Reservation error in dj: IOError: x'
       expect(logged(:thread_error, :context => 'Worker thread', :worker => 'w', :error => IOError.new('x'))).to include 'Worker thread error in w'
       expect(logged(:interrupt, :dispatcher => 'dj', :jobs => 2, :reason => 'Quitting')).to include 'dj interrupted 2 running job(s) (Quitting)'
       expect(logged(:locks_released, :workers => %w[a b], :count => 3, :reason => 'process exit')).to include 'Released 3 job(s) of a, b (process exit)'
-      expect(logged(:fork_replaced, :worker => 'delayed_job.1', :pid => 9, :status => 'exit 3', :new_pid => 10)).to include 'Replaced worker process delayed_job.1 (pid 9, exit 3) with pid 10'
+    end
+
+    it 'logs child_exited, child_spawned and job_stuck' do
+      expect(logged(:child_exited, :worker => 'delayed_job.1', :pid => 9, :status => 'exit 3', :uptime => 2.04, :respawn_in => 1)).to include \
+        'INFO -- : Child process delayed_job.1 (pid 9) exited after 2.0s: exit 3; replacing it in 1s'
+      expect(logged(:child_exited, :worker => 'delayed_job.1', :pid => 9, :status => 'exit 0', :uptime => nil, :respawn_in => 0)).to include \
+        'Child process delayed_job.1 (pid 9) exited: exit 0; replacing it'
+      expect(logged(:child_exited, :worker => 'delayed_job.1', :pid => 9, :status => 'exit 0', :uptime => 5.0, :respawn_in => nil)).to include \
+        '(pid 9) exited after 5.0s: exit 0; not replaced'
+      expect(logged(:child_spawned, :worker => 'delayed_job.2', :pid => 10, :replaces_pid => 9)).to include 'Child process delayed_job.2 (pid 10) spawned replacing pid 9'
+      expect(logged(:child_spawned, :worker => 'delayed_job.0', :pid => 8, :replaces_pid => nil)).to include 'Child process delayed_job.0 (pid 8) spawned'
+      expect(logged(:job_stuck, :job => job, :worker => 'w', :max_run_time => 60)).to include \
+        "ERROR -- : Job SimpleJob (id=#{job.id}) (queue=mail) is stuck on w: running past its max_run_time (60s)"
     end
 
     it 'logs nothing without a logger' do

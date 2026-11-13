@@ -61,7 +61,7 @@ describe 'A worker process dying while running jobs', :processes do
       output = +''
       wait_for do
         output << read_available(reader)
-        output =~ /Replaced worker process/ && reload_job(job).attempts == 1
+        output =~ /Child process delayed_job\.1 \(pid \d+\) spawned replacing pid/ && reload_job(job).attempts == 1
       end
       sleep 0.5 # let the replacement worker start
       Process.kill('TERM', -pid)
@@ -71,7 +71,9 @@ describe 'A worker process dying while running jobs', :processes do
       expect(status).to be_success
       dead = output[/Child process delayed_job\.0 \(pid (\d+)\) started/, 1]
       new_pid = output[/Child process delayed_job\.1 \(pid (\d+)\) started/, 1]
-      expect(output).to include "Replaced worker process delayed_job.0 (pid #{dead}, pid #{dead} exit 3) with pid #{new_pid}"
+      # It died at once, so it is replaced after the first back-off delay.
+      expect(output).to match(/Child process delayed_job\.0 \(pid #{dead}\) exited after [\d.]+s: pid #{dead} exit 3; replacing it in 1s/)
+      expect(output).to include "Child process delayed_job.1 (pid #{new_pid}) spawned replacing pid #{dead}"
       expect(output).to match(/Released 1 job\(s\) of delayed_job\.0 host:\S+ pid:#{dead} \(process exit\)/)
       expect(output).to match(/Job ProcessJobs::ExitJob \(id=#{job.id}\) failed attempt 1 on delayed_job\.0 .* with Delayed::ProcessExitError/)
       expect(output).to match(/Started delayed_job\.1 host:\S+ pid:#{new_pid} \(pid #{new_pid}, 1 thread\(s\), queues=\*\)/)

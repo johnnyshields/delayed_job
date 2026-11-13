@@ -114,13 +114,15 @@ describe Delayed::Launcher::Forking, 'replacing child processes that keep dying'
       expect(launcher.send(:pending_replacements)).to be_empty
     end
 
-    it 'publishes the delay in fork_replaced' do
+    it 'publishes child_spawned with the pid replaced and the delay' do
       events = []
-      subscription = ActiveSupport::Notifications.subscribe('fork_replaced.delayed_job') { |*args| events << args.last }
-      pid = start_child
-      pid = dies_after(pid, 1)
-      dies_after(pid, 1)
-      expect(events.map { |e| e[:delay] }).to eq [1, 2]
+      subscription = ActiveSupport::Notifications.subscribe('child_spawned.delayed_job') { |*args| events << args.last }
+      first = start_child
+      second = dies_after(first, 1)
+      dies_after(second, 1)
+      expect(events.map { |e| e.slice(:replaces_pid, :delay) }).to eq [
+        {:replaces_pid => nil, :delay => 0}, {:replaces_pid => first, :delay => 1}, {:replaces_pid => second, :delay => 2}
+      ]
     ensure
       ActiveSupport::Notifications.unsubscribe(subscription)
     end
@@ -227,9 +229,9 @@ describe Delayed::Launcher::Forking, 'replacing child processes that keep dying'
       allow(launcher).to receive(:sleep).and_call_original
       healthy_status = double('Process::Status', :signaled? => false, :termsig => nil, :success? => false, :to_s => 'exit 1')
       replaced = []
-      allow(launcher).to receive(:add_worker).and_wrap_original do |m, options|
+      allow(launcher).to receive(:add_worker).and_wrap_original do |m, options, **kwargs|
         replaced << [options, Process.clock_gettime(Process::CLOCK_MONOTONIC)]
-        m.call(options)
+        m.call(options, **kwargs)
       end
       started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
       exits([crashing, crashed], [healthy, healthy_status])

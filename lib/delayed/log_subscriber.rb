@@ -69,9 +69,21 @@ module Delayed
       log(:info) { "Released #{p[:count]} job(s) of #{Array(p[:workers]).join(', ')} (#{p[:reason]})" }
     end
 
-    def fork_replaced(event)
+    def child_exited(event)
       p = event.payload
-      log(:info) { "Replaced worker process #{p[:worker]} (pid #{p[:pid]}, #{p[:status]}) with pid #{p[:new_pid]}" }
+      uptime = p[:uptime] ? format(' after %.1fs', p[:uptime]) : ''
+      log(:info) { "Child process #{p[:worker]} (pid #{p[:pid]}) exited#{uptime}: #{p[:status]}; #{respawn(p[:respawn_in])}" }
+    end
+
+    def child_spawned(event)
+      p = event.payload
+      replaces = p[:replaces_pid] ? " replacing pid #{p[:replaces_pid]}" : ''
+      log(:info) { "Child process #{p[:worker]} (pid #{p[:pid]}) spawned#{replaces}" }
+    end
+
+    def job_stuck(event)
+      p = event.payload
+      log(:error) { "#{job(p[:job])} is stuck on #{p[:worker]}: running past its max_run_time (#{p[:max_run_time]}s)" }
     end
 
     if respond_to?(:subscribe_log_level)
@@ -85,6 +97,11 @@ module Delayed
     # (info, error, ...) differ between its versions.
     def log(level, &block)
       logger.public_send(level, &block) if logger
+    end
+
+    def respawn(respawn_in)
+      return 'not replaced' if respawn_in.nil?
+      respawn_in.zero? ? 'replacing it' : "replacing it in #{respawn_in}s"
     end
 
     # The exception raised in an instrumented block, if any.
