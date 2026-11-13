@@ -42,7 +42,7 @@ module Delayed
         # releases its job, instead of turning into a RuntimeError. Without
         # a cause: the subscriber's error (whose cause is the block's) would
         # become its cause, a loop JRuby rejects ("circular causes").
-        raise block_error, cause: nil if block_error
+        raise block_error, :cause => nil if block_error
         result = yield(payload) unless started # A subscriber failed before the block ran.
       end
       result
