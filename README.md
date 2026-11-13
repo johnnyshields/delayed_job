@@ -615,6 +615,41 @@ class ParanoidNewsletterJob < NewsletterJob
 end
 ```
 
+### Instrumentation
+
+Workers publish `ActiveSupport::Notifications` events named `<event>.delayed_job`:
+
+| Event | Payload |
+| --- | --- |
+| `start_process`, `stop_process` | `:dispatcher` (name), `:pid`, `:threads`, `:queues`; `stop_process` adds `:error` (what stopped it, or nil) |
+| `reserve` (timed) | `:dispatcher`, `:requested` (idle threads), `:reserved` |
+| `perform` (timed) | `:job`, `:worker`, `:success` |
+| `attempt_failed` | `:job`, `:worker`, `:error`, `:attempts` (including this one) |
+| `job_failed` | `:job`, `:worker`, `:error` - the job failed permanently |
+| `lock_lost` | `:job`, `:worker`, `:outcome` - the job's lock was taken over, so this run's outcome was discarded |
+| `thread_error` | `:error`, `:context`, `:dispatcher`, `:worker` - an error outside job handling (reservation, lock heartbeat, a crashed worker thread) |
+| `interrupt` | `:dispatcher`, `:jobs`, `:reason` - running jobs interrupted by the shutdown timeout or `SIGQUIT` |
+| `locks_released` | `:workers`, `:count`, `:reason` (`shutdown` or `process exit`) |
+| `fork_replaced` | `:worker`, `:pid`, `:status`, `:new_pid` - the forking parent replaced a worker process that exited |
+
+Timed events also carry `:exception` when their block raised. Events are
+published on worker threads; an exception raised by a subscriber is logged and
+ignored, so it can't fail or skip a job.
+
+```ruby
+ActiveSupport::Notifications.subscribe('job_failed.delayed_job') do |event|
+  ErrorTracker.notify(event.payload[:error], job_id: event.payload[:job].id)
+end
+```
+
+`Delayed::LogSubscriber` logs these events to `Delayed::Worker.logger`
+(`reserve` and `perform` at debug level, with their durations). Workers already
+log their activity, so it isn't attached by default:
+
+```ruby
+Delayed::LogSubscriber.attach_to :delayed_job
+```
+
 ### Gory Details
 
 The library revolves around a `delayed_jobs` table which looks as follows:

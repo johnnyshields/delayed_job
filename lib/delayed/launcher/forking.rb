@@ -132,6 +132,7 @@ module Delayed
 
         workers[worker_pid] = [worker_name, options]
         @worker_index += 1
+        worker_pid
       end
 
       def fork_worker(worker_name, options)
@@ -196,7 +197,8 @@ module Delayed
 
           break if @stopped && workers.empty?
           next if @stopped
-          add_worker(options)
+          new_pid = add_worker(options)
+          Delayed.instrument(:fork_replaced, :worker => worker_name, :pid => worker_pid, :status => child_status, :new_pid => new_pid)
         end
       rescue Errno::ECHILD
         logger.warn 'No worker processes found'

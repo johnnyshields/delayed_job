@@ -14,12 +14,15 @@ worker_settings = options.delete(:worker) || {}
 # Seconds each forked worker process sleeps in after_fork, before it installs
 # its own signal traps: lets specs signal it during start-up.
 startup_delay = options.delete(:startup_delay)
+# Attaches Delayed::LogSubscriber, so specs can check the events.
+log_events = options.delete(:log_events)
 
 Delayed::Backend::SqliteFile::Job.connect(db_path)
 Delayed::Worker.backend = Delayed::Backend::SqliteFile::Job
 STDOUT.sync = true
 Delayed::Worker.logger = Logger.new(STDOUT).tap { |l| l.formatter = proc { |_s, _t, _p, m| "#{m}\n" } }
 worker_settings.each { |setting, value| Delayed::Worker.send("#{setting}=", value) }
+Delayed::LogSubscriber.attach_to :delayed_job if log_events
 
 if startup_delay
   Delayed::Backend::SqliteFile::Job.singleton_class.prepend(Module.new do

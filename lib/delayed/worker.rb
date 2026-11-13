@@ -187,6 +187,7 @@ module Delayed
         # Jobs failed permanently keep their lock (as when a live worker fails
         # them, until ClearLocks runs on exit); the dead worker can't clear it.
         Delayed::Job.clear_locks!(worker_name)
+        Delayed.instrument(:locks_released, :workers => [worker_name], :count => jobs.size, :reason => 'process exit', :error => error) unless jobs.empty?
         count + jobs.size
       end
     end
@@ -322,6 +323,7 @@ module Delayed
     end
 
     def failed(job)
+      Delayed.instrument(:job_failed, :job => job, :worker => name, :error => job.error)
       self.class.lifecycle.run_callbacks(:failure, self, job) do
         begin
           job.hook(:failure)
@@ -350,7 +352,9 @@ module Delayed
     # Runs an already reserved job, including its :perform callbacks.
     # Returns true if the job succeeded, false if it failed.
     def perform_job(job)
-      self.class.lifecycle.run_callbacks(:perform, self, job) { run(job) }
+      Delayed.instrument(:perform, :job => job, :worker => name) do |payload|
+        payload[:success] = self.class.lifecycle.run_callbacks(:perform, self, job) { run(job) }
+      end
     end
 
   protected
@@ -380,6 +384,7 @@ module Delayed
     end
 
     def lost_lock(job, outcome)
+      Delayed.instrument(:lock_lost, :job => job, :worker => name, :outcome => outcome)
       job_say job, "was #{outcome} here, but its lock expired and another worker reserved it; " \
                    'leaving the job to that worker', 'warn'
     end
@@ -390,6 +395,7 @@ module Delayed
 
     def handle_failed_job(job, error)
       job.error = error
+      Delayed.instrument(:attempt_failed, :job => job, :worker => name, :error => error, :attempts => job.attempts + 1)
       job_say job, "FAILED (#{job.attempts} prior attempts) with #{error.class.name}: #{error.message}", 'error'
       reschedule(job)
     end

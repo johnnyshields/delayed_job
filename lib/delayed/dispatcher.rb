@@ -97,16 +97,21 @@ module Delayed
     def run
       say thread_count > 1 ? "Starting job worker with #{thread_count} threads" : 'Starting job worker'
       warn_if_connection_pool_too_small
-      with_lock_heartbeat do
-        start_threads
-        error = nil
-        begin
-          poll_loop
-        rescue Exception => error # rubocop:disable RescueException
-          raise
-        ensure
-          stop_threads(error)
+      Delayed.instrument(:start_process, process_payload)
+      error = nil
+      begin
+        with_lock_heartbeat do
+          start_threads
+          begin
+            poll_loop
+          rescue Exception => error # rubocop:disable RescueException
+            raise
+          ensure
+            stop_threads(error)
+          end
         end
+      ensure
+        Delayed.instrument(:stop_process, process_payload.merge(:error => error || @thread_error))
       end
     end
 
@@ -248,11 +253,15 @@ module Delayed
     # Reserves up to one job per given worker. On error, lets the backend
     # recover and returns no jobs, until too many consecutive failures.
     def reserve(workers)
-      reserved = with_executor { Delayed::Job.reserve_batch(workers, Worker.lock_expiry) }
+      reserved = Delayed.instrument(:reserve, :dispatcher => name, :requested => workers.size) do |payload|
+        payload[:reserved] = 0
+        with_executor { Delayed::Job.reserve_batch(workers, Worker.lock_expiry) }.tap { |r| payload[:reserved] = r.size }
+      end
       @failed_reserve_count = 0
       reserved
     rescue ::Exception => error # rubocop:disable RescueException
       say "Error while reserving job: #{error}"
+      thread_error(error, 'Reservation')
       Delayed::Job.recover_from(error)
       @failed_reserve_count += 1
       raise FatalBackendError if @failed_reserve_count >= MAX_FAILED_RESERVATIONS
@@ -313,6 +322,7 @@ module Delayed
       with_executor { Delayed::Job.touch_locks(names) }
     rescue StandardError => error
       say "Error while refreshing job locks: #{error.class}: #{error.message}", 'error'
+      thread_error(error, 'Lock heartbeat')
     end
 
     def start_threads
@@ -341,11 +351,22 @@ module Delayed
         end
       end
     rescue Exception => error # rubocop:disable RescueException
+      thread_error(error, 'Worker thread', worker.name)
       synchronize do
         @running.delete(Thread.current)
         @thread_error ||= error
         signal_event
       end
+    end
+
+    # Publishes a thread_error event: an error outside of a job's own
+    # handling (job errors are reported through the :error lifecycle).
+    def thread_error(error, context, worker_name = nil)
+      Delayed.instrument(:thread_error, :error => error, :context => context, :dispatcher => name, :worker => worker_name)
+    end
+
+    def process_payload
+      {:dispatcher => name, :pid => Process.pid, :threads => thread_count, :queues => Worker.queues}
     end
 
     # Lets running jobs finish, then waits for every thread to exit. Jobs
@@ -380,6 +401,7 @@ module Delayed
       return if busy.empty?
       reason = quit? ? 'Quitting' : format('Shutdown timeout of %gs exceeded', Worker.shutdown_timeout)
       say "#{reason}: interrupting #{busy.size} running job(s)", 'warn'
+      Delayed.instrument(:interrupt, :dispatcher => name, :jobs => busy.size, :reason => reason)
       busy.each { |thread| thread.raise(ShutdownInterrupt, reason) }
       deadline = monotonic_now + INTERRUPT_GRACE
       busy.each { |thread| thread.join([deadline - monotonic_now, 0].max) }
@@ -402,8 +424,10 @@ module Delayed
     def release_interrupted(worker, job)
       worker.job_say(job, 'interrupted by shutdown; released for another worker', 'warn') if job
       Delayed::Job.clear_locks!(worker.name)
+      Delayed.instrument(:locks_released, :workers => [worker.name], :count => job ? 1 : 0, :reason => 'shutdown') if job
     rescue StandardError => error
       say "Could not release the jobs of #{worker.name}: #{error.class}: #{error.message}", 'error'
+      thread_error(error, 'Releasing interrupted jobs', worker.name)
     end
 
     def dispatch(worker, job)

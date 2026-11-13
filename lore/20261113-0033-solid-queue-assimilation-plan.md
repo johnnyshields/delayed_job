@@ -31,6 +31,7 @@ Principles: no schema changes for existing backends; new hooks are optional with
 ## Phase 2 — observability
 
 7. **`ActiveSupport::Notifications`** events `*.delayed_job` (`reserve`, `perform`, `error`, `failure`, `thread_error`, `start_process`, `stop_process`, `fork_replaced`, `locks_released`, `shutdown_timeout`) plus a log subscriber; existing `say` lines stay. (SQ: `SolidQueue.instrument`, `LogSubscriber`.)
+   - Implemented (`Delayed.instrument`, `Delayed::LogSubscriber`, opt-in). Renamed `error`/`failure` to `attempt_failed`/`job_failed` (ActiveSupport's `LogSubscriber` has public level helpers named `error`, so a subscriber method `error` is never attached), `shutdown_timeout` to `interrupt` (also covers `QUIT`), and added `lock_lost`. Subscriber exceptions are logged and ignored, so a buggy subscriber can't fail or skip a job.
 8. **`Delayed::Worker.on_thread_error`** for errors outside job handling (reservation, plugins, thread crashes). (SQ: `AppExecutor#handle_thread_error`.)
 9. **`Delayed::Worker.silence_polling`** wraps each poll in `ActiveRecord::Base.logger.silence` — core version of the Mongoid `MongoSilencer` idea. (SQ: `with_polling_volume`.)
 10. **Live procline**, e.g. `delayed_job.0: 3/4 busy, queues=*`. (SQ: `procline`.)
