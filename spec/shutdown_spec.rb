@@ -348,6 +348,90 @@ describe 'Stopping a worker' do
     end
   end
 
+  describe '#discard_stale_interrupts' do
+    let(:defer) { Delayed::Dispatcher::DEFER_SHUTDOWN_INTERRUPTS }
+
+    # Runs the block on a thread that defers shutdown interrupts, as worker
+    # threads do, after raising `interrupts` into it.
+    def on_deferring_thread(*interrupts)
+      ready = Queue.new
+      go = Queue.new
+      thread = Thread.new do
+        Thread.handle_interrupt(defer) do
+          ready << true
+          go.pop
+          yield
+        end
+      end
+      Timeout.timeout(5) { ready.pop }
+      interrupts.each { |klass, message| thread.raise(klass, message) }
+      sleep 0.05
+      go << true
+      Timeout.timeout(5) { thread.value }
+    end
+
+    it 'drops a pending ShutdownInterrupt' do
+      result = on_deferring_thread([Delayed::ShutdownInterrupt, 'stale']) do
+        dispatcher.send(:discard_stale_interrupts)
+        Thread.pending_interrupt?
+      end
+      expect(result).to be false
+    end
+
+    it 'drops a pending signal' do
+      result = on_deferring_thread([SignalException, 'TERM']) do
+        dispatcher.send(:discard_stale_interrupts)
+        Thread.pending_interrupt?
+      end
+      expect(result).to be false
+    end
+
+    it 'drops several pending interrupts' do
+      result = on_deferring_thread([Delayed::ShutdownInterrupt, 'one'], [SignalException, 'TERM'],
+                                   [Delayed::ShutdownInterrupt, 'two']) do
+        dispatcher.send(:discard_stale_interrupts)
+        Thread.pending_interrupt?
+      end
+      expect(result).to be false
+    end
+
+    it 'returns at once when nothing is pending' do
+      allow(dispatcher).to receive(:stale_interrupt_pending?).and_call_original
+      expect(Thread).not_to receive(:pass)
+      on_deferring_thread { dispatcher.send(:discard_stale_interrupts) }
+      expect(dispatcher).to have_received(:stale_interrupt_pending?).once
+    end
+
+    it 'leaves other deferred interrupts pending' do
+      ready = Queue.new
+      go = Queue.new
+      thread = Thread.new do
+        Thread.handle_interrupt(defer.merge(IOError => :never)) do
+          ready << true
+          go.pop
+          dispatcher.send(:discard_stale_interrupts)
+          [Thread.pending_interrupt?(Delayed::ShutdownInterrupt), Thread.pending_interrupt?(IOError)]
+        end
+      end
+      thread.report_on_exception = false
+      Timeout.timeout(5) { ready.pop }
+      thread.raise(Delayed::ShutdownInterrupt, 'stale')
+      thread.raise(IOError, 'other')
+      sleep 0.05
+      go << true
+      # The IOError is delivered once the block (and its mask) exits.
+      expect { Timeout.timeout(5) { thread.value } }.to raise_error(IOError, 'other')
+    end
+
+    it 'gives up instead of spinning when a pending interrupt is never delivered' do
+      allow(dispatcher).to receive(:stale_interrupt_pending?).and_return(true) # Stuck pending.
+      passes = 0
+      allow(Thread).to receive(:pass) { passes += 1 }
+      expect { Timeout.timeout(2) { dispatcher.send(:discard_stale_interrupts) } }.not_to raise_error
+      expect(passes).to eq 1
+    end
+  end
+
   describe 'interrupts arriving after the job ran' do
     let(:reported) { [] }
     let(:paused) { Queue.new }

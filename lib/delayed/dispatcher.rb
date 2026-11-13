@@ -503,15 +503,21 @@ module Delayed
 
 
     # Drops shutdown interrupts that arrived after the previous job finished:
-    # they were meant for that job, not for the next one.
+    # they were meant for that job, not for the next one. Stops as soon as a
+    # pass delivers none, so it can't spin if one stays pending.
     def discard_stale_interrupts
-      while SHUTDOWN_INTERRUPTS.any? { |klass| Thread.pending_interrupt?(klass) }
+      while stale_interrupt_pending?
         begin
           self.class.interruptible { Thread.pass }
+          return # Still pending, yet not delivered: leave it.
         rescue ShutdownInterrupt, SignalException
           nil
         end
       end
+    end
+
+    def stale_interrupt_pending?
+      SHUTDOWN_INTERRUPTS.any? { |klass| Thread.pending_interrupt?(klass) }
     end
 
     # Reports an error outside of a job's own handling (see
