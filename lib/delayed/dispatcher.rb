@@ -676,14 +676,29 @@ module Delayed
       ::Rails.application if defined?(::Rails) && ::Rails.respond_to?(:application) && ::Rails.application
     end
 
+    # Warns if the Active Record connection pool can't serve every thread
+    # that queries at once: each worker thread, the dispatcher thread, and
+    # the lock heartbeat thread when heartbeats are on.
     def warn_if_connection_pool_too_small
       return unless defined?(::ActiveRecord::Base)
       pool_size = ::ActiveRecord::Base.connection_pool.size
-      return if pool_size >= thread_count + 1
-      say "WARNING: database connection pool size (#{pool_size}) is smaller than the number of " \
-          "threads plus one (#{thread_count + 1}). Increase the pool size in config/database.yml.", 'warn'
+      needed = connections_needed
+      return if pool_size >= needed
+      say "WARNING: database connection pool size (#{pool_size}) is smaller than the #{needed} connections " \
+          "this worker process may use at once (#{connection_users}). Increase the pool size in " \
+          'config/database.yml.', 'warn'
     rescue StandardError
       nil
+    end
+
+    def connections_needed
+      thread_count + 1 + (Worker.lock_heartbeats? ? 1 : 0)
+    end
+
+    def connection_users
+      users = ["#{thread_count} job thread(s)", 'the dispatcher']
+      users << 'the lock heartbeat' if Worker.lock_heartbeats?
+      users.join(', ')
     end
   end
 end

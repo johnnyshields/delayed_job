@@ -298,7 +298,8 @@ When using threads:
 
 * Your job code (and any plugins) must be thread-safe.
 * The database connection pool must hold at least one connection per thread
-  plus one (`pool` in `config/database.yml`). A warning is logged if it is too small.
+  plus one for the dispatcher, and one more with lock heartbeats (`pool` in
+  `config/database.yml`). A warning is logged if it is too small.
 * All threads of a process work the same queues, and every process runs the
   same number of threads.
 * Under Rails, each job runs inside the Rails reloader, so code reloading in
