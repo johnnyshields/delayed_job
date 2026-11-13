@@ -164,6 +164,25 @@ class ChainJob
   end
 end
 
+# Runs for `seconds`, then records that it completed.
+class FuzzJob
+  cattr_accessor :completed, :mutex
+  self.mutex = Mutex.new
+  self.completed = Hash.new(0)
+
+  attr_accessor :key, :seconds
+
+  def initialize(key, seconds)
+    self.key = key
+    self.seconds = seconds
+  end
+
+  def perform
+    sleep seconds
+    self.class.mutex.synchronize { self.class.completed[key] += 1 }
+  end
+end
+
 # Blocks until released, so a dispatcher can be stopped while it runs.
 class BlockingJob
   cattr_accessor :started, :release
