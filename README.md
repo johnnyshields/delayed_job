@@ -385,6 +385,19 @@ SIGKILLed parent keep a new launcher from starting until they finish their jobs
 and exit. Daemon mode writes its own pidfiles in `--pid-dir` and doesn't take
 `--pid-file`.
 
+The same goes for processes your jobs start with `fork` (without `exec`): they
+inherit the lock too, so a new launcher won't start until they exit. Processes
+started with `spawn`, `system` or backticks run another program (`exec`) and
+don't keep it, since Ruby opens files close-on-exec. A job that forks a
+long-lived Ruby child can close the inherited pidfile in it:
+
+```ruby
+fork do
+  ObjectSpace.each_object(File).select { |f| Delayed::Pidfile.lock_file?(f) }.each(&:close)
+  # ...
+end
+```
+
 #### Shutdown timeout and SIGQUIT
 
 By default a stopping worker waits for its running jobs, however long they take.

@@ -146,6 +146,51 @@ describe Delayed::Pidfile do
     end
   end
 
+  describe 'processes started by jobs' do
+    # A launcher (in another process) whose "job" starts a child process
+    # with `start_child`, then exits, leaving the child running.
+    def launcher_leaving_child(start_child)
+      pid, reader = spawn_ruby(<<-RUBY)
+        Delayed::Pidfile.new(ARGV[0]).setup
+        child = #{start_child}
+        puts child
+        STDOUT.flush
+      RUBY
+      child = Integer(reader.gets)
+      reader.close
+      Process.wait(pid)
+      @children = (@children || []) << child
+      child
+    end
+
+    after do
+      (@children || []).each { |child| Process.kill('KILL', child) rescue nil } # rubocop:disable RescueModifier
+    end
+
+    it 'keep the lock when forked without exec, until they exit' do
+      child = launcher_leaving_child("fork { sleep 30 }.tap { |c| Process.detach(c) }")
+      expect { pidfile.setup }.to raise_error(Delayed::AlreadyRunningError)
+      Process.kill('KILL', child)
+      Timeout.timeout(5) { sleep 0.05 while (Process.kill(0, child) rescue nil) } # rubocop:disable RescueModifier
+      expect { pidfile.setup }.not_to raise_error
+    end
+
+    it 'do not keep the lock when forked children close it, as the README shows' do
+      launcher_leaving_child(<<-CHILD.strip)
+        fork do
+          ObjectSpace.each_object(File).select { |f| Delayed::Pidfile.lock_file?(f) }.each(&:close)
+          sleep 30
+        end.tap { |c| Process.detach(c) }
+      CHILD
+      expect { pidfile.setup }.not_to raise_error
+    end
+
+    it 'do not keep the lock when they exec another program' do
+      launcher_leaving_child("spawn('sleep', '30').tap { |c| Process.detach(c) }")
+      expect { pidfile.setup }.not_to raise_error
+    end
+  end
+
   describe '#delete' do
     it 'removes the file and releases the lock' do
       pidfile.setup
