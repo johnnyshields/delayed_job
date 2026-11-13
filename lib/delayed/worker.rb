@@ -15,7 +15,7 @@ module Delayed
     include Logging
 
     DEFAULT_LOG_LEVEL        = 'info'.freeze
-    DEFAULT_SLEEP_DELAY      = 5
+    DEFAULT_SLEEP_DELAY      = 1
     DEFAULT_MAX_ATTEMPTS     = 25
     DEFAULT_MAX_RUN_TIME     = 4.hours
     DEFAULT_DEFAULT_PRIORITY = 0

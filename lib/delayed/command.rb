@@ -114,7 +114,7 @@ module Delayed
         opt.on('--silence-polling', "Don't log the database queries of polling for jobs and refreshing their locks") do
           @options[:silence_polling] = true
         end
-        opt.on('--sleep-delay N', 'Seconds to sleep when no jobs are found (default: 5)') do |n|
+        opt.on('--sleep-delay N', 'Seconds to sleep when no jobs are found (default: 1)') do |n|
           @options[:sleep_delay] = seconds(n)
         end
         opt.on('--read-ahead N', 'Number of jobs from the queue to consider') do |n|

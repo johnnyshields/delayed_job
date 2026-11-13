@@ -233,7 +233,7 @@ RAILS_ENV=production script/delayed_job -n4 start
 RAILS_ENV=production script/delayed_job --processes=4 start
 ```
 
-Each worker will check the database at least every 5 seconds.
+Each worker will check the database at least every second (`sleep_delay`, default 1).
 
 ### Stopping and Restarting
 
