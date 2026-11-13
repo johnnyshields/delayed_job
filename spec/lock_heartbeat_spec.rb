@@ -163,6 +163,92 @@ describe 'Lock heartbeats' do
       expect(messages).to include(['error', 'Error while refreshing job locks: IOError: db hiccup'])
     end
 
+    describe 'errors ending the heartbeat' do
+      let(:reported) { [] }
+
+      before { Delayed::Worker.on_thread_error = ->(error, info) { reported << [error, info] } }
+
+      def run_briefly(seconds = 0.35)
+        thread = run_dispatcher
+        sleep seconds
+        dispatcher.stop
+        Timeout.timeout(5) { thread.join }
+      end
+
+      def stopped_messages
+        messages.select { |_, text| text.start_with?('Lock heartbeat stopped') }
+      end
+
+      it 'logs an error and reports it when a non-StandardError ends the heartbeat' do
+        allow(job_class).to receive(:touch_locks).and_raise(NoMemoryError, 'failed to allocate memory')
+        run_briefly
+        expect(stopped_messages.size).to eq 1
+        level, text = stopped_messages.first
+        expect(level).to eq 'error'
+        expect(text).to eq 'Lock heartbeat stopped by NoMemoryError: failed to allocate memory; the locks of running ' \
+                           'jobs are no longer refreshed and expire after lock_timeout (0.5s)'
+        expect(reported.size).to eq 1
+        error, info = reported.first
+        expect(error).to be_a NoMemoryError
+        expect(info).to eq(:context => 'Lock heartbeat', :dispatcher => dispatcher.name, :worker => nil)
+      end
+
+      it 'publishes a thread_error event' do
+        events = []
+        subscription = ActiveSupport::Notifications.subscribe('thread_error.delayed_job') { |*args| events << args.last }
+        allow(job_class).to receive(:touch_locks).and_raise(ScriptError, 'broken')
+        run_briefly
+        expect(events.map { |p| p[:context] }).to eq ['Lock heartbeat']
+      ensure
+        ActiveSupport::Notifications.unsubscribe(subscription)
+      end
+
+      it 'stops beating after such an error, and leaves the dispatcher running' do
+        calls = 0
+        allow(job_class).to receive(:touch_locks) do
+          calls += 1
+          raise NoMemoryError, 'oom'
+        end
+        thread = run_dispatcher
+        sleep 0.4
+        expect(calls).to eq 1
+        expect(thread).to be_alive
+        expect(dispatcher.instance_variable_get(:@heartbeat)).not_to be_alive
+        dispatcher.stop
+        Timeout.timeout(5) { thread.join } # Stopping joins the dead heartbeat fine.
+      end
+
+      it 'keeps beating after a StandardError while choosing which locks to refresh' do
+        calls = 0
+        allow(dispatcher).to receive(:heartbeat_names).and_wrap_original do |m|
+          calls += 1
+          raise ArgumentError, "a job's max_run_time raised" if calls == 1
+          m.call
+        end
+        touched = 0
+        allow(job_class).to receive(:touch_locks) { touched += 1; 0 }
+        run_briefly
+        expect(calls).to be >= 2
+        expect(touched).to be >= 1
+        expect(stopped_messages).to be_empty
+        expect(messages).to include(['error', "Error while refreshing job locks: ArgumentError: a job's max_run_time raised"])
+        expect(reported.map { |_, info| info[:context] }.uniq).to eq ['Lock heartbeat']
+      end
+
+      it 'logs nothing more when a StandardError is raised refreshing locks' do
+        allow(job_class).to receive(:touch_locks).and_raise(IOError, 'db hiccup')
+        run_briefly
+        expect(stopped_messages).to be_empty
+        expect(dispatcher.instance_variable_get(:@heartbeat)).not_to be_alive # Joined on stop.
+      end
+
+      it 'is not reported when the heartbeat is stopped normally' do
+        run_briefly
+        expect(stopped_messages).to be_empty
+        expect(reported).to be_empty
+      end
+    end
+
     it 'stops the heartbeat thread when it stops' do
       thread = run_dispatcher
       sleep 0.15

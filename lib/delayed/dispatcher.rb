@@ -352,9 +352,15 @@ module Delayed
           @heartbeat_cond.wait(@heartbeat_mutex, interval) unless @heartbeat_stopped
         end
         break if @heartbeat_mutex.synchronize { @heartbeat_stopped }
-        names = heartbeat_names
-        touch_locks(names) unless names.empty?
+        heartbeat
       end
+    rescue Exception => error # rubocop:disable RescueException
+      # #heartbeat handles StandardErrors; anything else ends the heartbeat.
+      # Say so loudly: the locks of running jobs now expire after
+      # lock_timeout, and other workers may take those jobs over.
+      say "Lock heartbeat stopped by #{error.class}: #{error.message}; the locks of running jobs are no longer " \
+          "refreshed and expire after lock_timeout (#{Worker.lock_timeout}s)", 'error'
+      thread_error(error, 'Lock heartbeat')
     end
 
     # The workers whose locks the heartbeat refreshes: all of them, except
@@ -400,10 +406,12 @@ module Delayed
       end
     end
 
-    # Errors are logged and the next heartbeat tries again; the locks only
-    # expire if heartbeats keep failing for lock_timeout seconds.
-    def touch_locks(names)
-      polling { Delayed::Job.touch_locks(names) }
+    # Refreshes the locks of the workers that need it. Errors are logged and
+    # the next heartbeat tries again; the locks only expire if heartbeats
+    # keep failing for lock_timeout seconds.
+    def heartbeat
+      names = heartbeat_names
+      polling { Delayed::Job.touch_locks(names) } unless names.empty?
     rescue StandardError => error
       say "Error while refreshing job locks: #{error.class}: #{error.message}", 'error'
       thread_error(error, 'Lock heartbeat')
