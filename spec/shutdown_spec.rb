@@ -735,6 +735,53 @@ describe Delayed::Launcher::Forking, 'stopping worker processes' do
     end
   end
 
+  describe '#signal_workers' do
+    it 'signals every worker' do
+      expect(Process).to receive(:kill).with('KILL', 11)
+      expect(Process).to receive(:kill).with('KILL', 12)
+      launcher.send(:signal_workers, 'KILL')
+      expect(logger).to have_received(:info).with('Sent SIGKILL to worker delayed_job.0')
+    end
+
+    it 'skips workers that already exited, and still signals the others' do
+      allow(Process).to receive(:kill).with('KILL', 11).and_raise(Errno::ESRCH)
+      expect(Process).to receive(:kill).with('KILL', 12)
+      expect { launcher.send(:signal_workers, 'KILL') }.not_to raise_error
+      expect(logger).to have_received(:info).with('Worker delayed_job.0 (pid 11) already exited; not sent SIGKILL')
+      expect(logger).to have_received(:info).with('Sent SIGKILL to worker delayed_job.1')
+    end
+
+    it 'is not disturbed by the run loop reaping a worker meanwhile' do
+      allow(Process).to receive(:kill) do |_signal, pid|
+        launcher.send(:workers).delete(12) if pid == 11 # Reaped by the main thread.
+      end
+      expect { launcher.send(:signal_workers, 'KILL') }.not_to raise_error
+      expect(Process).to have_received(:kill).twice
+    end
+  end
+
+  describe '#kill' do
+    it 'finishes, exiting, when a worker exited just before it' do
+      allow(Process).to receive(:kill).with('KILL', 11).and_raise(Errno::ESRCH)
+      allow(Process).to receive(:kill).with('KILL', 12)
+      allow(Process).to receive(:waitpid2).and_raise(Errno::ECHILD)
+      expect { launcher.kill(1, 'after 30 second timeout') }.to raise_error(SystemExit) { |e| expect(e.status).to eq 1 }
+      expect(logger).to have_received(:warn).with(/exited forcefully after 30 second timeout/)
+    end
+
+    it 'finishes from the kill timer thread when a worker exited just before it' do
+      allow(Process).to receive(:kill).with('KILL', 11).and_raise(Errno::ESRCH)
+      allow(Process).to receive(:kill).with('KILL', 12)
+      allow(Process).to receive(:waitpid2).and_raise(Errno::ECHILD)
+      exited = Queue.new
+      allow(launcher).to receive(:exit) { |status| exited << status }
+      thread = launcher.send(:schedule_kill, 0.01)
+      thread.report_on_exception = false
+      expect(Timeout.timeout(2) { exited.pop }).to eq 1
+      expect { thread.join(2) }.not_to raise_error
+    end
+  end
+
   describe '#schedule_kill' do
     it 'kills the workers after the timeout' do
       expect(launcher).to receive(:kill).with(1, 'after 0.05 second timeout')

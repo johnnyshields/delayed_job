@@ -264,10 +264,16 @@ module Delayed
         end
       end
 
+      # Workers that already exited (not reaped yet, or reaped meanwhile by
+      # the run loop) are skipped: signalling them must not abort a kill.
       def signal_workers(signal)
-        workers.each do |pid, (worker_name, _)|
-          logger.info "Sent SIG#{signal} to worker #{worker_name}"
-          Process.kill(signal, pid)
+        workers.dup.each do |pid, (worker_name, _)|
+          begin
+            Process.kill(signal, pid)
+            logger.info "Sent SIG#{signal} to worker #{worker_name}"
+          rescue Errno::ESRCH
+            logger.info "Worker #{worker_name} (pid #{pid}) already exited; not sent SIG#{signal}"
+          end
         end
       end
 
