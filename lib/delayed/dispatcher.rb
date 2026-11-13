@@ -236,10 +236,15 @@ module Delayed
           report
         end
 
+        update_procline
+        # Fewer jobs than idle workers doesn't prove the queue ran dry: a
+        # batch reservation may have lost some to other processes. Poll
+        # again at once; only a poll that reserves nothing waits.
+        next if !reserved.empty? && reserved.size < idle.size
+
         # Wait for a worker to free up. If the queue ran dry, poll again
         # after sleep_delay so that newly enqueued jobs get picked up.
-        update_procline
-        wait_for_event(seen, poll_wait(reserved.size < idle.size))
+        wait_for_event(seen, poll_wait(!idle.empty? && reserved.empty?))
       end
       raise_thread_error
     end

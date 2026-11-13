@@ -50,6 +50,7 @@ Principles: no schema changes for existing backends; new hooks are optional with
     - `delayed_job` core, dispatcher fix (backend-agnostic, always on): a partial batch is not proof the queue is empty — a batch backend may lose candidates to other processes. When a poll reserves some but fewer than the idle threads, poll again immediately; sleep `sleep_delay` only after a poll that reserves nothing. Costs one extra query when a queue genuinely drains.
     - Specs against MongoDB: distinct jobs per thread name, contention between two processes never double-locks, losers are retried immediately, threshold fallback, flag off = current behaviour.
     - Benchmark fill time at 4, 16 and 32 threads, flag on vs off, local and with added latency; keep (and document a recommendation) only if it pays off.
+    - Implemented. Benchmark (median fill time, local MongoDB 8.0; off → on): 4 threads 4.3 → 4.0 ms, 16: 18.0 → 5.4 ms, 32: 33.3 → 6.9 ms; with +5 ms per round trip: 27.9 → 20.3, 115.8 → 21.9, 229.7 → 25.3 ms. Kept; recommended from 8 threads or with a remote database. Leftover locks under the idle workers' own names are reclaimed, as `reserve` does. The re-poll fix sends one extra query when a queue genuinely drains.
     - Postgres equivalent belongs in `delayed_job_active_record` (single `UPDATE … FROM (SELECT … LIMIT N FOR UPDATE SKIP LOCKED) RETURNING`, names by `row_number()`); out of scope here.
 
 ## Not adopting

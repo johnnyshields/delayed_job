@@ -308,7 +308,10 @@ When using threads:
 
 Backend authors may override `Delayed::Job.reserve_batch(workers, max_run_time)`
 to reserve jobs for several threads in one query; each returned job must be
-locked under the name of the worker it is paired with.
+locked under the name of the worker it is paired with. It may return fewer jobs
+than workers when it loses candidates to other processes: the worker then polls
+again at once, and only sleeps `sleep_delay` after a poll that reserves nothing.
+`delayed_job_mongoid` does this with `batch_reserve = true`.
 
 ### Exit On Complete Mode
 

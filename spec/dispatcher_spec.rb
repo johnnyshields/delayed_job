@@ -147,6 +147,54 @@ describe Delayed::Dispatcher do
       expect(reserves).to eq 3
     end
 
+    describe 'after a poll that reserved fewer jobs than idle threads' do
+      let(:dispatcher) { described_class.new(:threads => thread_count, :sleep_delay => 5) }
+
+      before { Delayed::Worker.exit_on_complete = false }
+
+      # Stubs reserve_batch to reserve the given numbers of jobs on
+      # successive polls (then none), recording when each poll happened.
+      def reserve_in_polls(*counts)
+        polls = []
+        allow(Delayed::Job).to receive(:reserve_batch).and_wrap_original do |m, workers|
+          polls << [Process.clock_gettime(Process::CLOCK_MONOTONIC), workers.size]
+          count = counts.shift || 0
+          yield polls if block_given?
+          m.call(workers.first(count))
+        end
+        polls
+      end
+
+      it 'polls again at once, as a batch reservation may have lost jobs to other processes' do
+        enqueue_jobs(3)
+        polls = reserve_in_polls(1, 2) { |p| dispatcher.stop if p.size == 3 }
+        Timeout.timeout(3) { dispatcher.run }
+
+        expect(polls.map(&:last)).to eq [4, 3, 1]
+        expect(polls[1].first - polls[0].first).to be < 1
+        expect(polls[2].first - polls[1].first).to be < 1
+      end
+
+      it 'waits sleep_delay after a poll that reserved nothing' do
+        polls = reserve_in_polls { |p| dispatcher.stop if p.size == 2 }
+        thread = Thread.new { dispatcher.run }
+        sleep 0.5
+        expect(polls.size).to eq 1
+        dispatcher.stop
+        Timeout.timeout(3) { thread.join }
+      end
+
+      it 'waits for a thread to free up once all threads are busy' do
+        enqueue_jobs(4)
+        polls = reserve_in_polls(4)
+        thread = Thread.new { dispatcher.run }
+        Timeout.timeout(3) { sleep 0.01 until Delayed::Job.all.empty? || polls.size > 1 }
+        dispatcher.stop
+        Timeout.timeout(3) { thread.join }
+        expect(polls.first.last).to eq 4
+      end
+    end
+
     it 'lets running jobs finish when stopped' do
       ConcurrencyJob.reset(0.3)
       enqueue_jobs(8)
