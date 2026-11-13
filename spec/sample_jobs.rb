@@ -23,7 +23,7 @@ module CountsRuns
     run_count.increment
   end
 
-  private
+private
 
   def run_count
     @run_count ||= Concurrent::AtomicFixnum.new

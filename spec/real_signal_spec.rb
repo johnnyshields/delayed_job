@@ -44,7 +44,10 @@ describe 'A dispatcher receiving real signals' do
   %w[TERM INT].each do |signal|
     it "stops on SIG#{signal}, letting the running job finish" do
       job = Delayed::Job.enqueue(GateJob.new(:a))
-      Thread.new { sleep 0.5; GateJob.release = true }
+      Thread.new do
+        sleep 0.5
+        GateJob.release = true
+      end
       run_and_signal(signal)
       expect(dispatcher).to be_stop
       expect(dispatcher).not_to be_quit

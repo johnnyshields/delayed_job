@@ -641,13 +641,13 @@ module Delayed
       raise_in_threads(error) if error.is_a?(SignalException)
       begin
         wait_for_threads
-      rescue SignalException => late
+      rescue SignalException => late_signal # rubocop:disable Naming/RescuedExceptionsVariableName -- `error` is the parameter
         # Raised while waiting: on JRuby, signal traps run on a thread of
         # their own, so the trap's stop can end the poll loop before the
         # signal exception reaches this thread (see #raise_signal). Raise
         # it in the running jobs too, as if it had arrived first; then
         # finish stopping and let it propagate.
-        raise_in_threads(late)
+        raise_in_threads(late_signal)
         wait_for_threads
         raise
       end
