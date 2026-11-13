@@ -231,6 +231,7 @@ module Delayed
       rescue StandardError => error
         logger.error "Could not recover the jobs of worker #{worker_name} (pid #{pid}): #{error.class}: #{error.message}. " \
                      'Their locks will expire after max_run_time.'
+        Delayed::Worker.thread_error(error, :context => 'Recovering jobs', :worker => worker_name, :pid => pid)
       ensure
         disconnect_backend
       end

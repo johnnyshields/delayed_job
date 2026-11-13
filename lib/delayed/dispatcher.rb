@@ -105,6 +105,8 @@ module Delayed
           begin
             poll_loop
           rescue Exception => error # rubocop:disable RescueException
+            # A worker thread's crash was reported by the thread itself.
+            thread_error(error, 'Dispatcher') unless stopping_error?(error)
             raise
           ensure
             stop_threads(error)
@@ -359,10 +361,16 @@ module Delayed
       end
     end
 
-    # Publishes a thread_error event: an error outside of a job's own
-    # handling (job errors are reported through the :error lifecycle).
+    # Reports an error outside of a job's own handling (see
+    # Worker.on_thread_error); job errors go through the :error lifecycle.
     def thread_error(error, context, worker_name = nil)
-      Delayed.instrument(:thread_error, :error => error, :context => context, :dispatcher => name, :worker => worker_name)
+      Worker.thread_error(error, :context => context, :dispatcher => name, :worker => worker_name)
+    end
+
+    # Errors that stop a dispatcher without being failures: signals and
+    # exits, and a worker thread's crash re-raised here.
+    def stopping_error?(error)
+      error.is_a?(SignalException) || error.is_a?(SystemExit) || error.equal?(@thread_error)
     end
 
     def process_payload

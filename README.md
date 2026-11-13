@@ -615,6 +615,22 @@ class ParanoidNewsletterJob < NewsletterJob
 end
 ```
 
+### Reporting errors outside of jobs
+
+Job errors go through the `:error` lifecycle callback and the job's `error`
+hook. Other errors - a failed reservation or lock heartbeat (e.g. the database
+is down), a crashed worker thread or dispatcher, a failing `failure` hook, the
+failed recovery of a dead worker process' jobs - are logged; to report them too:
+
+```ruby
+Delayed::Worker.on_thread_error = ->(error, info) do
+  Sentry.capture_exception(error, extra: info) # info: :context, :dispatcher, :worker, :job
+end
+```
+
+Errors raised by the handler are logged and ignored. Each such error also
+publishes a `thread_error.delayed_job` event (see below).
+
 ### Instrumentation
 
 Workers publish `ActiveSupport::Notifications` events named `<event>.delayed_job`:
@@ -627,7 +643,7 @@ Workers publish `ActiveSupport::Notifications` events named `<event>.delayed_job
 | `attempt_failed` | `:job`, `:worker`, `:error`, `:attempts` (including this one) |
 | `job_failed` | `:job`, `:worker`, `:error` - the job failed permanently |
 | `lock_lost` | `:job`, `:worker`, `:outcome` - the job's lock was taken over, so this run's outcome was discarded |
-| `thread_error` | `:error`, `:context`, `:dispatcher`, `:worker` - an error outside job handling (reservation, lock heartbeat, a crashed worker thread) |
+| `thread_error` | `:error`, `:context`, and `:dispatcher`, `:worker`, `:job` where known - an error outside job handling (see `on_thread_error` above) |
 | `interrupt` | `:dispatcher`, `:jobs`, `:reason` - running jobs interrupted by the shutdown timeout or `SIGQUIT` |
 | `locks_released` | `:workers`, `:count`, `:reason` (`shutdown` or `process exit`) |
 | `fork_replaced` | `:worker`, `:pid`, `:status`, `:new_pid` - the forking parent replaced a worker process that exited |

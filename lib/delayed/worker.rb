@@ -32,6 +32,20 @@ module Delayed
                    :read_ahead, :plugins, :destroy_failed_jobs, :exit_on_complete,
                    :default_log_level
 
+    # Called with errors raised outside of a job's own handling, which would
+    # otherwise only be logged: failed reservations, failed lock heartbeats,
+    # a worker thread or dispatcher crashing, failing failure hooks, failed
+    # recovery of a dead worker process' jobs. E.g. to report them to an
+    # error tracker:
+    #
+    #   Delayed::Worker.on_thread_error = ->(error, info) { Sentry.capture_exception(error, extra: info) }
+    #
+    # `info` holds :context (what failed) and, where known, :dispatcher,
+    # :worker and :job. A handler taking one argument gets only the error.
+    # Job errors are not reported here: see the :error lifecycle callback.
+    # Errors raised by the handler are logged and ignored.
+    cattr_accessor :on_thread_error
+
     # Seconds a stopping worker waits for running jobs to finish before
     # interrupting them (see Delayed::ShutdownInterrupt). nil, the default,
     # waits for as long as they take.
@@ -76,6 +90,7 @@ module Delayed
       self.shutdown_timeout  = DEFAULT_SHUTDOWN_TIMEOUT
       self.lock_heartbeat_interval = DEFAULT_LOCK_HEARTBEAT_INTERVAL
       self.lock_timeout      = DEFAULT_LOCK_TIMEOUT
+      self.on_thread_error   = nil
       @lifecycle             = nil
     end
 
@@ -190,6 +205,17 @@ module Delayed
         Delayed.instrument(:locks_released, :workers => [worker_name], :count => jobs.size, :reason => 'process exit', :error => error) unless jobs.empty?
         count + jobs.size
       end
+    end
+
+    # Reports an error raised outside of a job's own handling: publishes a
+    # thread_error event and calls Worker.on_thread_error. Never raises.
+    def self.thread_error(error, info = {})
+      Delayed.instrument(:thread_error, info.merge(:error => error))
+      handler = on_thread_error
+      return unless handler
+      handler.arity == 1 ? handler.call(error) : handler.call(error, info)
+    rescue StandardError => handler_error
+      logger.error("Error in Delayed::Worker.on_thread_error: #{handler_error.class}: #{handler_error.message}") if logger
     end
 
     # Whether lock heartbeats are enabled and supported by the backend.
@@ -330,6 +356,7 @@ module Delayed
         rescue => error
           say "Error when running failure callback: #{error}", 'error'
           say error.backtrace.join("\n"), 'error'
+          self.class.thread_error(error, :context => 'Failure hook', :worker => name, :job => job)
         ensure
           job.destroy_failed_jobs? ? owned_destroy(job) : owned_fail(job)
         end
