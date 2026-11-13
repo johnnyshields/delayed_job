@@ -1128,6 +1128,20 @@ describe Delayed::Launcher::Forking, 'traps inherited by a freshly forked child 
     expect(pending).to eq %w[TERM INT]
   end
 
+  it 'hand on a signal that arrives while the child replaces them' do
+    allow(Process).to receive(:pid).and_return(Process.pid + 1)
+    inherited = traps['TERM']
+    replaced = 0
+    allow(Signal).to receive(:trap) do |signal, *_args, &block|
+      # TERM is handled by the inherited trap just before the first
+      # capturing trap is installed.
+      inherited.call if (replaced += 1) == 1
+      traps[signal] = block
+    end
+    pending = launcher.send(:capture_signals)
+    expect(pending).to eq ['TERM']
+  end
+
   it 'record nothing before the launcher starts (no launcher pid yet)' do
     launcher.instance_variable_set(:@launcher_pid, nil)
     allow(Process).to receive(:kill)

@@ -161,9 +161,10 @@ module Delayed
       # has installed its own traps (see Delayed::Dispatcher#start), so a
       # signal arriving while the worker starts up isn't lost.
       def capture_signals
-        # Signals that arrived before this, while the inherited traps were
-        # still installed (see #child_signal).
-        pending = child_signals.dup
+        # Signals that arrived while the inherited traps were installed (see
+        # #child_signal) - the same list, not a copy: one can still arrive
+        # through an inherited trap until it is replaced below.
+        pending = child_signals
         %w[TERM INT QUIT].each do |signal|
           next unless Signal.list.key?(signal)
           # A signal can arrive twice: sent to the process group, and
