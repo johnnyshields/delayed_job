@@ -31,6 +31,10 @@ module Delayed
     # failures to reserve jobs.
     MAX_FAILED_RESERVATIONS = 10
 
+    # The lock heartbeat gives up after this many consecutive heartbeats
+    # ended by an error other than a StandardError (e.g. NoMemoryError).
+    MAX_HEARTBEAT_CRASHES = 5
+
     # Log throughput at least this often while the queue stays busy.
     REPORT_EVERY = 100
 
@@ -404,21 +408,35 @@ module Delayed
       @heartbeat.join
     end
 
+    # #heartbeat handles StandardErrors. Anything else (e.g. NoMemoryError)
+    # is reported and the heartbeat carries on at the next interval, so the
+    # locks of running jobs stay alive - until MAX_HEARTBEAT_CRASHES in a
+    # row, when it gives up: the locks then expire after lock_timeout, and
+    # other workers may take those jobs over. Signals and exits end it at once.
     def lock_heartbeat_loop(interval)
+      crashes = 0
       loop do
         @heartbeat_mutex.synchronize do
           @heartbeat_cond.wait(@heartbeat_mutex, interval) unless @heartbeat_stopped
         end
         break if @heartbeat_mutex.synchronize { @heartbeat_stopped }
-        heartbeat
+        begin
+          heartbeat
+          crashes = 0
+        rescue SignalException, SystemExit
+          raise
+        rescue Exception => error # rubocop:disable RescueException
+          crashes += 1
+          thread_error(error, 'Lock heartbeat')
+          if crashes >= MAX_HEARTBEAT_CRASHES
+            say "Lock heartbeat stopped after #{crashes} consecutive failures (last: #{error.class}: #{error.message}); " \
+                "the locks of running jobs are no longer refreshed and expire after lock_timeout (#{Worker.lock_timeout}s)", 'error'
+            break
+          end
+          say "Lock heartbeat failed with #{error.class}: #{error.message}; retrying in #{interval}s " \
+              "(#{crashes}/#{MAX_HEARTBEAT_CRASHES})", 'error'
+        end
       end
-    rescue Exception => error # rubocop:disable RescueException
-      # #heartbeat handles StandardErrors; anything else ends the heartbeat.
-      # Say so loudly: the locks of running jobs now expire after
-      # lock_timeout, and other workers may take those jobs over.
-      say "Lock heartbeat stopped by #{error.class}: #{error.message}; the locks of running jobs are no longer " \
-          "refreshed and expire after lock_timeout (#{Worker.lock_timeout}s)", 'error'
-      thread_error(error, 'Lock heartbeat')
     end
 
     # The workers whose locks the heartbeat refreshes: all of them, except
