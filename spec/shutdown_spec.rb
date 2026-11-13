@@ -617,6 +617,54 @@ describe 'Stopping a worker' do
     end
   end
 
+  describe 'signal traps where QUIT cannot be trapped (the JVM)' do
+    let(:traps) { {} }
+
+    before do
+      allow(dispatcher).to receive(:trap) do |signal, &block|
+        raise ArgumentError, "can't trap reserved signal: SIGQUIT" if signal == 'QUIT'
+        traps[signal] = block
+      end
+    end
+
+    it 'still traps TERM and INT' do
+      expect { dispatcher.send(:trap_signals) }.not_to raise_error
+      expect(traps.keys).to contain_exactly('TERM', 'INT')
+      traps['TERM'].call
+      expect(dispatcher).to be_stop
+    end
+
+    it 'warns that QUIT is not trapped' do
+      skip 'no SIGQUIT on this platform' unless Signal.list.key?('QUIT')
+      dispatcher.send(:trap_signals)
+      expect(log).to include(['warn', "WARNING: cannot trap SIGQUIT on this platform (can't trap reserved signal: " \
+                                      'SIGQUIT); use TERM or INT to stop'])
+    end
+
+    it 'does not warn when QUIT can be trapped' do
+      allow(dispatcher).to receive(:trap) { |signal, &block| traps[signal] = block }
+      dispatcher.send(:trap_signals)
+      expect(log.map(&:last).grep(/SIGQUIT/)).to be_empty
+    end
+
+    it 'does not try to trap QUIT where there is no such signal' do
+      allow(Signal).to receive(:list).and_return(Signal.list.reject { |name, _| name == 'QUIT' })
+      expect(dispatcher).not_to receive(:trap).with('QUIT')
+      dispatcher.send(:trap_signals)
+      expect(log.map(&:last).grep(/SIGQUIT/)).to be_empty
+    end
+
+    it 'still starts and runs' do
+      Delayed::Worker.exit_on_complete = true
+      job = Delayed::Job.enqueue(SimpleJob.new)
+      SimpleJob.runs = 0
+      Timeout.timeout(5) { dispatcher.start }
+      expect(Delayed::Job.all).not_to include(job)
+    ensure
+      Delayed::Worker.exit_on_complete = false
+    end
+  end
+
   describe 'Worker#initialize' do
     it 'sets the shutdown timeout' do
       Delayed::Worker.new(:shutdown_timeout => 12.5)
@@ -736,6 +784,51 @@ describe Delayed::Dispatcher, 'shutdown timeout message' do
   ensure
     thread.kill
     Delayed::Worker.reset
+  end
+end
+
+describe Delayed::Launcher::Forking, 'where QUIT cannot be trapped (the JVM)' do
+  subject(:launcher) { described_class.new(:processes => 2) }
+  let(:traps) { {} }
+  let(:logger) { instance_double(Logger, :info => nil, :warn => nil, :error => nil) }
+
+  before do
+    allow(launcher).to receive(:logger).and_return(logger)
+    allow(Signal).to receive(:trap) do |signal, *_args, &block|
+      raise ArgumentError, "can't trap reserved signal: SIGQUIT" if signal == 'QUIT'
+      traps[signal] = block
+    end
+  end
+
+  it 'still traps TERM and INT, and warns about QUIT' do
+    skip 'no SIGQUIT on this platform' unless Signal.list.key?('QUIT')
+    expect { launcher.send(:trap_signals) }.not_to raise_error
+    expect(traps.keys).to contain_exactly('TERM', 'INT')
+    expect(logger).to have_received(:warn).with("Cannot trap SIGQUIT on this platform (can't trap reserved signal: " \
+                                                 'SIGQUIT); use TERM or INT to stop')
+  end
+
+  it 'still forwards TERM to its workers' do
+    launcher.send(:workers).merge!(11 => ['delayed_job.0', {}])
+    launcher.send(:trap_signals)
+    expect(Process).to receive(:kill).with('TERM', 11)
+    traps['TERM'].call
+  end
+
+  it 'still records TERM and INT in a starting worker process' do
+    pending_signals = launcher.send(:capture_signals)
+    expect(traps.keys).to contain_exactly('TERM', 'INT')
+    traps['TERM'].call
+    expect(pending_signals).to eq ['TERM']
+  end
+
+  it 'can still launch' do
+    allow(launcher).to receive(:setup_logger)
+    allow(launcher).to receive(:prepare_for_fork)
+    allow(launcher).to receive(:setup_workers)
+    allow(launcher).to receive(:run_loop)
+    allow(Delayed::Worker).to receive(:before_fork)
+    expect { launcher.launch }.not_to raise_error
   end
 end
 

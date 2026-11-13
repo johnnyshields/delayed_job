@@ -234,11 +234,19 @@ module Delayed
         raise SignalException, 'INT' if first && Worker.raise_signal_exceptions && Worker.raise_signal_exceptions != :term
       end
 
+      trap_quit
+    end
+
+    # QUIT can't be trapped everywhere: the JVM (JRuby) reserves it for
+    # thread dumps. Without it, TERM and INT still stop the dispatcher.
+    def trap_quit
       return unless Signal.list.key?('QUIT')
       trap('QUIT') do
         Thread.new { say 'Received SIGQUIT: interrupting running jobs and exiting...' }
         quit
       end
+    rescue ArgumentError => error
+      say "WARNING: cannot trap SIGQUIT on this platform (#{error.message}); use TERM or INT to stop", 'warn'
     end
 
     # Acts on a signal received before the traps were installed, as its trap

@@ -88,6 +88,8 @@ module Delayed
 
       # Workers interrupt and release their running jobs, then exit; the
       # parent SIGKILLs any still running after SHUTDOWN_GRACE seconds.
+      # QUIT can't be trapped everywhere: the JVM (JRuby) reserves it for
+      # thread dumps. Without it, TERM and INT still stop the workers.
       def trap_quit_signal
         Signal.trap('QUIT') do
           Thread.new { logger.info('Received SIGQUIT. Interrupting running jobs...') }
@@ -95,6 +97,8 @@ module Delayed
           forward_signal('QUIT')
           schedule_kill(SHUTDOWN_GRACE)
         end
+      rescue ArgumentError => error
+        logger.warn "Cannot trap SIGQUIT on this platform (#{error.message}); use TERM or INT to stop"
       end
 
       # Signal-trap safe: doesn't log.
@@ -154,7 +158,11 @@ module Delayed
           next unless Signal.list.key?(signal)
           # A signal can arrive twice: sent to the process group, and
           # forwarded by the parent.
-          Signal.trap(signal) { pending << signal unless pending.include?(signal) }
+          begin
+            Signal.trap(signal) { pending << signal unless pending.include?(signal) }
+          rescue ArgumentError
+            nil # Can't be trapped here (QUIT on the JVM); the dispatcher warns.
+          end
         end
         pending
       end
