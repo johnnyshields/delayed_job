@@ -234,4 +234,57 @@ describe Delayed::Worker do
       expect(performances).to eq(1)
     end
   end
+
+  describe '.new while a job runs' do
+    before { SimpleJob.runs = 0 }
+
+    # A job that calls Delayed::Worker.new while it runs.
+    def enqueue_job_calling_new
+      payload = SimpleJob.new
+      def payload.perform
+        Delayed::Worker.new
+      end
+      Delayed::Job.enqueue(payload)
+    end
+
+    it 'raises, failing the job, instead of resetting every worker' do
+      worker = Delayed::Worker.new
+      allow(worker).to receive(:say)
+      Delayed::Worker.lifecycle.before(:perform) { |_w, _j| nil } # Would be lost by a reset.
+      lifecycle = Delayed::Worker.lifecycle
+      job = enqueue_job_calling_new
+      expect(worker.work_off(1)).to eq [0, 1]
+      expect(job.reload.last_error).to start_with 'Delayed::Worker.new was called from a running job'
+      expect(Delayed::Worker.lifecycle).to equal lifecycle
+    end
+
+    it 'raises on worker threads too' do
+      job = enqueue_job_calling_new
+      dispatcher = Delayed::Dispatcher.new(:threads => 2, :sleep_delay => 0.05)
+      allow(dispatcher).to receive(:say)
+      dispatcher.workers.each { |w| allow(w).to receive(:say) }
+      lifecycle = Delayed::Worker.lifecycle
+      Delayed::Worker.exit_on_complete = true
+      Timeout.timeout(5) { dispatcher.run }
+      expect(job.reload.last_error).to start_with 'Delayed::Worker.new was called from a running job'
+      expect(Delayed::Worker.lifecycle).to equal lifecycle
+    end
+
+    it 'is allowed again once the job is done, on the same thread' do
+      worker = Delayed::Worker.new
+      allow(worker).to receive(:say)
+      Delayed::Job.enqueue(SimpleJob.new)
+      worker.work_off(1)
+      expect(Thread.current[:delayed_job_running]).to be_falsey
+      expect { Delayed::Worker.new }.not_to raise_error
+    end
+
+    it 'is allowed after a job that raised' do
+      worker = Delayed::Worker.new
+      allow(worker).to receive(:say)
+      Delayed::Job.enqueue(ErrorJob.new)
+      worker.work_off(1)
+      expect { Delayed::Worker.new }.not_to raise_error
+    end
+  end
 end

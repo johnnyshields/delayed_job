@@ -244,17 +244,25 @@ module Delayed
         first = !stop?
         Thread.new { say 'Exiting...' } if first
         stop
-        raise SignalException, 'TERM' if first && Worker.raise_signal_exceptions
+        raise_signal('TERM') if first && Worker.raise_signal_exceptions
       end
 
       trap('INT') do
         first = !stop?
         Thread.new { say 'Exiting...' } if first
         stop
-        raise SignalException, 'INT' if first && Worker.raise_signal_exceptions && Worker.raise_signal_exceptions != :term
+        raise_signal('INT') if first && Worker.raise_signal_exceptions && Worker.raise_signal_exceptions != :term
       end
 
       trap_quit
+    end
+
+    # Raises the signal (see Worker.raise_signal_exceptions) in the main
+    # thread, where the process runs: CRuby runs traps there, but JRuby runs
+    # them on a thread of their own.
+    def raise_signal(signal)
+      raise SignalException, signal if Thread.current == Thread.main
+      Thread.main.raise(SignalException, signal)
     end
 
     # QUIT can't be trapped everywhere: the JVM (JRuby) reserves it for
@@ -476,7 +484,10 @@ module Delayed
         true
       end
       return unless first
-      Delayed.instrument(:job_stuck, :job => job, :worker => worker.name, :max_run_time => limit, :lock_timeout => Worker.lock_timeout)
+      # Published on the lock heartbeat thread: :job_name was worked out on
+      # the job's own thread. Read only plain fields (id, queue) of :job.
+      Delayed.instrument(:job_stuck, :job => job, :job_name => label, :worker => worker.name,
+                                     :max_run_time => limit, :lock_timeout => Worker.lock_timeout)
       worker.say(format('%s has run for longer than its max_run_time (%ds) without stopping; no longer ' \
                         'refreshing its lock, so another worker may run it after lock_timeout (%gs)',
                         label, limit, Worker.lock_timeout), 'error')

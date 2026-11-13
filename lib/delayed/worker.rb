@@ -286,6 +286,10 @@ module Delayed
     end
 
     def initialize(options = {})
+      if Thread.current[:delayed_job_running]
+        raise 'Delayed::Worker.new was called from a running job: it would reset the settings and ' \
+              'plugin callbacks of every worker in this process. To run jobs inline, use Delayed::Job#invoke_job.'
+      end
       @quiet = options.key?(:quiet) ? options[:quiet] : true
 
       [:min_priority, :max_priority, :sleep_delay, :read_ahead, :queues, :exit_on_complete, :shutdown_timeout,
@@ -411,9 +415,13 @@ module Delayed
     # Runs an already reserved job, including its :perform callbacks.
     # Returns true if the job succeeded, false if it failed.
     def perform_job(job)
+      running = Thread.current[:delayed_job_running]
+      Thread.current[:delayed_job_running] = true # See #initialize.
       Delayed.instrument(:perform, :job => job, :worker => name) do |payload|
         payload[:success] = self.class.lifecycle.run_callbacks(:perform, self, job) { run(job) }
       end
+    ensure
+      Thread.current[:delayed_job_running] = running
     end
 
   protected

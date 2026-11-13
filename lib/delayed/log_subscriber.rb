@@ -83,7 +83,8 @@ module Delayed
 
     def job_stuck(event)
       p = event.payload
-      log(:error) { "#{job(p[:job])} is stuck on #{p[:worker]}: running past its max_run_time (#{p[:max_run_time]}s)" }
+      # p[:job_name], not p[:job]: published on another thread than the job's.
+      log(:error) { "#{p[:job_name]} is stuck on #{p[:worker]}: running past its max_run_time (#{p[:max_run_time]}s)" }
     end
 
     if respond_to?(:subscribe_log_level)

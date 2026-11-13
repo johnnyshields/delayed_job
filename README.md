@@ -300,7 +300,16 @@ Plugin callbacks: `:loop` wraps each poll and yields the `Delayed::Dispatcher`;
 
 When using threads:
 
-* Your job code (and any plugins) must be thread-safe.
+* Your job code must be thread-safe, and so must code Delayed Job calls from
+  its threads: plugin callbacks, `ActiveSupport::Notifications` subscribers,
+  `Delayed::Worker.on_thread_error` and your logger (Ruby's `Logger` is).
+  Subscribers to `job_stuck` run on the lock heartbeat thread while the job
+  runs: read only plain fields (`id`, `queue`) of its `:job`, and use
+  `:job_name`.
+* Don't call `Delayed::Worker.new` from a job: it would reset the settings and
+  plugin callbacks of every worker in the process, so it raises.
+* On JRuby, signal traps run on a thread of their own: with
+  `raise_signal_exceptions`, the signal is raised in the main thread.
 * The database connection pool must hold at least one connection per thread
   plus one for the dispatcher, and one more with lock heartbeats (`pool` in
   `config/database.yml`). A warning is logged if it is too small.
@@ -727,7 +736,7 @@ Workers publish `ActiveSupport::Notifications` events named `<event>.delayed_job
 | `locks_released` | `:workers`, `:count`, `:reason` (`shutdown` or `process exit`) |
 | `child_exited` | `:worker`, `:pid`, `:status`, `:uptime` (seconds), `:respawn_in` (seconds until it is replaced; 0 at once, more after quick deaths - see "Worker processes that die"; nil if the launcher is stopping) - a forked child process exited |
 | `child_spawned` | `:worker`, `:pid`, `:replaces_pid` (the pid of the child process it replaces, or nil), `:delay` (seconds waited before forking it) - the forking parent forked a child process |
-| `job_stuck` | `:job`, `:worker`, `:max_run_time`, `:lock_timeout` - a job ran past its `max_run_time` without stopping (e.g. blocked in native code); with lock heartbeats, its lock is no longer refreshed and another worker may run it after `lock_timeout` |
+| `job_stuck` | `:job`, `:job_name`, `:worker`, `:max_run_time`, `:lock_timeout` - published on the lock heartbeat thread, so read only plain fields of `:job`; a job ran past its `max_run_time` without stopping (e.g. blocked in native code); with lock heartbeats, its lock is no longer refreshed and another worker may run it after `lock_timeout` |
 
 Timed events also carry `:exception` when their block raised. Events are
 published on worker threads; an exception raised by a subscriber is logged and

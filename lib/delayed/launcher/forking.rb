@@ -20,6 +20,7 @@ module Delayed
         pid_file = options.delete(:pid_file)
         super
         @pid_file = pid_file
+        @workers_lock = Mutex.new # Before any thread uses it (see #workers_lock).
       end
 
       def launch
@@ -72,7 +73,7 @@ module Delayed
         @killed = true
         message = " #{message}" if message
         logger.warn "Kill invoked#{message}"
-        killed = workers.dup
+        killed = workers_lock.synchronize { workers.dup }
         signal_workers('KILL')
         reap_killed_workers(killed)
         logger.warn "#{parent_name} exited forcefully#{message} - pid #{$$}"
@@ -121,7 +122,8 @@ module Delayed
 
       # Signal-trap safe: doesn't log.
       def forward_signal(signal)
-        workers.each_key do |pid|
+        # A copy: the kill timer thread may remove workers meanwhile.
+        workers.dup.each_key do |pid|
           Process.kill(signal, pid)
         rescue Errno::ESRCH
           nil
@@ -135,6 +137,11 @@ module Delayed
       def workers
         @workers ||= {}
       end
+
+      # Guards changes to #workers, made by the main thread (the run loop)
+      # and the kill timer thread (#kill). Signal traps only read a copy of
+      # its keys, as a Mutex can't be locked in a trap.
+      attr_reader :workers_lock
 
       def setup_single_worker
         set_process_name(get_name(process_identifier))
@@ -152,7 +159,7 @@ module Delayed
         thread_msg = " threads=#{threads(options)}" if threads(options) > 1
         logger.info "Child process #{worker_name} (pid #{worker_pid}) started#{queue_msg}#{thread_msg}"
 
-        workers[worker_pid] = [worker_name, options]
+        workers_lock.synchronize { workers[worker_pid] = [worker_name, options] }
         started_at[worker_pid] = monotonic_now
         @worker_index += 1
         Delayed.instrument(:child_spawned, :worker => worker_name, :pid => worker_pid, :replaces_pid => replaces_pid, :delay => delay)
@@ -259,8 +266,8 @@ module Delayed
       # Recovers the jobs of a child process that exited, then replaces it
       # unless the launcher is stopping.
       def handle_exit(worker_pid, child_status)
-        return unless workers.key?(worker_pid)
-        worker_name, options = workers.delete(worker_pid)
+        worker_name, options = workers_lock.synchronize { workers.delete(worker_pid) }
+        return unless worker_name
         logger.info "Child process #{worker_name} (pid #{worker_pid}) exited: #{child_status}"
         recover_jobs_of_worker(worker_name, worker_pid, options, child_status)
         publish_child_exited(worker_name, worker_pid, child_status)
@@ -367,7 +374,7 @@ module Delayed
           rescue Errno::ECHILD
             next
           end
-          workers.delete(pid)
+          workers_lock.synchronize { workers.delete(pid) }
           recover_jobs_of_worker(worker_name, pid, options, status)
         end
       end
