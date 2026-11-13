@@ -16,6 +16,8 @@ worker_settings = options.delete(:worker) || {}
 startup_delay = options.delete(:startup_delay)
 # Attaches Delayed::LogSubscriber, so specs can check the events.
 log_events = options.delete(:log_events)
+# The first N forked worker processes crash (exit 3) as they start up.
+crash_on_start = options.delete(:crash_on_start)
 
 Delayed::Backend::SqliteFile::Job.connect(db_path)
 Delayed::Worker.backend = Delayed::Backend::SqliteFile::Job
@@ -29,6 +31,17 @@ if startup_delay
     define_method(:after_fork) do
       puts "worker #{Process.pid} starting up"
       sleep startup_delay
+      super()
+    end
+  end)
+end
+
+if crash_on_start
+  starts = "#{db_path}.starts"
+  Delayed::Backend::SqliteFile::Job.singleton_class.prepend(Module.new do
+    define_method(:after_fork) do
+      File.open(starts, 'a') { |f| f.puts Process.pid }
+      exit!(3) if File.readlines(starts).size <= crash_on_start
       super()
     end
   end)

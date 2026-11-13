@@ -104,6 +104,40 @@ describe 'A worker process dying while running jobs', :processes do
     end
   end
 
+  context 'when it keeps dying as it starts up' do
+    it 'is replaced after a growing delay, until one starts' do
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      pid, reader = spawn_launcher(:processes => 1, :pools => [[[], 1]], :crash_on_start => 3, :worker => worker_settings)
+      output = +''
+      wait_for(20) { (output << read_available(reader)) =~ /Child process delayed_job\.3 \(pid \d+\) started/ }
+      job = enqueue_process_job(ProcessJobs::SleepJob.new('after the crash loop', 0))
+      wait_for { reload_job(job).nil? }
+      Process.kill('TERM', -pid)
+      status, rest = wait_for_launcher(pid, reader)
+      output << rest
+      elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+
+      expect(status).to be_success, output
+      waits = output.scan(/died [\d.]+s after starting \((\d) time\(s\) in a row\); waiting (\d+)s before replacing it/)
+      expect(waits).to eq [%w[1 1], %w[2 2], %w[3 4]]
+      expect(elapsed).to be >= 7 # 1 + 2 + 4 seconds of waiting.
+      expect(ProcessHelpers::Run.where(:key => 'after the crash loop').count).to eq 1
+    end
+
+    it 'stops waiting when the launcher is stopped' do
+      pid, reader = spawn_launcher(:processes => 1, :pools => [[[], 1]], :crash_on_start => 100, :worker => worker_settings)
+      output = +''
+      wait_for(20) { (output << read_available(reader)) =~ /waiting 4s before replacing it/ }
+      stopped_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      Process.kill('TERM', pid)
+      status, rest = wait_for_launcher(pid, reader)
+      output << rest
+      expect(status).to be_success, output
+      expect(Process.clock_gettime(Process::CLOCK_MONOTONIC) - stopped_at).to be < 3
+      expect(output).not_to match(/Child process delayed_job\.3 \(pid \d+\) started/)
+    end
+  end
+
   context 'with several threads per worker process' do
     it 'recovers the jobs of every thread of the dead worker' do
       jobs = Array.new(3) { |i| enqueue_process_job(ProcessJobs::SleepJob.new("slow#{i}", 30)) }

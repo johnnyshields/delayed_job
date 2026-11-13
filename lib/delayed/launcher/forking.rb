@@ -6,6 +6,14 @@ module Delayed
       # and release their jobs (see Delayed::Dispatcher::INTERRUPT_GRACE).
       SHUTDOWN_GRACE = Delayed::Dispatcher::INTERRUPT_GRACE + 5
 
+      # A child process that dies within this many seconds of starting (e.g.
+      # running out of memory as it boots) is replaced only after a delay,
+      # which doubles with each such death in a row - 1s, 2s, 4s... up to
+      # RESPAWN_MAX_DELAY - so a crash loop doesn't spin. A replacement that
+      # stays up longer resets it.
+      RESPAWN_MIN_UPTIME = 10
+      RESPAWN_MAX_DELAY = 60
+
       # options[:pid_file]: true writes a pidfile named after this process
       # in options[:pid_dir]; a String is the pidfile's path. Off by default.
       def initialize(options)
@@ -131,6 +139,7 @@ module Delayed
         logger.info "Child process #{worker_name} (pid #{worker_pid}) started#{queue_msg}#{thread_msg}"
 
         workers[worker_pid] = [worker_name, options]
+        started_at[worker_pid] = monotonic_now
         @worker_index += 1
         worker_pid
       end
@@ -199,11 +208,62 @@ module Delayed
 
           break if @stopped && workers.empty?
           next if @stopped
-          new_pid = add_worker(options)
-          Delayed.instrument(:fork_replaced, :worker => worker_name, :pid => worker_pid, :status => child_status, :new_pid => new_pid)
+          replace_worker(worker_name, worker_pid, options, child_status)
+          break if @stopped && workers.empty? # Stopped while waiting to replace it.
         end
       rescue Errno::ECHILD
         logger.warn 'No child processes found'
+      end
+
+      # Forks a replacement for a child process that exited - after a delay
+      # if it died soon after starting (see RESPAWN_MIN_UPTIME), unless the
+      # launcher is stopped meanwhile. Returns the new pid, or nil.
+      def replace_worker(worker_name, pid, options, status)
+        uptime = monotonic_now - started_at.delete(pid).to_f
+        previous = respawn_streaks.delete(pid).to_i
+        streak = uptime < RESPAWN_MIN_UPTIME ? previous + 1 : 0
+        delay = respawn_delay(streak)
+        if delay
+          logger.warn format('Child process %<name>s (pid %<pid>d) died %<uptime>.1fs after starting (%<streak>d time(s) in a row); ' \
+                             'waiting %<delay>ds before replacing it',
+                             :name => worker_name, :pid => pid, :uptime => uptime, :streak => streak, :delay => delay)
+          return unless wait_unless_stopped(delay)
+        end
+        new_pid = add_worker(options)
+        respawn_streaks[new_pid] = streak
+        Delayed.instrument(:fork_replaced, :worker => worker_name, :pid => pid, :status => status, :new_pid => new_pid, :delay => delay || 0)
+        new_pid
+      end
+
+      # Seconds to wait before replacing a child process after `streak`
+      # quick deaths in a row, or nil for none.
+      def respawn_delay(streak)
+        return if streak.zero?
+        [2**(streak - 1), RESPAWN_MAX_DELAY].min
+      end
+
+      # Sleeps for `seconds`, or until the launcher is stopped. Returns
+      # whether it wasn't stopped.
+      def wait_unless_stopped(seconds)
+        deadline = monotonic_now + seconds
+        until @stopped
+          remaining = deadline - monotonic_now
+          return true if remaining <= 0
+          sleep([remaining, 0.1].min)
+        end
+        false
+      end
+
+      def started_at
+        @started_at ||= {}
+      end
+
+      def respawn_streaks
+        @respawn_streaks ||= {}
+      end
+
+      def monotonic_now
+        Process.clock_gettime(Process::CLOCK_MONOTONIC)
       end
 
       # Waits for the given SIGKILLed workers and recovers their jobs. The main

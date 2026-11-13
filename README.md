@@ -482,7 +482,11 @@ for any failed attempt.
 
 The dead worker process is then replaced, as is one that exits for any other
 reason; the other worker processes carry on. (Delayed Job used to shut down
-every worker process when one was `SIGKILL`ed.)
+every worker process when one was `SIGKILL`ed.) A child process that dies
+within 10 seconds of starting - e.g. running out of memory as it boots - is
+replaced only after a delay that doubles with each such death in a row (1s,
+2s, 4s, ... up to 60s), so a crash loop doesn't spin; a replacement that stays
+up resets it.
 
 If the database can't be reached at that moment, the jobs' locks expire after
 `max_run_time` as before. Backends support this by implementing
@@ -709,7 +713,7 @@ Workers publish `ActiveSupport::Notifications` events named `<event>.delayed_job
 | `thread_error` | `:error`, `:context`, and `:dispatcher`, `:worker`, `:job` where known - an error outside job handling (see `on_thread_error` above) |
 | `interrupt` | `:dispatcher`, `:jobs`, `:reason` - running jobs interrupted by the shutdown timeout or `SIGQUIT` |
 | `locks_released` | `:workers`, `:count`, `:reason` (`shutdown` or `process exit`) |
-| `fork_replaced` | `:worker`, `:pid`, `:status`, `:new_pid` - the forking parent replaced a worker process that exited |
+| `fork_replaced` | `:worker`, `:pid`, `:status`, `:new_pid`, `:delay` - the forking parent replaced a child process that exited, after waiting `:delay` seconds (see "Worker processes that die") |
 
 Timed events also carry `:exception` when their block raised. Events are
 published on worker threads; an exception raised by a subscriber is logged and

@@ -423,7 +423,7 @@ describe 'Instrumentation' do
       it 'publishes fork_replaced when it replaces a worker process that exited' do
         allow(launcher).to receive(:fork_worker).and_return(123)
         launcher.send(:run_loop)
-        expect(payload(:fork_replaced)).to eq(:worker => 'delayed_job.1', :pid => 99, :status => crashed, :new_pid => 123)
+        expect(payload(:fork_replaced)).to eq(:worker => 'delayed_job.1', :pid => 99, :status => crashed, :new_pid => 123, :delay => 0)
       end
 
       it 'does not publish fork_replaced while stopping' do
