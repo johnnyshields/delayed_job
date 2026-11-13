@@ -143,7 +143,7 @@ describe Delayed::Worker do
       expect(Delayed::Job).to receive(:reserve).exactly(10).times.and_raise(Exception)
       worker = Delayed::Worker.new
       9.times { worker.work_off }
-      expect(lambda { worker.work_off }).to raise_exception Delayed::FatalBackendError
+      expect { worker.work_off }.to raise_exception Delayed::FatalBackendError
     end
 
     it 'counts a job that fails to deserialize as failed and keeps working' do
