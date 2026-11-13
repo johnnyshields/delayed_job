@@ -209,6 +209,145 @@ describe 'Stopping a worker' do
     end
   end
 
+  describe 'interrupts arriving outside of a job' do
+    let(:reported) { [] }
+
+    # Runs for 0.2s, recording whether it finished or was interrupted.
+    class NapJob
+      cattr_accessor :outcomes
+      self.outcomes = Queue.new
+
+      def perform
+        sleep 0.2
+        self.class.outcomes << :finished
+      rescue Exception # rubocop:disable RescueException
+        self.class.outcomes << :interrupted
+        raise
+      end
+    end
+
+    before do
+      NapJob.outcomes = Queue.new
+      SimpleJob.runs = 0
+      Delayed::Worker.on_thread_error = ->(error, info) { reported << [error, info] }
+    end
+
+    def worker_threads
+      dispatcher.instance_variable_get(:@threads)
+    end
+
+    def start
+      @thread = Thread.new { dispatcher.run }
+      Timeout.timeout(5) { sleep 0.01 until worker_threads.size == 2 && worker_threads.all? { |t| t.status == 'sleep' } }
+      @thread
+    end
+
+    def stop_and_join
+      dispatcher.stop
+      Timeout.timeout(5) { @thread.join }
+    end
+
+    after { stop_and_join if @thread && @thread.alive? }
+
+    [Delayed::ShutdownInterrupt.new('late'), SignalException.new('TERM')].each do |interrupt|
+      it "ignores a #{interrupt.class} raised into an idle worker thread" do
+        start
+        worker_threads.each { |t| t.raise(interrupt.class, interrupt.message) }
+        sleep 0.1
+        expect(worker_threads).to all(be_alive)
+
+        job = Delayed::Job.enqueue(SimpleJob.new)
+        Timeout.timeout(5) { sleep 0.01 while Delayed::Job.all.include?(job) }
+        stop_and_join
+        expect(reported).to be_empty
+        expect(dispatcher.instance_variable_get(:@thread_error)).to be_nil
+      end
+
+      it "does not carry a #{interrupt.class} that arrived between jobs into the next job" do
+        start
+        worker_threads.each { |t| t.raise(interrupt.class, interrupt.message) }
+        sleep 0.05
+        jobs = Array.new(2) { Delayed::Job.enqueue(NapJob.new) }
+        outcomes = Timeout.timeout(5) { Array.new(2) { NapJob.outcomes.pop } }
+        expect(outcomes).to eq [:finished, :finished]
+        Timeout.timeout(5) { sleep 0.01 until (Delayed::Job.all & jobs).empty? }
+        expect(reported).to be_empty
+      end
+    end
+
+    it 'does not interrupt a thread recording the job it just finished' do
+      dispatcher.workers.each { |w| allow(w).to receive(:say) }
+      recording = Queue.new
+      gate = Queue.new
+      allow(dispatcher).to receive(:job_finished).and_wrap_original do |m, *args|
+        recording << Thread.current
+        gate.pop
+        m.call(*args)
+      end
+      job = Delayed::Job.enqueue(SimpleJob.new)
+      start
+      thread = Timeout.timeout(5) { recording.pop }
+      thread.raise(Delayed::ShutdownInterrupt, 'late')
+      sleep 0.05
+      gate << true
+      Timeout.timeout(5) { sleep 0.01 while dispatcher.send(:in_flight) > 0 }
+
+      expect(thread).to be_alive
+      expect(Delayed::Job.all).not_to include(job)
+      expect(SimpleJob.runs).to eq 1
+      expect(dispatcher.send(:snapshot).first).to match_array dispatcher.workers # Both idle again.
+      allow(dispatcher).to receive(:job_finished).and_call_original
+      stop_and_join
+      expect(reported).to be_empty
+      expect(log.map(&:last).grep(/interrupted by shutdown/)).to be_empty
+    end
+
+    it "lets the :execute callbacks (e.g. ClearLocks) finish when interrupted" do
+      dispatcher # Worker.new resets the lifecycle.
+      exiting = Queue.new
+      gate = Queue.new
+      cleared = Queue.new
+      Delayed::Worker.lifecycle.after(:execute) do |worker|
+        exiting << Thread.current
+        gate.pop
+        cleared << worker.name
+      end
+      start
+      dispatcher.stop
+      threads = Timeout.timeout(5) { Array.new(2) { exiting.pop } }
+      threads.each { |t| t.raise(Delayed::ShutdownInterrupt, 'late') }
+      sleep 0.05
+      2.times { gate << true }
+      Timeout.timeout(5) { @thread.join }
+
+      expect(Array.new(cleared.size) { cleared.pop }).to match_array dispatcher.workers.map(&:name)
+      expect(reported).to be_empty
+      expect(dispatcher.instance_variable_get(:@thread_error)).to be_nil
+    end
+
+    it 'still interrupts a running job, and lets the thread release it' do
+      Delayed::Worker.shutdown_timeout = 0
+      job, = enqueue(GateJob.new(:a))
+      thread = run_until_started(1)
+      dispatcher.stop
+      Timeout.timeout(5) { thread.join }
+      expect(GateJob.interrupted).to eq [:a]
+      expect(job.reload.locked_by).to be_nil
+      expect(reported).to be_empty
+    end
+
+    it 'still interrupts a running job with a signal (Worker.raise_signal_exceptions)' do
+      dispatcher.workers.each { |w| allow(w).to receive(:say) }
+      enqueue(GateJob.new(:a))
+      thread = run_until_started(1)
+      busy = dispatcher.instance_variable_get(:@running).keys.first
+      busy.raise(SignalException, 'TERM')
+      Timeout.timeout(5) { sleep 0.01 until GateJob.interrupted == [:a] }
+      dispatcher.stop
+      Timeout.timeout(5) { thread.join }
+    end
+  end
+
   describe '#quit' do
     it 'interrupts running jobs at once, even without a shutdown timeout' do
       jobs = enqueue(GateJob.new(:a))

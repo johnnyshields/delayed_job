@@ -21,6 +21,12 @@ module Delayed
 
     STOP = Object.new.freeze
 
+    # Exceptions raised into worker threads to interrupt their jobs on
+    # shutdown (see #work).
+    SHUTDOWN_INTERRUPTS = [ShutdownInterrupt, SignalException].freeze
+    DEFER_SHUTDOWN_INTERRUPTS = Hash[SHUTDOWN_INTERRUPTS.map { |klass| [klass, :never] }].freeze
+    ALLOW_SHUTDOWN_INTERRUPTS = Hash[SHUTDOWN_INTERRUPTS.map { |klass| [klass, :immediate] }].freeze
+
     # Give up (raising FatalBackendError) after this many consecutive
     # failures to reserve jobs.
     MAX_FAILED_RESERVATIONS = 10
@@ -366,25 +372,58 @@ module Delayed
     end
 
     # Body of each worker thread: runs the jobs it is handed until told to stop.
+    #
+    # Shutdown raises Delayed::ShutdownInterrupt (and, with
+    # Worker.raise_signal_exceptions, the signal) into the threads running
+    # jobs. A thread may finish its job just before one arrives, so they are
+    # only let in while a job runs: elsewhere, they would interrupt the
+    # thread's bookkeeping or its :execute callbacks (e.g. ClearLocks) and
+    # crash it.
     def work(worker, inbox)
-      Worker.lifecycle.run_callbacks(:execute, worker) do
-        begin
-          until (job = inbox.pop).equal?(STOP)
-            synchronize { @running[Thread.current] = job }
-            result = with_reloader { worker.perform_job(job) }
-            synchronize { @running.delete(Thread.current) }
-            job_finished(worker, result)
+      Thread.handle_interrupt(DEFER_SHUTDOWN_INTERRUPTS) do
+        Worker.lifecycle.run_callbacks(:execute, worker) do
+          begin
+            until (job = inbox.pop).equal?(STOP)
+              discard_stale_interrupts
+              synchronize { @running[Thread.current] = job }
+              result = with_reloader { interruptible { worker.perform_job(job) } }
+              synchronize { @running.delete(Thread.current) }
+              job_finished(worker, result)
+            end
+          rescue ShutdownInterrupt
+            release_interrupted(worker, synchronize { @running.delete(Thread.current) })
           end
-        rescue ShutdownInterrupt
-          release_interrupted(worker, synchronize { @running.delete(Thread.current) })
         end
       end
+    rescue *SHUTDOWN_INTERRUPTS
+      # Deferred while the thread was exiting and delivered as it left the
+      # block above (no job left to interrupt), or a signal raised into a
+      # job (see #stop_threads) that escaped it: the process is stopping
+      # anyway, so this is no thread crash to report.
+      synchronize { @running.delete(Thread.current) }
     rescue Exception => error # rubocop:disable RescueException
       thread_error(error, 'Worker thread', worker.name)
       synchronize do
         @running.delete(Thread.current)
         @thread_error ||= error
         signal_event
+      end
+    end
+
+    # Lets shutdown interrupts (deferred in worker threads, see #work) in.
+    def interruptible(&block)
+      Thread.handle_interrupt(ALLOW_SHUTDOWN_INTERRUPTS, &block)
+    end
+
+    # Drops shutdown interrupts that arrived after the previous job finished:
+    # they were meant for that job, not for the next one.
+    def discard_stale_interrupts
+      while SHUTDOWN_INTERRUPTS.any? { |klass| Thread.pending_interrupt?(klass) }
+        begin
+          interruptible { Thread.pass }
+        rescue ShutdownInterrupt, SignalException
+          nil
+        end
       end
     end
 
