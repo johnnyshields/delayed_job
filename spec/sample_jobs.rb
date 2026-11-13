@@ -202,6 +202,13 @@ end
 # A job that runs until told to finish, recording what happened to it.
 class GateJob
   cattr_accessor :started, :finished, :interrupted, :release
+  # Jobs record their outcomes from parallel threads (JRuby).
+  MUTEX = Mutex.new
+
+  def self.record(list, key)
+    MUTEX.synchronize { list << key }
+  end
+
   def self.reset
     self.started = Queue.new
     self.finished = []
@@ -233,11 +240,11 @@ class GateJob
       rescue StandardError
         raise 'a StandardError rescue must not catch the interrupt'
       rescue Exception # rubocop:disable Lint/RescueException
-        self.class.interrupted << key
+        self.class.record(self.class.interrupted, key)
         raise
       end
     end
-    self.class.finished << key
+    self.class.record(self.class.finished, key)
   end
 end
 
