@@ -47,7 +47,7 @@ describe 'Exiting on complete, with jobs that enqueue jobs' do
       srand(seed)
       25.times do |round|
         ChainJob.runs = []
-        chains = Array.new(3) { |c| [c, 2 + rand(5)] }
+        chains = Array.new(3) { |c| [c, rand(2..6)] }
         chains.each { |c, length| Delayed::Job.enqueue(ChainJob.new(c, 0, length, 0.01)) }
         Timeout.timeout(20) { dispatcher(threads).run }
         expected = chains.flat_map { |c, length| Array.new(length) { |link| [c, link] } }
