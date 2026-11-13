@@ -92,7 +92,7 @@ describe 'Worker processes whose parent goes away' do
         timeouts
       end
 
-      it 'waits sleep_delay when the queue ran dry, in one wait when not supervised' do
+      it 'waits sleep_delay when the queue ran dry, with no parent checks when not supervised' do
         Delayed::Worker.sleep_delay = 0.2
         d = dispatcher
         timeouts = waits_of(d)
@@ -100,8 +100,10 @@ describe 'Worker processes whose parent goes away' do
         took = timed { d.send(:wait_before_next_poll, seen, true) }
         expect(took).to be >= 0.19 # Never polls early.
         expect(took).to be < 2
-        expect(timeouts.size).to eq 1
-        expect(timeouts.first).to be_within(0.05).of(0.2)
+        expect(timeouts.first).to be_within(0.05).of(0.2) # The whole delay at once,
+        # though a wait can wake a little early (JRuby), and waits out the rest.
+        expect(timeouts.size).to be <= 3
+        expect(timeouts.drop(1)).to all(be < 0.05)
       end
 
       it 'waits for an event (no timeout) while workers are busy, when not supervised' do
@@ -152,7 +154,7 @@ describe 'Worker processes whose parent goes away' do
         _, seen = d.send(:snapshot)
         Thread.new do
           sleep 0.1
-          allow(Process).to receive(:ppid).and_return(1)
+          d.supervisor_pid = Process.ppid + 1 # The parent goes away (not stubbing Process.ppid, which d calls meanwhile).
         end
         expect(timed { Timeout.timeout(5) { d.send(:wait_before_next_poll, seen, true) } }).to be < 1
         expect(d).to be_stop
@@ -270,13 +272,15 @@ describe 'Worker processes whose parent goes away' do
         d = dispatcher(:supervisor_pid => parent, :sleep_delay => 30)
         thread = Thread.new { d.run }
         sleep 0.1 until ConcurrencyJob.running == 1
-        allow(Process).to receive(:ppid).and_return(1)
+        # The parent goes away. (Not by stubbing Process.ppid: the
+        # dispatcher thread may call it while the stub is put in place.)
+        d.supervisor_pid = parent + 1
         expect(Timeout.timeout(5) { thread.join }).to eq thread
 
         expect(ConcurrencyJob.runs[1]).to eq 1
         expect(ConcurrencyJob.running).to eq 0
         expect(Delayed::Job.count).to eq 0
-        expect(messages.map(&:last)).to include "Parent process #{parent} is gone; stopping"
+        expect(messages.map(&:last)).to include "Parent process #{parent + 1} is gone; stopping"
       end
 
       it 'does not start when its parent is already gone' do
@@ -313,6 +317,30 @@ describe 'Worker processes whose parent goes away' do
       allow(Delayed::Worker).to receive(:before_fork)
       launcher.launch
       expect(launcher.instance_variable_get(:@supervisor_pid)).to eq Process.pid
+    end
+  end
+
+  describe Delayed::Launcher::Forking, 'on a platform without fork', :fork_guard do
+    before { allow_any_instance_of(described_class).to receive(:fork_available?).and_return(false) }
+
+    it 'is detected' do
+      allow_any_instance_of(described_class).to receive(:fork_available?).and_call_original
+      expect(described_class.new({}).fork_available?).to eq Process.respond_to?(:fork)
+    end
+
+    it 'refuses to fork worker processes, with a clear message' do
+      launcher = described_class.new(:processes => 2)
+      allow(launcher).to receive(:setup_logger)
+      expect(launcher).not_to receive(:setup_workers)
+      expect { launcher.launch }.to raise_error(NotImplementedError, /needs fork.*--threads/)
+    end
+
+    it 'still runs a single worker process, in this process' do
+      launcher = described_class.new(:threads => 4)
+      allow(launcher).to receive(:setup_logger)
+      allow(launcher).to receive(:trap_signals)
+      expect(Delayed::Dispatcher).to receive(:new).and_return(double(:start => nil))
+      expect { launcher.launch }.not_to raise_error
     end
   end
 

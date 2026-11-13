@@ -146,7 +146,7 @@ describe Delayed::Pidfile do
     end
   end
 
-  describe 'processes started by jobs' do
+  describe 'processes started by jobs', :fork do
     # A launcher (in another process) whose "job" starts a child process
     # with `start_child`, then exits, leaving the child running.
     def launcher_leaving_child(start_child)
@@ -244,7 +244,7 @@ describe Delayed::Pidfile do
 
   # Worker.after_fork reopens the files open in the parent (log files); it
   # must not reopen the pidfile, which would drop the lock in the worker.
-  describe 'Worker.before_fork and .after_fork' do
+  describe 'Worker.before_fork and .after_fork', :fork do
     around do |example|
       Delayed::Worker.instance_variable_set(:@files_to_reopen, nil)
       example.run

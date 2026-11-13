@@ -137,12 +137,13 @@ describe Delayed::Dispatcher do
 
     it 'locks each job under the name of the thread that runs it' do
       enqueue_jobs(8)
-      lockers = []
+      locked_by = Queue.new # Thread-safe: worker threads run in parallel (JRuby).
       allow_any_instance_of(Delayed::Worker).to receive(:perform_job).and_wrap_original do |m, job|
-        lockers << job.locked_by
+        locked_by << job.locked_by
         m.call(job)
       end
       Timeout.timeout(10) { dispatcher.run }
+      lockers = Array.new(locked_by.size) { locked_by.pop }
 
       expect(lockers.size).to eq 8
       expect(lockers - dispatcher.workers.map(&:name)).to be_empty
@@ -418,13 +419,14 @@ describe Delayed::Dispatcher do
 
     it 'runs :execute callbacks for every thread and clears their locks' do
       dispatcher # Worker.new resets the lifecycle, so build it first
-      executed = []
+      names = Queue.new # Thread-safe: the callbacks run on parallel threads (JRuby).
       expect(Delayed::Job).to receive(:clear_locks!).exactly(thread_count).times
       Delayed::Worker.lifecycle.around(:execute) do |w, &block|
-        executed << w.name
+        names << w.name
         block.call(w)
       end
       Timeout.timeout(5) { dispatcher.run }
+      executed = Array.new(names.size) { names.pop }
       expect(executed).to match_array(dispatcher.workers.map(&:name))
     end
   end

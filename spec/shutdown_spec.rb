@@ -1171,7 +1171,7 @@ describe 'Signals received while a worker process starts up' do
       Process.kill('INT', Process.pid)
       Timeout.timeout(2) { sleep 0.01 until pending.size == 2 }
 
-      expect(pending).to eq %w[TERM INT]
+      expect(pending).to contain_exactly('TERM', 'INT') # Their order isn't guaranteed (JRuby).
       expect(parent_trap_ran).to be false
     end
 
@@ -1186,6 +1186,7 @@ describe 'Signals received while a worker process starts up' do
 
     it 'records QUIT' do
       skip 'no SIGQUIT on this platform' unless Signal.list.key?('QUIT')
+      skip 'the JVM reserves SIGQUIT' if RUBY_ENGINE == 'jruby'
       pending = launcher.send(:capture_signals)
       Process.kill('QUIT', Process.pid)
       Timeout.timeout(2) { sleep 0.01 until pending.any? }

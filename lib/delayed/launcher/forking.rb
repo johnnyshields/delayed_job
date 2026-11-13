@@ -28,6 +28,10 @@ module Delayed
         setup_logger
         setup_pidfile
         begin
+          if forking? && !fork_available?
+            raise NotImplementedError, 'running several worker processes needs fork, which this platform (e.g. JRuby) ' \
+                                       'lacks: run one process per launcher, with --threads'
+          end
           @launcher_pid = Process.pid
           trap_signals
           if forking?
@@ -41,6 +45,11 @@ module Delayed
         ensure
           delete_pidfile
         end
+      end
+
+      # Whether this platform can fork (JRuby can't).
+      def fork_available?
+        Process.respond_to?(:fork)
       end
 
       # The pidfile's path, or nil without the :pid_file option.

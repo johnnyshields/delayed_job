@@ -96,6 +96,27 @@ RSpec.configure do |config|
     Delayed::Worker.reset
   end
 
+  # Specs that fork (real worker processes, children of jobs) can't run where
+  # there is no fork, e.g. JRuby.
+  config.define_derived_metadata(:file_path => %r{/spec/processes/}) { |meta| meta[:fork] = true }
+  config.filter_run_excluding :fork => true unless Process.respond_to?(:fork)
+  # Launcher specs stub out the fork itself: let them run the forking paths
+  # there too (the guard has specs of its own).
+  unless Process.respond_to?(:fork)
+    config.before(:each) do |example|
+      allow_any_instance_of(Delayed::Launcher::Forking).to receive(:fork_available?).and_return(true) unless example.metadata[:fork_guard]
+    end
+  end
+
+  # The launcher's signal traps log from a thread of their own: let those
+  # finish within their example, before its test doubles expire.
+  config.after(:each) do
+    Thread.list.each do |thread|
+      next if thread == Thread.current || thread.status == 'sleep' || !thread.inspect.include?('launcher/forking.rb')
+      thread.join(1)
+    end
+  end
+
   config.expect_with :rspec do |c|
     c.syntax = :expect
   end
