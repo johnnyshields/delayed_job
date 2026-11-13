@@ -35,6 +35,10 @@ module Delayed
     # ended by an error other than a StandardError (e.g. NoMemoryError).
     MAX_HEARTBEAT_CRASHES = 5
 
+    # Seconds a stopping dispatcher waits for the lock heartbeat thread to
+    # finish (e.g. a lock refresh under way) before leaving it behind.
+    HEARTBEAT_STOP_TIMEOUT = 5
+
     # Log throughput at least this often while the queue stays busy.
     REPORT_EVERY = 100
 
@@ -403,12 +407,18 @@ module Delayed
       true
     end
 
+    # Stops the heartbeat thread. One stuck in a lock refresh (e.g. a
+    # database call that hangs) is left behind after HEARTBEAT_STOP_TIMEOUT
+    # seconds rather than keeping the process from exiting; it stops at its
+    # next beat if it ever returns.
     def stop_lock_heartbeat
       @heartbeat_mutex.synchronize do
         @heartbeat_stopped = true
         @heartbeat_cond.broadcast
       end
-      @heartbeat.join
+      return if @heartbeat.join(HEARTBEAT_STOP_TIMEOUT)
+      say "Lock heartbeat did not stop within #{HEARTBEAT_STOP_TIMEOUT}s (a lock refresh may be stuck); " \
+          'not waiting for it', 'warn'
     end
 
     # #heartbeat handles StandardErrors. Anything else (e.g. NoMemoryError)

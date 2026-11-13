@@ -322,6 +322,39 @@ describe 'Lock heartbeats' do
       end
     end
 
+    describe 'stopping while a lock refresh is stuck' do
+      it 'stops after HEARTBEAT_STOP_TIMEOUT instead of waiting for it forever' do
+        stub_const('Delayed::Dispatcher::HEARTBEAT_STOP_TIMEOUT', 0.3)
+        stuck = Queue.new
+        release = Queue.new
+        allow(job_class).to receive(:touch_locks) do
+          stuck << true
+          release.pop # A database call that hangs.
+          0
+        end
+        thread = run_dispatcher
+        Timeout.timeout(5) { stuck.pop }
+        started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        dispatcher.stop
+        expect(Timeout.timeout(5) { thread.join }).to eq thread
+        expect(Process.clock_gettime(Process::CLOCK_MONOTONIC) - started).to be_between(0.25, 3)
+        expect(messages).to include(['warn', 'Lock heartbeat did not stop within 0.3s (a lock refresh may be stuck); not waiting for it'])
+        heartbeat = dispatcher.instance_variable_get(:@heartbeat)
+        expect(heartbeat).to be_alive
+        release << true # The refresh returns: the heartbeat then stops.
+        expect(heartbeat.join(5)).to eq heartbeat
+        expect(job_class).to have_received(:touch_locks).once
+      end
+
+      it 'does not warn when the heartbeat stops in time' do
+        thread = run_dispatcher
+        sleep 0.15
+        dispatcher.stop
+        Timeout.timeout(5) { thread.join }
+        expect(messages.map(&:last).grep(/did not stop within/)).to be_empty
+      end
+    end
+
     it 'stops the heartbeat thread when it stops' do
       thread = run_dispatcher
       sleep 0.15
