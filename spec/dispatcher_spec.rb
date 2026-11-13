@@ -42,6 +42,44 @@ describe Delayed::Dispatcher do
 
     it 'rejects a thread count below 1' do
       expect { described_class.new(:threads => 0) }.to raise_error(ArgumentError)
+      expect { described_class.new(:threads => -2) }.to raise_error(ArgumentError, 'threads must be 1 or greater')
+    end
+
+    it 'builds a single unindexed worker for threads: nil, as the launchers do' do
+      dispatcher = described_class.new(:threads => nil)
+      expect(dispatcher.thread_count).to eq 1
+      expect(dispatcher.workers.first.thread_index).to be_nil
+      expect(Delayed::Launcher::Forking.new({}).send(:threads, :threads => nil)).to eq dispatcher.thread_count
+    end
+
+    it 'accepts a thread count given as a string, e.g. from an environment variable' do
+      expect(described_class.new(:threads => '3').thread_count).to eq 3
+    end
+
+    it 'rejects a thread count that is not a number' do
+      expect { described_class.new(:threads => 'many') }.to raise_error(ArgumentError)
+      expect { described_class.new(:threads => 1.5) }.not_to raise_error # Integer() truncates floats.
+    end
+
+    it 'builds one indexed worker per thread' do
+      expect(described_class.new(:threads => 3).workers.map(&:thread_index)).to eq [0, 1, 2]
+    end
+
+    it 'runs jobs with threads: nil' do
+      Delayed::Job.enqueue(SimpleJob.new)
+      SimpleJob.runs = 0
+      Timeout.timeout(5) { described_class.new(:threads => nil).tap { |d| allow(d).to receive(:say) }.run }
+      expect(SimpleJob.runs).to eq 1
+    end
+
+    it 'can be built by a launcher with threads: nil' do
+      launcher = Delayed::Launcher::Forking.new(:threads => nil)
+      allow(launcher).to receive(:setup_logger)
+      allow(launcher).to receive(:trap_signals)
+      expect(Delayed::Dispatcher).to receive(:new).and_wrap_original do |m, options|
+        m.call(options).tap { |d| expect(d.thread_count).to eq 1 }.tap { |d| allow(d).to receive(:start) }
+      end
+      launcher.launch
     end
   end
 

@@ -185,7 +185,8 @@ module Delayed
   private
 
     def build_workers(options)
-      count = Integer(options.fetch(:threads, 1))
+      # nil means the default, as in Launcher::Base#threads.
+      count = Integer(options[:threads] || 1)
       Array.new([count, 0].max) do |index|
         # Worker.new resets the global lifecycle, so all workers are built
         # here, before any thread starts.
