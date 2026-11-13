@@ -119,6 +119,13 @@ describe 'Instrumentation' do
           expect(log.string).to include 'Error in a subscriber to custom.delayed_job: RuntimeError: subscriber bug'
         end
 
+        it "raises the block's exception without making the subscriber's error its cause" do
+          subscribe(:custom) { raise 'subscriber bug' }
+          expect { Delayed.instrument(:custom) { raise IOError, 'boom' } }.to raise_error(IOError) do |error|
+            expect(error.cause).to be_nil
+          end
+        end
+
         it "raises the block's very exception, with its backtrace" do
           subscribe(:custom) { raise 'subscriber bug' }
           raised = IOError.new('boom')

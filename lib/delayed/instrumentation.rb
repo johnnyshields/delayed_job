@@ -39,8 +39,10 @@ module Delayed
         # exception propagated: ActiveSupport raises the subscriber's
         # instead. Raise the block's, so that e.g. a
         # Delayed::ShutdownInterrupt still reaches the worker thread, which
-        # releases its job, instead of turning into a RuntimeError.
-        raise block_error if block_error
+        # releases its job, instead of turning into a RuntimeError. Without
+        # a cause: the subscriber's error (whose cause is the block's) would
+        # become its cause, a loop JRuby rejects ("circular causes").
+        raise block_error, cause: nil if block_error
         result = yield(payload) unless started # A subscriber failed before the block ran.
       end
       result
