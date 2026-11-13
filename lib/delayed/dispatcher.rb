@@ -296,6 +296,9 @@ module Delayed
       end
       @failed_reserve_count = 0
       reserved
+    rescue SignalException, SystemExit
+      # Stopping (see Worker.raise_signal_exceptions), not a failed reservation.
+      raise
     rescue ::Exception => error # rubocop:disable RescueException
       say "Error while reserving job: #{error}"
       thread_error(error, 'Reservation')

@@ -233,6 +233,82 @@ describe Delayed::Dispatcher do
       expect { Timeout.timeout(5) { dispatcher.run } }.to raise_error(Delayed::FatalBackendError)
     end
 
+    describe 'a signal or exit during a reservation' do
+      let(:reported) { [] }
+      let(:messages) { [] }
+
+      before do
+        Delayed::Worker.exit_on_complete = false
+        Delayed::Worker.on_thread_error = ->(error, info) { reported << [error, info] }
+        allow(dispatcher).to receive(:say) { |text, *| messages << text }
+        allow(Delayed::Job).to receive(:recover_from)
+      end
+
+      after { Delayed::Worker.reset }
+
+      [[SignalException, 'TERM'], [Interrupt, ''], [SystemExit, 'exit']].each do |klass, message|
+        context "(#{klass})" do
+          def raise_it(klass, message)
+            klass == Interrupt ? raise(Interrupt) : raise(klass, message)
+          end
+
+          it 'propagates out of #run instead of counting as a failed reservation' do
+            k = klass
+            m = message
+            allow(Delayed::Job).to receive(:reserve_batch) { raise_it(k, m) }
+            expect { Timeout.timeout(5) { dispatcher.run } }.to raise_error(klass)
+            expect(dispatcher.instance_variable_get(:@failed_reserve_count)).to eq 0
+            expect(messages.grep(/Error while reserving job/)).to be_empty
+            expect(Delayed::Job).not_to have_received(:recover_from)
+          end
+
+          it 'is not reported to on_thread_error' do
+            k = klass
+            m = message
+            allow(Delayed::Job).to receive(:reserve_batch) { raise_it(k, m) }
+            expect { Timeout.timeout(5) { dispatcher.run } }.to raise_error(klass)
+            expect(reported).to be_empty
+          end
+
+          it 'is raised into running jobs too (signals only), and stops every thread' do
+            k = klass
+            m = message
+            ConcurrencyJob.reset(5)
+            job = Delayed::Job.enqueue(ConcurrencyJob.new(1))
+            calls = 0
+            allow(Delayed::Job).to receive(:reserve_batch).and_wrap_original do |orig, *args|
+              calls += 1
+              next orig.call(*args) if calls == 1
+              sleep 0.01 until ConcurrencyJob.running == 1
+              raise_it(k, m)
+            end
+            took = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+            expect { Timeout.timeout(10) { dispatcher.run } }.to raise_error(klass)
+            took = Process.clock_gettime(Process::CLOCK_MONOTONIC) - took
+            expect(dispatcher.instance_variable_get(:@threads)).to all(satisfy { |t| !t.alive? })
+            if klass <= SignalException
+              expect(took).to be < 4 # Interrupted, not left to run its 5s.
+              expect(Delayed::Job.all).to include job # Not completed.
+            else
+              expect(took).to be >= 4 # An exit lets the running job finish.
+            end
+          end
+        end
+      end
+
+      it 'still treats other exceptions as failed reservations' do
+        calls = 0
+        allow(Delayed::Job).to receive(:reserve_batch) do
+          raise NoMemoryError, 'odd' if (calls += 1) == 1
+          []
+        end
+        Delayed::Worker.exit_on_complete = true
+        Timeout.timeout(5) { dispatcher.run }
+        expect(messages.grep(/Error while reserving job: odd/).size).to eq 1
+        expect(reported.map { |_, info| info[:context] }).to eq ['Reservation']
+      end
+    end
+
     it 'runs :execute callbacks for every thread and clears their locks' do
       dispatcher # Worker.new resets the lifecycle, so build it first
       executed = []
