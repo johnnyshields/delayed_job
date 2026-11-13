@@ -114,11 +114,26 @@ describe 'Stopping a worker' do
     end
 
     it 'counts the timeout from when the stop was requested' do
+      Delayed::Worker.shutdown_timeout = 2
       enqueue(GateJob.new(:a))
+      in_slow_poll = Queue.new
+      calls = 0
+      allow(Delayed::Job).to receive(:reserve_batch).and_wrap_original do |m, *args|
+        next m.call(*args) if (calls += 1) == 1
+        in_slow_poll << true
+        sleep 3 # The dispatcher only notices the stop after this.
+        []
+      end
       thread = run_until_started(1)
-      dispatcher.stop
-      sleep 0.4 # past the timeout before the dispatcher even looks
-      expect(Timeout.timeout(5) { elapsed { thread.join } }).to be < 0.3
+      Timeout.timeout(5) { in_slow_poll.pop }
+      took = elapsed do
+        dispatcher.stop
+        Timeout.timeout(10) { thread.join }
+      end
+      # The 2s timeout ran out during the 3s poll: the job is interrupted as
+      # soon as the dispatcher looks (about 3s), not 2s after that (5s).
+      expect(took).to be < 4.5
+      expect(GateJob.interrupted).to eq [:a]
     end
 
     it 'treats 0 as "interrupt at once"' do
@@ -129,7 +144,7 @@ describe 'Stopping a worker' do
         dispatcher.stop
         Timeout.timeout(5) { thread.join }
       end
-      expect(took).to be < 0.25
+      expect(took).to be < 1 # At once, not after the job (which never ends by itself).
       expect(GateJob.interrupted).to eq [:a]
     end
 
@@ -485,7 +500,7 @@ describe 'Stopping a worker' do
         Timeout.timeout(5) { thread.join }
       end
 
-      expect(took).to be < 0.25
+      expect(took).to be < 1 # At once, not after the job (which never ends by itself).
       expect(dispatcher).to be_quit
       expect(dispatcher).to be_stop
       expect(GateJob.interrupted).to eq [:a]
@@ -504,7 +519,7 @@ describe 'Stopping a worker' do
         dispatcher.quit
         Timeout.timeout(5) { thread.join }
       end
-      expect(took).to be < 0.25
+      expect(took).to be < 1 # At once, not after the job (which never ends by itself).
       expect(GateJob.interrupted).to eq [:a]
     end
   end

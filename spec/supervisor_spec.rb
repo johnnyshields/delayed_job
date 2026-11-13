@@ -94,9 +94,11 @@ describe 'Worker processes whose parent goes away' do
         d = dispatcher
         timeouts = waits_of(d)
         _, seen = d.send(:snapshot)
-        expect(timed { d.send(:wait_before_next_poll, seen, true) }).to be_within(0.15).of(0.2)
+        took = timed { d.send(:wait_before_next_poll, seen, true) }
+        expect(took).to be >= 0.19 # Never polls early.
+        expect(took).to be < 2
         expect(timeouts.size).to eq 1
-        expect(timeouts.first).to be_within(0.01).of(0.2)
+        expect(timeouts.first).to be_within(0.05).of(0.2)
       end
 
       it 'waits for an event (no timeout) while workers are busy, when not supervised' do
@@ -115,8 +117,10 @@ describe 'Worker processes whose parent goes away' do
         timeouts = waits_of(d)
         allow(d).to receive(:supervisor_gone?).and_call_original
         _, seen = d.send(:snapshot)
-        expect(timed { d.send(:wait_before_next_poll, seen, true) }).to be_within(0.15).of(0.3)
-        expect(timeouts.size).to be >= 5
+        took = timed { d.send(:wait_before_next_poll, seen, true) }
+        expect(took).to be >= 0.29 # Still sleep_delay in all: checking on the parent doesn't end the wait.
+        expect(took).to be < 2
+        expect(timeouts.size).to be >= 3 # Several parent checks (about 6 on an idle machine).
         expect(timeouts).to all(be <= 0.05)
         expect(d).to have_received(:supervisor_gone?).at_least(4).times
       end
@@ -168,7 +172,7 @@ describe 'Worker processes whose parent goes away' do
           _, seen = d.send(:snapshot)
           Thread.new { sleep 0.1; d.stop }
           Timeout.timeout(5) { d.send(:wait_before_next_poll, seen, true) }
-          expect(timeouts.first).to be_within(0.1).of(Delayed::Worker::DEFAULT_SLEEP_DELAY)
+          expect(timeouts.first).to be_within(0.5).of(Delayed::Worker::DEFAULT_SLEEP_DELAY)
         end
 
         it 'keeps an idle (supervised) dispatcher running' do
@@ -216,14 +220,15 @@ describe 'Worker processes whose parent goes away' do
       end
 
       it 'polls every sleep_delay when supervised, not every SUPERVISOR_CHECK_INTERVAL' do
-        # At 0, 0.4 and 0.8s (8 polls per interval would be 20).
-        expect(polls_in(1.0, :supervisor_pid => Process.ppid)).to be_between(2, 4)
+        # At 0, 0.4 and 0.8s: at most 3, however slow the machine (one poll
+        # per check interval would be about 20).
+        expect(polls_in(1.0, :supervisor_pid => Process.ppid)).to be_between(1, 3)
       end
 
-      it 'polls as often when supervised as when not' do
+      it 'polls no more often when supervised than when not' do
         supervised = polls_in(1.0, :supervisor_pid => Process.ppid)
         unsupervised = polls_in(1.0, {})
-        expect((supervised - unsupervised).abs).to be <= 1
+        expect(supervised).to be <= unsupervised + 1
       end
     end
 

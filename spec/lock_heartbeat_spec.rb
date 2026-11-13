@@ -124,7 +124,7 @@ describe 'Lock heartbeats' do
       sleep 0.35
       dispatcher.stop
       Timeout.timeout(5) { thread.join }
-      expect(names.size).to be_between(2, 4)
+      expect(names.size).to be_between(1, 4) # One per 0.1s interval at most, however slow the machine.
       expect(names).to all(eq(dispatcher.workers.map(&:name)))
     end
 

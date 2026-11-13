@@ -29,8 +29,8 @@ describe 'Idle forked worker processes', :processes do
     polls = polls_per_worker(output)
 
     expect(polls.size).to eq(2), output
-    # At most at 0, 3 and 6s of their (under 6s) lives; checking on the
-    # parent every second would mean about 6 polls each.
+    # At most at 0, 3 and 6s of their (under 6s) lives, however slow the
+    # machine; checking on the parent every second would mean about 6 each.
     expect(polls.values).to all(be_between(1, 3)), "polls per worker: #{polls}\n#{output}"
   end
 
