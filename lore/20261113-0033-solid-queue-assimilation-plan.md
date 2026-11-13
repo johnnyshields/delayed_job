@@ -26,6 +26,7 @@ Principles: no schema changes for existing backends; new hooks are optional with
 5. **Children exit when the parent dies** (SQ: `supervisor_went_away?`).
    - Dispatcher compares `Process.ppid` each poll and stops gracefully when the parent is gone.
 6. **Pidfile for `--fork` mode** with an already-running check (SQ: `Supervisor::Pidfile`).
+   - Implemented as `Delayed::Pidfile`, opt-in via `--pid-file[=PATH]` / `PIDFILE` / `:pid_file`. Unlike SQ (which checks whether the pid in the file is alive), liveness is an `flock` on the file: released by the OS on any death, immune to pid reuse, and inherited by forked workers, so orphaned workers still block a restart. `Worker.after_fork` had to skip the pidfile when reopening inherited files (reopening dropped the lock).
 
 ## Phase 2 — observability
 

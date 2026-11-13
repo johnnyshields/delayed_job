@@ -84,6 +84,9 @@ module Delayed
         opt.on('--pid-dir=DIR', 'Specifies an alternate directory in which to store the process ids.') do |dir|
           @options[:pid_dir] = dir
         end
+        opt.on('--pid-file[=PATH]', 'With --fork, write the parent process id to PATH (default: <pid-dir>/delayed_job.pid) and refuse to start if that process is running') do |path|
+          @options[:pid_file] = path || true
+        end
         opt.on('--log-dir=DIR', 'Specifies an alternate directory in which to store the delayed_job log.') do |dir|
           @options[:log_dir] = dir
         end

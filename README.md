@@ -346,6 +346,29 @@ Use `SIGTERM` or `SIGINT` to allow workers to finish their current job then grac
 The parent forwards these signals to its worker processes, so sending them to the
 parent alone (as `docker stop`, Kubernetes and systemd do) stops every worker.
 
+#### Pidfile
+
+With `--pid-file`, the parent process writes its pid to a file and refuses to
+start while another launcher holds that file, e.g. to stop a second
+`rake jobs:work` (a deploy script run twice, a cron job) from doubling your workers:
+
+```
+# tmp/pids/delayed_job.pid (or delayed_job.<identifier>.pid; see --pid-dir)
+RAILS_ENV=production script/delayed_job --fork -n4 --pid-file start
+RAILS_ENV=production script/delayed_job --fork -n4 --pid-file=/var/run/delayed_job.pid start
+PIDFILE=1 rake jobs:work
+PIDFILE=/var/run/delayed_job.pid rake jobs:work
+```
+
+A second launcher exits with `Delayed::AlreadyRunningError` before starting any
+worker. The parent deletes the file when it exits. Whether a launcher runs is
+decided by a lock on the file, not by the pid in it: a file left behind by a
+SIGKILLed launcher, or holding a pid since reused by another process, doesn't
+block a start. Worker processes inherit the lock, so workers orphaned by a
+SIGKILLed parent keep a new launcher from starting until they finish their jobs
+and exit. Daemon mode writes its own pidfiles in `--pid-dir` and doesn't take
+`--pid-file`.
+
 #### Shutdown timeout and SIGQUIT
 
 By default a stopping worker waits for its running jobs, however long they take.
@@ -444,6 +467,9 @@ POOLS=mailers,tasks:2|tweets:1|*:2 rake jobs:workoff
 
 # Run 2 worker processes with 5 threads each
 NUM_PROCESSES=2 NUM_THREADS=5 rake jobs:work
+
+# Write tmp/pids/delayed_job.pid; refuse to start if another launcher holds it
+PIDFILE=1 rake jobs:work
 ```
 
 Rake uses Forking Mode (see above) under-the-hood.

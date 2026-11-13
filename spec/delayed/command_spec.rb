@@ -233,6 +233,36 @@ describe Delayed::Command do
     end
   end
 
+  describe '--pid-file arg' do
+    context 'not set' do
+      let(:options) { [] }
+      it { expect(output_options).not_to have_key(:pid_file) }
+    end
+
+    context 'set without a path' do
+      let(:options) { %w[--pid-file start] }
+      it 'uses the default path' do
+        expect(output_options[:pid_file]).to be true
+        expect(output_options[:args]).to eq %w[start]
+      end
+    end
+
+    context 'set with a path' do
+      let(:options) { %w[--pid-file=/var/run/dj.pid] }
+      it { expect(output_options[:pid_file]).to eq '/var/run/dj.pid' }
+    end
+
+    it 'is passed to the forking launcher' do
+      command = Delayed::Command.new(%w[--fork --pid-file=/var/run/dj.pid])
+      expect(command.send(:launcher)).to be_a Delayed::Launcher::Forking
+      expect(command.send(:launcher).pid_file).to eq '/var/run/dj.pid'
+    end
+
+    it 'is rejected in daemon mode' do
+      expect { Delayed::Command.new(%w[--pid-file]).daemonize }.to raise_error(ArgumentError, /--pid-file is for --fork mode/)
+    end
+  end
+
   describe '--log-dir arg' do
     context 'not set' do
       let(:options) { [] }

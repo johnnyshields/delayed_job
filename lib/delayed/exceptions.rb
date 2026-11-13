@@ -18,6 +18,20 @@ module Delayed
   class ShutdownInterrupt < Exception # rubocop:disable Lint/InheritException
   end
 
+  # Raised by Delayed::Pidfile#setup when its pidfile belongs to a running
+  # process.
+  class AlreadyRunningError < StandardError
+    attr_reader :path, :pid
+
+    def initialize(path, pid)
+      @path = path
+      @pid = pid
+      running = pid ? " (pid #{pid})" : ''
+      super("delayed_job is already running#{running}: pidfile #{path} exists. " \
+            'Stop that process, or delete the file if it is not a delayed_job process.')
+    end
+  end
+
   # Recorded as the error of jobs that were running in a worker process when
   # it died (killed by a signal, or exited with a failure status).
   class ProcessExitError < StandardError

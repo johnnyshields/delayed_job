@@ -19,4 +19,8 @@ describe Delayed::Launcher::Daemonized do
     expect(subject).to receive(:run_process).ordered
     subject.launch
   end
+
+  it 'rejects the pid_file option, which is for forking mode' do
+    expect { described_class.new(:pid_file => true) }.to raise_error(ArgumentError, /--pid-file is for --fork mode/)
+  end
 end

@@ -158,6 +158,37 @@ describe 'Rake tasks' do
       it { expect { run_task }.to raise_error(ArgumentError, /LOCK_HEARTBEAT/) }
     end
 
+    context 'PIDFILE=path' do
+      let(:env) { {'PIDFILE' => '/var/run/dj.pid'} }
+      let(:exp_args) { {:quiet => false, :processes => 1, :pid_file => '/var/run/dj.pid'} }
+      it do
+        expect_success
+        run_task
+      end
+    end
+
+    %w[1 true TRUE t].each do |value|
+      context "PIDFILE=#{value}" do
+        let(:env) { {'PIDFILE' => value} }
+        let(:exp_args) { {:quiet => false, :processes => 1, :pid_file => true} }
+        it do
+          expect_success
+          run_task
+        end
+      end
+    end
+
+    ['0', 'false', 'f', ''].each do |value|
+      context "PIDFILE=#{value.inspect}" do
+        let(:env) { {'PIDFILE' => value} }
+        let(:exp_args) { {:quiet => false, :processes => 1} }
+        it do
+          expect_success
+          run_task
+        end
+      end
+    end
+
     context 'SLEEP_DELAY=5' do
       let(:env) { {'SLEEP_DELAY' => '5'} }
       let(:exp_args) { {:quiet => false, :sleep_delay => 5, :processes => 1} }

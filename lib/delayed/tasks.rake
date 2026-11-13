@@ -30,6 +30,10 @@ namespace :jobs do
     @options[:shutdown_timeout] = Float(ENV['SHUTDOWN_TIMEOUT']) if ENV['SHUTDOWN_TIMEOUT']
     @options[:lock_heartbeat_interval] = Float(ENV['LOCK_HEARTBEAT']) if ENV['LOCK_HEARTBEAT']
     @options[:lock_timeout] = Float(ENV['LOCK_TIMEOUT']) if ENV['LOCK_TIMEOUT']
+    # PIDFILE=path, or PIDFILE=1 for tmp/pids/delayed_job.pid.
+    if ENV['PIDFILE'] && ENV['PIDFILE'] !~ /\A(?:|0|f|false)\z/i
+      @options[:pid_file] = ENV['PIDFILE'] =~ /\A(?:1|t|true)\z/i ? true : ENV['PIDFILE']
+    end
 
     queues = (ENV['QUEUES'] || ENV['QUEUE'] || '').split(',')
     @options[:queues] = queues unless queues.empty?

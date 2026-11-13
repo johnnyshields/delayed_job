@@ -118,7 +118,8 @@ module Delayed
       unless @files_to_reopen
         @files_to_reopen = []
         ObjectSpace.each_object(File) do |file|
-          @files_to_reopen << file unless file.closed?
+          # A pidfile's lock must be inherited, not dropped by reopening it.
+          @files_to_reopen << file unless file.closed? || Delayed::Pidfile.lock_file?(file)
         end
       end
 

@@ -8,19 +8,39 @@ module Delayed
       # and release their jobs (see Delayed::Dispatcher::INTERRUPT_GRACE).
       SHUTDOWN_GRACE = Delayed::Dispatcher::INTERRUPT_GRACE + 5
 
+      # options[:pid_file]: true writes a pidfile named after this process
+      # in options[:pid_dir]; a String is the pidfile's path. Off by default.
+      def initialize(options)
+        pid_file = options.delete(:pid_file)
+        super
+        @pid_file = pid_file
+      end
+
       def launch
         @stopped = !!@options[:exit_on_complete]
         @killed = false
         setup_logger
-        trap_signals
-        if forking?
-          supervisor_pid
-          prepare_for_fork
-          Delayed::Worker.before_fork
+        setup_pidfile
+        begin
+          trap_signals
+          if forking?
+            supervisor_pid
+            prepare_for_fork
+            Delayed::Worker.before_fork
+          end
+          setup_workers
+          run_loop if forking?
+          before_graceful_exit
+        ensure
+          delete_pidfile
         end
-        setup_workers
-        run_loop if forking?
-        before_graceful_exit
+      end
+
+      # The pidfile's path, or nil without the :pid_file option.
+      def pid_file
+        return unless @pid_file
+        return @pid_file.to_s unless @pid_file == true
+        File.join(@options[:pid_dir], "#{get_name(process_identifier)}.pid")
       end
 
       def shutdown(timeout = nil)
@@ -136,6 +156,19 @@ module Delayed
           Signal.trap(signal) { pending << signal unless pending.include?(signal) }
         end
         pending
+      end
+
+      # Writes the pidfile before anything else, so that a second launcher
+      # exits (with Delayed::AlreadyRunningError) before booting workers.
+      def setup_pidfile
+        return unless pid_file
+        @pidfile = Delayed::Pidfile.new(pid_file)
+        @pidfile.setup
+        logger.info "Wrote pidfile #{pid_file} - pid #{$$}"
+      end
+
+      def delete_pidfile
+        @pidfile.delete if @pidfile
       end
 
       # Forked workers stop if this process (their parent) goes away.

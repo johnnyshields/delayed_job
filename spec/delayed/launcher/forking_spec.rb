@@ -1,5 +1,6 @@
 require_relative '../../helper'
 require_relative 'shared_examples'
+require 'tmpdir'
 
 describe Delayed::Launcher::Forking do
   let(:options) { {} }
@@ -74,6 +75,116 @@ describe Delayed::Launcher::Forking do
     context 'with an identifier and multiple workers' do
       let(:options) { {:identifier => 'abc', :processes => 2} }
       it_behaves_like 'a single worker process'
+    end
+  end
+
+  describe 'the pidfile' do
+    around do |example|
+      Dir.mktmpdir('dj-launcher') do |dir|
+        @dir = dir
+        example.run
+      end
+    end
+
+    let(:path) { File.join(@dir, 'run', 'dj.pid') }
+
+    describe '#pid_file' do
+      it 'is nil by default' do
+        expect(subject.pid_file).to be_nil
+      end
+
+      context 'with a path' do
+        let(:options) { {:pid_file => path} }
+        it { expect(subject.pid_file).to eq path }
+      end
+
+      context 'with a Pathname' do
+        let(:options) { {:pid_file => Pathname.new(path)} }
+        it { expect(subject.pid_file).to eq path }
+      end
+
+      context 'with true' do
+        let(:options) { {:pid_file => true, :pid_dir => @dir} }
+        it 'is named after the process in pid_dir' do
+          expect(subject.pid_file).to eq File.join(@dir, 'delayed_job.pid')
+        end
+      end
+
+      context 'with true and an identifier' do
+        let(:options) { {:pid_file => true, :pid_dir => @dir, :identifier => 'x'} }
+        it { expect(subject.pid_file).to eq File.join(@dir, 'delayed_job.x.pid') }
+      end
+
+      context 'with true and the default pid_dir' do
+        let(:options) { {:pid_file => true} }
+        it { expect(subject.pid_file).to eq "#{Delayed.root}/tmp/pids/delayed_job.pid" }
+      end
+
+      it 'is not passed on to the workers' do
+        launcher = described_class.new(:pid_file => path)
+        expect(launcher.instance_variable_get(:@options)).not_to have_key(:pid_file)
+      end
+    end
+
+    describe '#launch' do
+      let(:options) { {:pid_file => path} }
+
+      it 'holds the pidfile while it runs, and deletes it when done' do
+        held = nil
+        allow(subject).to receive(:setup_workers) { held = File.read(path) }
+        subject.launch
+        expect(held).to eq "#{Process.pid}\n"
+        expect(File.exist?(path)).to be false
+      end
+
+      it 'writes the pidfile before trapping signals or starting workers' do
+        expect(Delayed::Pidfile).to receive(:new).with(path).ordered.and_call_original
+        expect(subject).to receive(:trap_signals).ordered
+        expect(subject).to receive(:setup_workers).ordered
+        subject.launch
+      end
+
+      it 'deletes the pidfile when it fails' do
+        allow(subject).to receive(:setup_workers).and_raise('boom')
+        expect { subject.launch }.to raise_error('boom')
+        expect(File.exist?(path)).to be false
+      end
+
+      it 'deletes the pidfile when it exits' do
+        allow(subject).to receive(:setup_workers) { exit(1) }
+        expect { subject.launch }.to raise_error(SystemExit)
+        expect(File.exist?(path)).to be false
+      end
+
+      it 'logs the pidfile' do
+        logger = Logger.new(io = StringIO.new)
+        allow(Delayed::Worker).to receive(:logger).and_return(logger)
+        subject.launch
+        expect(io.string).to include "Wrote pidfile #{path} - pid #{Process.pid}"
+      end
+
+      context 'when another launcher holds the pidfile' do
+        let!(:other) { Delayed::Pidfile.new(path).setup }
+        after { other.delete }
+
+        it 'raises AlreadyRunningError without starting workers or trapping signals' do
+          expect(subject).not_to receive(:trap_signals)
+          expect(subject).not_to receive(:setup_workers)
+          expect { subject.launch }.to raise_error(Delayed::AlreadyRunningError, /pid #{Process.pid}/)
+        end
+
+        it "leaves the other launcher's pidfile" do
+          expect { subject.launch }.to raise_error(Delayed::AlreadyRunningError)
+          expect(File.read(path)).to eq "#{Process.pid}\n"
+        end
+      end
+
+      it 'writes no pidfile by default' do
+        launcher = described_class.new(:pid_dir => @dir)
+        expect(Delayed::Pidfile).not_to receive(:new)
+        launcher.launch
+        expect(Dir.children(@dir)).to be_empty
+      end
     end
   end
 
