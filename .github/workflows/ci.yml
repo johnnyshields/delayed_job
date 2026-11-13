@@ -3,8 +3,8 @@ name: CI
 on:
   push:
     branches: [ master ]
+  # Every PR, whatever branch it targets (e.g. one stacked on another PR).
   pull_request:
-    branches: [ master ]
 
 permissions:
   contents: read
