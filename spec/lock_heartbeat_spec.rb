@@ -206,6 +206,206 @@ describe 'Lock heartbeats' do
       Delayed::Worker.exit_on_complete = false
     end
 
+    describe 'jobs running past their max_run_time' do
+      # Ignores its timeout (as a job blocked in native code would) and runs
+      # for `seconds`.
+      class StuckJob
+        attr_accessor :seconds, :limit
+
+        def initialize(seconds, limit)
+          self.seconds = seconds
+          self.limit = limit
+        end
+
+        def max_run_time
+          limit
+        end
+
+        def perform
+          deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + seconds
+          begin
+            sleep 0.01 while Process.clock_gettime(Process::CLOCK_MONOTONIC) < deadline
+          rescue Exception # rubocop:disable RescueException
+            retry
+          end
+        end
+      end
+
+      let(:worker) { dispatcher.workers.first }
+      let(:other) { dispatcher.workers.last }
+
+      before do
+        dispatcher.workers.each { |w| allow(w).to receive(:say) { |text, level = 'info'| messages << [level, text] } }
+      end
+
+      def job_running(worker, job, seconds_ago)
+        dispatcher.instance_variable_get(:@jobs_started)[worker] = [job, dispatcher.send(:monotonic_now) - seconds_ago]
+      end
+
+      def job_with_max_run_time(limit)
+        job_class.new(:payload_object => StuckJob.new(0, limit))
+      end
+
+      def overrun_messages
+        messages.map(&:last).grep(/longer than its max_run_time/)
+      end
+
+      describe '#heartbeat_names' do
+        it 'is every worker when no job runs' do
+          expect(dispatcher.send(:heartbeat_names)).to eq dispatcher.workers.map(&:name)
+        end
+
+        it 'keeps workers whose job runs within max_run_time' do
+          job_running(worker, job_with_max_run_time(nil), 60)
+          expect(dispatcher.send(:heartbeat_names)).to eq dispatcher.workers.map(&:name)
+        end
+
+        it 'leaves out a worker whose job runs past Worker.max_run_time' do
+          Delayed::Worker.max_run_time = 10
+          job_running(worker, job_with_max_run_time(nil), 11)
+          expect(dispatcher.send(:heartbeat_names)).to eq [other.name]
+        end
+
+        it "uses the job's own max_run_time" do
+          job_running(worker, job_with_max_run_time(5), 6)
+          job_running(other, job_with_max_run_time(5), 4)
+          expect(dispatcher.send(:heartbeat_names)).to eq [other.name]
+        end
+
+        it 'is empty when every worker overran' do
+          job_running(worker, job_with_max_run_time(1), 2)
+          job_running(other, job_with_max_run_time(1), 2)
+          expect(dispatcher.send(:heartbeat_names)).to eq []
+        end
+
+        it 'treats a max_run_time below one second as no limit, as Worker#run does' do
+          job_running(worker, job_with_max_run_time(0.5), 60)
+          expect(dispatcher.send(:heartbeat_names)).to eq dispatcher.workers.map(&:name)
+        end
+
+        it 'logs an error once per overrunning job' do
+          job = job_with_max_run_time(1)
+          job_running(worker, job, 2)
+          3.times { dispatcher.send(:heartbeat_names) }
+          expect(overrun_messages.size).to eq 1
+          expect(messages.find { |_, text| text =~ /longer than its max_run_time/ }.first).to eq 'error'
+          expect(overrun_messages.first).to include 'max_run_time (1s)', 'lock_timeout (0.5s)'
+        end
+
+        it 'logs again for the next job that overruns on the same worker' do
+          job_running(worker, job_with_max_run_time(1), 2)
+          dispatcher.send(:heartbeat_names)
+          job_running(worker, job_with_max_run_time(1), 2)
+          dispatcher.send(:heartbeat_names)
+          expect(overrun_messages.size).to eq 2
+        end
+      end
+
+      describe '#track_job' do
+        it 'records the job and when it started while it runs' do
+          job = job_with_max_run_time(nil)
+          seen = nil
+          dispatcher.send(:track_job, worker, job) { seen = dispatcher.instance_variable_get(:@jobs_started)[worker] }
+          expect(seen.first).to equal job
+          expect(seen.last).to be_within(1).of(dispatcher.send(:monotonic_now))
+          expect(dispatcher.instance_variable_get(:@jobs_started)).to be_empty
+        end
+
+        it 'returns the result of the block' do
+          expect(dispatcher.send(:track_job, worker, job_with_max_run_time(nil)) { :result }).to eq :result
+        end
+
+        it 'forgets the job and its overrun report even when the job raises' do
+          job = job_with_max_run_time(1)
+          expect do
+            dispatcher.send(:track_job, worker, job) do
+              job_running(worker, job, 2)
+              dispatcher.send(:heartbeat_names)
+              raise Delayed::ShutdownInterrupt
+            end
+          end.to raise_error(Delayed::ShutdownInterrupt)
+          expect(dispatcher.instance_variable_get(:@jobs_started)).to be_empty
+          expect(dispatcher.instance_variable_get(:@overrun_reported)).to be_empty
+        end
+
+        it 'tracks jobs run by worker threads' do
+          seen = Queue.new
+          allow(worker).to receive(:perform_job) { |_job| seen << dispatcher.instance_variable_get(:@jobs_started).keys; true }
+          allow(other).to receive(:perform_job) { |_job| seen << dispatcher.instance_variable_get(:@jobs_started).keys; true }
+          job_class.create!(:payload_object => SimpleJob.new)
+          Delayed::Worker.exit_on_complete = true
+          Timeout.timeout(5) { dispatcher.run }
+          expect(dispatcher.workers).to include(*seen.pop)
+          expect(dispatcher.instance_variable_get(:@jobs_started)).to be_empty
+        ensure
+          Delayed::Worker.exit_on_complete = false
+        end
+
+        it 'tracks jobs run inline by #work_off' do
+          seen = nil
+          allow(worker).to receive(:perform_job) { |_job| seen = dispatcher.instance_variable_get(:@jobs_started).keys; true }
+          job_class.create!(:payload_object => SimpleJob.new)
+          expect(dispatcher.work_off(1, worker)).to eq [1, 0]
+          expect(seen).to eq [worker]
+        end
+      end
+
+      it 'stops refreshing the lock of a job stuck past its max_run_time, so another worker can take it over' do
+        touched = Queue.new
+        allow(job_class).to receive(:touch_locks).and_wrap_original { |m, names| touched << names; m.call(names) }
+        runs = Queue.new
+        # Stuck (2.5s, past its 1s max_run_time) on its first run only.
+        allow_any_instance_of(StuckJob).to receive(:perform).and_wrap_original do |m|
+          runs << Thread.current
+          runs.size == 1 ? m.call : nil
+        end
+        job = job_class.create!(:payload_object => StuckJob.new(2.5, 1))
+        thread = run_dispatcher
+        wait_for { job_class.find(job.id).locked_by }
+        owner = job_class.find(job.id).locked_by
+        sleep 0.8
+        # Past lock_timeout (0.5s), but refreshed: nobody else can take it.
+        expect(job_class.find(job.id).locked_by).to eq owner
+        expect(job_class.reserve(Delayed::Worker.new.tap { |w| w.name = 'other process' }, 0.5)).to be_nil
+
+        # After max_run_time, the lock isn't refreshed; 0.5s later the idle
+        # thread takes the job over and runs it, while the stuck run goes on.
+        wait_for(4) { runs.size == 2 }
+        wait_for { job_class.where(:id => job.id).empty? }
+        expect(thread).to be_alive # The stuck run hasn't finished yet.
+
+        Timeout.timeout(5) { sleep 0.05 until messages.map(&:last).grep(/another worker reserved it/).any? }
+        dispatcher.stop
+        Timeout.timeout(5) { thread.join }
+
+        first, second = Array.new(2) { runs.pop }
+        expect(second).not_to eq first # Taken over by the other thread.
+        names = Array.new(touched.size) { touched.pop }
+        expect(names.first).to include owner
+        expect(names.select { |n| n.include?(owner) }.size).to be < names.size
+        expect(names.reject { |n| n.include?(owner) }).to all(satisfy { |n| !n.empty? })
+        expect(overrun_messages.size).to eq 1
+        # The stuck run's late outcome was discarded, not written over the takeover's.
+        expect(messages.map(&:last).grep(/was finished here, but its lock expired/).size).to eq 1
+        expect(job_class.where(:id => job.id)).to be_empty
+      end
+
+      it 'keeps refreshing the lock of a long job within its max_run_time' do
+        job = job_class.create!(:payload_object => ProcessJobs::SleepJob.new('long', 1.0))
+        allow_any_instance_of(ProcessJobs::SleepJob).to receive(:max_run_time).and_return(5)
+        thread = run_dispatcher
+        wait_for { job_class.find(job.id).locked_by }
+        owner = job_class.find(job.id).locked_by
+        sleep 0.8
+        expect(job_class.find(job.id).locked_by).to eq owner
+        expect(job_class.find(job.id).locked_at).to be > job_class.db_time_now - 0.5
+        wait_for { job_class.where(:id => job.id).empty? }
+        dispatcher.stop
+        Timeout.timeout(5) { thread.join }
+        expect(overrun_messages).to be_empty
+      end
+    end
+
     describe '#work_off' do
       it 'refreshes locks while running jobs inline' do
         job = job_class.create!(:payload_object => ProcessJobs::SleepJob.new('inline', 0.5))

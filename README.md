@@ -431,6 +431,10 @@ Delayed::Worker.lock_timeout = 120 # default 300; at least twice the heartbeat
   finish, reschedule or fail a job while the worker still holds its lock.
 * A job taken over from a worker that was only slow, not dead, runs twice.
   Choose a lock timeout well above the time a worker can stall.
+* A job still running past its `max_run_time` (one its timeout can't
+  interrupt, e.g. blocked in native code) no longer has its lock refreshed:
+  an error is logged, and another worker may run it after the lock timeout -
+  as without heartbeats, where its lock would expire after `max_run_time`.
 
 #### When the parent process dies
 

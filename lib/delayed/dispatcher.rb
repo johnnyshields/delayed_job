@@ -73,6 +73,8 @@ module Delayed
       @inboxes = {}
       @threads = []
       @running = {} # thread => job it is running
+      @jobs_started = {} # worker => [job it is running, when it started]
+      @overrun_reported = {} # worker => its job reported as overrun
       @in_flight = 0
       @events = 0
       @thread_error = nil
@@ -138,7 +140,7 @@ module Delayed
         num.times do
           _, job = reserve([worker]).first
           break unless job
-          worker.perform_job(job) ? success += 1 : failure += 1
+          track_job(worker, job) { worker.perform_job(job) } ? success += 1 : failure += 1
           break if worker.stop?
         end
       end
@@ -341,13 +343,56 @@ module Delayed
     end
 
     def lock_heartbeat_loop(interval)
-      names = workers.map(&:name)
       loop do
         @heartbeat_mutex.synchronize do
           @heartbeat_cond.wait(@heartbeat_mutex, interval) unless @heartbeat_stopped
         end
         break if @heartbeat_mutex.synchronize { @heartbeat_stopped }
-        touch_locks(names)
+        names = heartbeat_names
+        touch_locks(names) unless names.empty?
+      end
+    end
+
+    # The workers whose locks the heartbeat refreshes: all of them, except
+    # those running a job for longer than its max_run_time. Such a job
+    # should have been interrupted by its timeout; one that wasn't (e.g.
+    # blocked in native code) would otherwise hold its lock for as long as
+    # the process lives. Its lock now expires after lock_timeout, and
+    # another worker can run the job - as without heartbeats, where locks
+    # expire after max_run_time.
+    def heartbeat_names
+      now = monotonic_now
+      overrun = synchronize do
+        @jobs_started.select do |worker, (job, started)|
+          limit = worker.max_run_time(job).to_i # As Worker#run times jobs out.
+          limit > 0 && now - started > limit
+        end
+      end
+      overrun.each { |worker, (job, _)| report_overrun(worker, job) }
+      (workers - overrun.keys).map(&:name)
+    end
+
+    # Logs, once per job, that its lock is no longer refreshed.
+    def report_overrun(worker, job)
+      first = synchronize do
+        next false if @overrun_reported[worker].equal?(job)
+        @overrun_reported[worker] = job
+        true
+      end
+      return unless first
+      worker.job_say(job, format('has run for longer than its max_run_time (%ds) without stopping; no longer ' \
+                                 'refreshing its lock, so another worker may run it after lock_timeout (%gs)',
+                                 worker.max_run_time(job).to_i, Worker.lock_timeout), 'error')
+    end
+
+    # Records which job the worker runs, and since when (see #heartbeat_names).
+    def track_job(worker, job)
+      synchronize { @jobs_started[worker] = [job, monotonic_now] }
+      yield
+    ensure
+      synchronize do
+        @jobs_started.delete(worker)
+        @overrun_reported.delete(worker)
       end
     end
 
@@ -386,7 +431,7 @@ module Delayed
             until (job = inbox.pop).equal?(STOP)
               discard_stale_interrupts
               synchronize { @running[Thread.current] = job }
-              result = with_reloader { interruptible { worker.perform_job(job) } }
+              result = track_job(worker, job) { with_reloader { interruptible { worker.perform_job(job) } } }
               synchronize { @running.delete(Thread.current) }
               job_finished(worker, result)
             end
