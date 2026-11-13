@@ -288,11 +288,21 @@ module Delayed
         due.sort_by(&:first).each { |_, replacement| respawn(*replacement) }
       end
 
+      # Forks the replacement. If forking fails (e.g. EAGAIN or ENOMEM, out
+      # of processes or memory), retries later with the back-off of a child
+      # that died at once, instead of crashing the launcher.
       def respawn(worker_name, pid, options, status, streak, delay) # rubocop:disable Metrics/ParameterLists
         new_pid = add_worker(options)
         respawn_streaks[new_pid] = streak
         Delayed.instrument(:fork_replaced, :worker => worker_name, :pid => pid, :status => status, :new_pid => new_pid, :delay => delay)
         new_pid
+      rescue SystemCallError => error
+        retry_delay = respawn_delay(streak + 1)
+        logger.error "Could not fork a replacement for child process #{worker_name} (pid #{pid}): " \
+                     "#{error.class}: #{error.message}; retrying in #{retry_delay}s"
+        Delayed::Worker.thread_error(error, :context => 'Forking', :worker => worker_name, :pid => pid)
+        pending_replacements << [monotonic_now + retry_delay, [worker_name, pid, options, status, streak + 1, retry_delay]]
+        nil
       end
 
       # Seconds to wait before replacing a child process after `streak`

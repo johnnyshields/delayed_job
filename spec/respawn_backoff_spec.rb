@@ -126,6 +126,74 @@ describe Delayed::Launcher::Forking, 'replacing child processes that keep dying'
     end
   end
 
+  describe 'when forking a replacement fails' do
+    let(:reported) { [] }
+
+    before { Delayed::Worker.on_thread_error = ->(error, info) { reported << [error, info] } }
+
+    def fail_forks(count, error = Errno::EAGAIN)
+      failures = count
+      allow(launcher).to receive(:fork_worker) do
+        if failures > 0
+          failures -= 1
+          raise error
+        end
+        pids.shift
+      end
+    end
+
+    it 'logs and reports it, and retries after a back-off delay' do
+      logged = []
+      allow(logger).to receive(:error) { |m| logged << m }
+      fail_forks(1)
+      expect(launcher.send(:replace_worker, 'delayed_job.x', 999, {}, crashed)).to be_nil
+      expect(logged).to eq ['Could not fork a replacement for child process delayed_job.x (pid 999): ' \
+                            'Errno::EAGAIN: Resource temporarily unavailable; retrying in 1s']
+      expect(reported.map { |e, i| [e.class, i] }).to eq [[Errno::EAGAIN, {:context => 'Forking', :worker => 'delayed_job.x', :pid => 999}]]
+      now[0] += 1
+      launcher.send(:replace_due_workers)
+      expect(launcher.send(:workers).keys).to eq [200]
+    end
+
+    it 'backs off further while forking keeps failing' do
+      fail_forks(4, Errno::ENOMEM)
+      launcher.send(:replace_worker, 'delayed_job.x', 999, {}, crashed)
+      waits = []
+      until launcher.send(:pending_replacements).empty?
+        at, = launcher.send(:pending_replacements).first
+        waits << (at - now[0]).round
+        now[0] = at
+        launcher.send(:replace_due_workers)
+      end
+      expect(waits).to eq [1, 2, 4, 8]
+      expect(launcher.send(:workers).keys).to eq [200]
+    end
+
+    it 'keeps the launcher running' do
+      only = start_child
+      fail_forks(1)
+      allow(launcher).to receive(:monotonic_now).and_call_original
+      allow(launcher).to receive(:sleep) { |s| Kernel.sleep(s) }
+      calls = 0
+      allow(Process).to receive(:wait2) do |*args|
+        calls += 1
+        next [only, crashed] if calls == 1
+        next nil if args == [-1, Process::WNOHANG]
+        sleep 0.01 until launcher.instance_variable_get(:@stopped) # Children running: blocks.
+        raise Errno::ECHILD
+      end
+      launcher.send(:started_at)[only] -= 100 # Long-lived: replaced at once, and the fork fails.
+      thread = Thread.new { launcher.send(:run_loop) }
+      thread.report_on_exception = false
+      Timeout.timeout(5) { sleep 0.01 until !thread.alive? || (launcher.send(:workers).keys - [only]).any? }
+      expect(thread).to be_alive # The failed fork didn't end the run loop,
+      expect(launcher.send(:workers).keys).to eq [pids.first - 1] # and was retried: the next pid forked.
+      launcher.instance_variable_set(:@stopped, true)
+      launcher.send(:workers).clear
+      expect { Timeout.timeout(5) { thread.join } }.not_to raise_error
+    end
+  end
+
   it 'treats a child process with no recorded start as long-lived' do
     expect(launcher.send(:replace_worker, 'delayed_job.x', 999, {}, crashed)).to eq 200
   end
