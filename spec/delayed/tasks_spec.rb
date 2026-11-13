@@ -170,6 +170,26 @@ describe 'Rake tasks' do
     end
 
     %w[1 true].each do |value|
+      context "COUNT_SHUTDOWN_INTERRUPTS=#{value}" do
+        let(:env) { {'COUNT_SHUTDOWN_INTERRUPTS' => value} }
+        let(:exp_args) { {:quiet => false, :processes => 1, :count_shutdown_interrupts => true} }
+        it do
+          expect_success
+          run_task
+        end
+      end
+    end
+
+    context 'COUNT_SHUTDOWN_INTERRUPTS=0' do
+      let(:env) { {'COUNT_SHUTDOWN_INTERRUPTS' => '0'} }
+      let(:exp_args) { {:quiet => false, :processes => 1} }
+      it do
+        expect_success
+        run_task
+      end
+    end
+
+    %w[1 true].each do |value|
       context "SHUTDOWN_ON_WORKER_KILL=#{value}" do
         let(:env) { {'SHUTDOWN_ON_WORKER_KILL' => value} }
         let(:exp_args) { {:quiet => false, :processes => 1, :shutdown_on_worker_kill => true} }

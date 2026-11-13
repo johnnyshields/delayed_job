@@ -58,6 +58,14 @@ module Delayed
     # waits for as long as they take.
     cattr_accessor :shutdown_timeout
 
+    # Whether a job interrupted by shutdown (see Delayed::ShutdownInterrupt)
+    # counts as a failed attempt: it is rescheduled with back-off, or fails
+    # permanently after max_attempts. Off by default: an interrupted job is
+    # released with its attempts unchanged, as a shutdown isn't the job's
+    # fault - but then a job that always outlasts shutdown_timeout comes
+    # back on every deploy.
+    cattr_accessor :count_shutdown_interrupts
+
     # Lock heartbeats (off by default). While a job runs, its worker process
     # refreshes the job's lock every lock_heartbeat_interval seconds, and a
     # lock not refreshed for lock_timeout seconds counts as abandoned: its
@@ -99,6 +107,7 @@ module Delayed
       self.lock_timeout      = DEFAULT_LOCK_TIMEOUT
       self.on_thread_error   = nil
       self.silence_polling   = false
+      self.count_shutdown_interrupts = false
       self.exit_on_complete  = nil
       self.min_priority      = nil
       self.max_priority      = nil
@@ -283,7 +292,7 @@ module Delayed
       @quiet = options.key?(:quiet) ? options[:quiet] : true
 
       [:min_priority, :max_priority, :sleep_delay, :read_ahead, :queues, :exit_on_complete, :shutdown_timeout,
-       :lock_heartbeat_interval, :lock_timeout, :silence_polling].each do |option|
+       :lock_heartbeat_interval, :lock_timeout, :silence_polling, :count_shutdown_interrupts].each do |option|
         self.class.send("#{option}=", options[option]) if options.key?(option)
       end
 

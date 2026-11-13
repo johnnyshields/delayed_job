@@ -661,6 +661,93 @@ describe 'Stopping a worker' do
     end
   end
 
+  describe 'Worker.count_shutdown_interrupts' do
+    before { Delayed::Worker.shutdown_timeout = 0 }
+
+    def interrupt_running(job_payload)
+      job = Delayed::Job.enqueue(job_payload)
+      thread = run_until_started(1)
+      dispatcher.stop
+      Timeout.timeout(10) { thread.join }
+      job.reload
+    end
+
+    it 'is off by default, set by Worker.new options, and reset' do
+      expect(Delayed::Worker.count_shutdown_interrupts).to be false
+      Delayed::Worker.new(:count_shutdown_interrupts => true)
+      expect(Delayed::Worker.count_shutdown_interrupts).to be true
+      Delayed::Worker.reset
+      expect(Delayed::Worker.count_shutdown_interrupts).to be false
+    end
+
+    it 'when off, releases an interrupted job with its attempts unchanged' do
+      job = interrupt_running(GateJob.new(:a))
+      expect([job.attempts, job.locked_by, job.last_error]).to eq [0, nil, nil]
+    end
+
+    context 'when on' do
+      before { Delayed::Worker.count_shutdown_interrupts = true }
+
+      it 'counts an interrupted job as a failed attempt, rescheduled with back-off' do
+        run_at = Delayed::Job.db_time_now
+        job = interrupt_running(GateJob.new(:a))
+        expect(GateJob.interrupted).to eq [:a]
+        expect(job.attempts).to eq 1
+        expect(job.locked_by).to be_nil
+        expect(job.locked_at).to be_nil
+        expect(job.run_at).to be > run_at
+        expect(job.last_error).to start_with 'Shutdown timeout of 0s exceeded'
+        expect(log.map(&:last).grep(/interrupted by shutdown; counted as a failed attempt/).size).to eq 1
+        expect(log.map(&:last).grep(/released for another worker/)).to be_empty
+      end
+
+      it 'fails a job permanently once it used up its attempts' do
+        Delayed::Worker.max_attempts = 1
+        Delayed::Worker.destroy_failed_jobs = false
+        job = interrupt_running(GateJob.new(:a))
+        expect(job.failed_at).not_to be_nil
+        expect(job.attempts).to eq 1
+      ensure
+        Delayed::Worker.destroy_failed_jobs = true
+      end
+
+      it 'runs :error callbacks' do
+        dispatcher # Worker.new resets the lifecycle.
+        errors = []
+        Delayed::Worker.lifecycle.before(:error) { |_w, job| errors << job.id }
+        job = interrupt_running(GateJob.new(:a))
+        expect(errors).to eq [job.id]
+      end
+
+      it 'counts a job interrupted by QUIT too' do
+        job = Delayed::Job.enqueue(GateJob.new(:a))
+        thread = run_until_started(1)
+        dispatcher.quit
+        Timeout.timeout(10) { thread.join }
+        job.reload
+        expect(job.attempts).to eq 1
+        expect(job.last_error).to start_with 'Quitting'
+      end
+
+      it 'does not count jobs that finished before the shutdown' do
+        Delayed::Worker.shutdown_timeout = nil
+        job = Delayed::Job.enqueue(GateJob.new(:a))
+        thread = run_until_started(1)
+        dispatcher.stop
+        GateJob.release = true
+        Timeout.timeout(10) { thread.join }
+        expect(Delayed::Job.all).not_to include(job)
+      end
+
+      it 'still releases the lock when recording the attempt fails' do
+        allow_any_instance_of(Delayed::Worker).to receive(:fail_attempt).and_raise(IOError, 'db down')
+        allow(Delayed::Job).to receive(:clear_locks!).and_call_original
+        interrupt_running(GateJob.new(:a))
+        expect(log.map(&:last).grep(/Could not release the jobs of .*IOError: db down/).size).to eq 1
+      end
+    end
+  end
+
   describe 'Worker#initialize' do
     it 'sets the shutdown timeout' do
       Delayed::Worker.new(:shutdown_timeout => 12.5)

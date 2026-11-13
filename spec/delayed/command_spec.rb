@@ -263,6 +263,18 @@ describe Delayed::Command do
     end
   end
 
+  describe '--count-shutdown-interrupts arg' do
+    context 'not set' do
+      let(:options) { [] }
+      it { expect(output_options).not_to have_key(:count_shutdown_interrupts) }
+    end
+
+    context 'set' do
+      let(:options) { %w[--count-shutdown-interrupts] }
+      it { expect(output_options[:count_shutdown_interrupts]).to be true }
+    end
+  end
+
   describe '--shutdown-on-worker-kill arg' do
     context 'not set' do
       let(:options) { [] }

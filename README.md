@@ -420,6 +420,16 @@ SIGKILLs any worker process still running 10 seconds after that.
 doesn't catch it. A released job runs again from the start, so jobs should be
 safe to retry.
 
+A job that never finishes within the shutdown timeout would come back on every
+deploy without ever failing. To count each interruption as a failed attempt
+instead (rescheduled with back-off, failing permanently after `max_attempts`):
+
+```
+RAILS_ENV=production script/delayed_job --fork --shutdown-timeout=20 --count-shutdown-interrupts start
+COUNT_SHUTDOWN_INTERRUPTS=1 SHUTDOWN_TIMEOUT=20 rake jobs:work
+Delayed::Worker.count_shutdown_interrupts = true
+```
+
 #### Lock heartbeats
 
 A worker locks each job it runs. If the worker dies or hangs without its

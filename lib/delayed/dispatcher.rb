@@ -528,8 +528,8 @@ module Delayed
               synchronize { @running.delete(Thread.current) }
               job_finished(worker, result)
             end
-          rescue ShutdownInterrupt
-            release_interrupted(worker, synchronize { @running.delete(Thread.current) })
+          rescue ShutdownInterrupt => interrupt
+            release_interrupted(worker, synchronize { @running.delete(Thread.current) }, interrupt)
           end
         end
       end
@@ -659,9 +659,16 @@ module Delayed
     end
 
     # Releases a job interrupted by shutdown for another worker to run: its
-    # lock is cleared, its attempts and run_at are left as they were.
-    def release_interrupted(worker, job)
-      worker.job_say(job, 'interrupted by shutdown; released for another worker', 'warn') if job
+    # lock is cleared, its attempts and run_at are left as they were - or,
+    # with Worker.count_shutdown_interrupts, it is recorded as a failed
+    # attempt (rescheduled with back-off, or failed after max_attempts).
+    def release_interrupted(worker, job, interrupt = nil)
+      if job && Worker.count_shutdown_interrupts
+        worker.job_say(job, 'interrupted by shutdown; counted as a failed attempt', 'warn')
+        worker.fail_attempt(job, interrupt || ShutdownInterrupt.new('interrupted by shutdown'))
+      elsif job
+        worker.job_say(job, 'interrupted by shutdown; released for another worker', 'warn')
+      end
       Delayed::Job.clear_locks!(worker.name)
       Delayed.instrument(:locks_released, :workers => [worker.name], :count => job ? 1 : 0, :reason => 'shutdown') if job
     rescue StandardError => error
