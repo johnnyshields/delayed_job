@@ -169,6 +169,28 @@ describe 'Rake tasks' do
       end
     end
 
+    %w[1 true].each do |value|
+      context "SHUTDOWN_ON_WORKER_KILL=#{value}" do
+        let(:env) { {'SHUTDOWN_ON_WORKER_KILL' => value} }
+        let(:exp_args) { {:quiet => false, :processes => 1, :shutdown_on_worker_kill => true} }
+        it do
+          expect_success
+          run_task
+        end
+      end
+    end
+
+    %w[0 false].each do |value|
+      context "SHUTDOWN_ON_WORKER_KILL=#{value}" do
+        let(:env) { {'SHUTDOWN_ON_WORKER_KILL' => value} }
+        let(:exp_args) { {:quiet => false, :processes => 1} }
+        it do
+          expect_success
+          run_task
+        end
+      end
+    end
+
     %w[0 false].each do |value|
       context "SILENCE_POLLING=#{value}" do
         let(:env) { {'SILENCE_POLLING' => value} }

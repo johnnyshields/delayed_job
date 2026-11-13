@@ -32,6 +32,7 @@ namespace :jobs do
     @options[:lock_heartbeat_interval] = Float(ENV['LOCK_HEARTBEAT']) if ENV['LOCK_HEARTBEAT']
     @options[:lock_timeout] = Float(ENV['LOCK_TIMEOUT']) if ENV['LOCK_TIMEOUT']
     @options[:silence_polling] = true if ENV['SILENCE_POLLING'] && ENV['SILENCE_POLLING'] !~ /\A(?:|0|f|false)\z/i
+    @options[:shutdown_on_worker_kill] = true if ENV['SHUTDOWN_ON_WORKER_KILL'] && ENV['SHUTDOWN_ON_WORKER_KILL'] !~ /\A(?:|0|f|false)\z/i
     # PIDFILE=path, or PIDFILE=1 for tmp/pids/delayed_job.pid.
     if ENV['PIDFILE'] && ENV['PIDFILE'] !~ /\A(?:|0|f|false)\z/i
       @options[:pid_file] = ENV['PIDFILE'] =~ /\A(?:1|t|true)\z/i ? true : ENV['PIDFILE']

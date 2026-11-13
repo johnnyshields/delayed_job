@@ -108,6 +108,9 @@ module Delayed
         opt.on('--lock-timeout N', 'With --lock-heartbeat, seconds after which a lock that was not refreshed counts as abandoned (default: 300)') do |n|
           @options[:lock_timeout] = Float(n) rescue 0
         end
+        opt.on('--shutdown-on-worker-kill', 'With --fork, shut down all workers when one is SIGKILLed (default: replace it)') do
+          @options[:shutdown_on_worker_kill] = true
+        end
         opt.on('--silence-polling', "Don't log the database queries of polling for jobs and refreshing their locks") do
           @options[:silence_polling] = true
         end

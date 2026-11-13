@@ -10,10 +10,17 @@ module Delayed
 
       # options[:pid_file]: true writes a pidfile named after this process
       # in options[:pid_dir]; a String is the pidfile's path. Off by default.
+      #
+      # options[:shutdown_on_worker_kill]: when a worker process is SIGKILLed
+      # (e.g. by the OOM killer), shut down all workers, as delayed_job did
+      # before recovering dead workers' jobs. By default, it is replaced
+      # like any other worker process that died.
       def initialize(options)
         pid_file = options.delete(:pid_file)
+        shutdown_on_worker_kill = options.delete(:shutdown_on_worker_kill)
         super
         @pid_file = pid_file
+        @shutdown_on_worker_kill = !!shutdown_on_worker_kill
       end
 
       def launch
@@ -193,14 +200,17 @@ module Delayed
           logger.info "Worker #{worker_name} exited - #{child_status}"
           recover_jobs_of_worker(worker_name, worker_pid, options, child_status)
 
-          # If any child was SIGKILL'ed, we must shutdown all children.
-          # This first will attempt a graceful SIGTERM of the children,
-          # followed by a SIGKILL after a timeout period.
           if child_status.termsig == 9 && !@killed
-            @killed = true
-            logger.warn "Worker #{worker_name} SIGKILL detected. #{parent_name} shutting down..."
-            shutdown(KILL_TIMEOUT)
-            next
+            # With :shutdown_on_worker_kill, a SIGKILLed worker shuts down
+            # all of them: SIGTERM, then SIGKILL after KILL_TIMEOUT.
+            if @shutdown_on_worker_kill
+              @killed = true
+              logger.warn "Worker #{worker_name} SIGKILL detected. #{parent_name} shutting down..."
+              shutdown(KILL_TIMEOUT)
+              next
+            end
+            # Otherwise it is replaced, its jobs recovered (above).
+            logger.warn "Worker #{worker_name} was SIGKILLed (e.g. by the OOM killer)#{'; replacing it' unless @stopped}"
           end
 
           break if @stopped && workers.empty?

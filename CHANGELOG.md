@@ -20,6 +20,7 @@ Unreleased
 * Live process titles: each worker process shows its busy threads, queues and state, e.g. `delayed_job.0: 3/4 busy, queues=mailers` or `delayed_job.1: stopping, 1/4 busy, queues=*` (`Dispatcher#procline`, `:procline` option).
 * After a poll that reserved some jobs but fewer than its idle threads, a worker polls again at once if the backend says such a batch may leave jobs behind (new hook `Delayed::Job.partial_batch_may_leave_jobs?`, default false: e.g. a batch-reserving backend that lost candidates to other processes). Otherwise idle threads poll again after `sleep_delay`.
 * Workers wake up immediately from their idle sleep when stopped.
+* BREAKING: a forked worker process that is SIGKILLed (e.g. by the OOM killer) is now replaced, with its jobs recovered, instead of making the parent shut down every worker. `--shutdown-on-worker-kill` (rake: `SHUTDOWN_ON_WORKER_KILL=1`) restores the old behaviour.
 * `Delayed::Worker.reset` also resets `exit_on_complete`, `min_priority`, `max_priority` and `default_queue_name` to their defaults (nil).
 * `Delayed::Worker.on_thread_error` handlers may take no arguments, one (the error) or two (the error and its info).
 * `--sleep-delay` and `SLEEP_DELAY` accept fractional seconds (e.g. `0.5`) and reject negative or non-numeric values with an `ArgumentError` (`--sleep-delay giraffe` used to leave the delay unset, and `010` meant 8). A worker whose `sleep_delay` is unset uses the default of 5 seconds.

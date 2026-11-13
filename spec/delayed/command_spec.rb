@@ -263,6 +263,18 @@ describe Delayed::Command do
     end
   end
 
+  describe '--shutdown-on-worker-kill arg' do
+    context 'not set' do
+      let(:options) { [] }
+      it { expect(output_options).not_to have_key(:shutdown_on_worker_kill) }
+    end
+
+    context 'set' do
+      let(:options) { %w[--shutdown-on-worker-kill] }
+      it { expect(output_options[:shutdown_on_worker_kill]).to be true }
+    end
+  end
+
   describe '--silence-polling arg' do
     context 'not set' do
       let(:options) { [] }

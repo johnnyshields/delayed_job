@@ -9,13 +9,36 @@ describe 'A worker process dying while running jobs', :processes do
 
   let(:worker_settings) { {:sleep_delay => 0.1, :max_run_time => 3600} }
 
-  # A worker process killed with SIGKILL makes the launcher shut down all
-  # workers (see Forking#run_loop); a crash with a failure status gets the
-  # worker replaced. Either way, the dead worker's job is recovered at once.
+  # A dead worker process (SIGKILLed, or crashed with a failure status) is
+  # replaced, and its job recovered at once. With :shutdown_on_worker_kill,
+  # a SIGKILLed one makes the launcher shut down all workers instead.
   context 'when it is SIGKILLed' do
-    it 'recovers its job as a failed attempt instead of leaving it locked' do
+    it 'recovers its job and replaces the worker, leaving the others running' do
       job = enqueue_process_job(ProcessJobs::KillJob.new('killed', 'KILL'))
-      status, output = run_launcher(:processes => 2, :worker => worker_settings)
+      pid, reader = spawn_launcher(:processes => 2, :worker => worker_settings)
+      wait_for { reload_job(job).attempts == 1 }
+      output = +''
+      wait_for { (output << read_available(reader)) =~ /Worker delayed_job\.2 started - pid \d+/ }
+      later = enqueue_process_job(ProcessJobs::SleepJob.new('after the kill', 0))
+      wait_for { reload_job(later).nil? } # The launcher still works jobs.
+      Process.kill('TERM', -pid)
+      status, rest = wait_for_launcher(pid, reader)
+      output << rest
+
+      expect(status).to be_success
+      expect(output).to match(/Worker delayed_job\.\d was SIGKILLed \(e\.g\. by the OOM killer\); replacing it/)
+      expect(output).not_to match(/SIGKILL detected/)
+      expect(output).to match(/Recovered 1 job\(s\) left locked by worker delayed_job\.\d \(pid \d+\)/)
+      job = reload_job(job)
+      expect([job.locked_by, job.attempts]).to eq [nil, 1]
+      expect(job.last_error).to match(/\AWorker process delayed_job\.\d \(pid \d+\) was killed by signal 9/)
+      expect(ProcessHelpers::Run.where(:key => 'after the kill').count).to eq 1
+    end
+
+    it 'with :shutdown_on_worker_kill, recovers its job and shuts down all workers' do
+      job = enqueue_process_job(ProcessJobs::KillJob.new('killed', 'KILL'))
+      status, output = run_launcher(:processes => 2, :shutdown_on_worker_kill => true, :worker => worker_settings)
+      expect(output).to match(/SIGKILL detected\. delayed_job \(parent\) shutting down/)
 
       expect(status).to be_success
       expect(output).to match(/Recovered 1 job\(s\) left locked by worker delayed_job\.\d \(pid \d+\)/)
@@ -104,6 +127,9 @@ describe 'A worker process dying while running jobs', :processes do
       wait_for { ProcessHelpers::Job.where.not(:locked_by => nil).count == 3 }
       child = ProcessHelpers::Job.where.not(:locked_by => nil).first.locked_by[/pid:(\d+)/, 1].to_i
       Process.kill('KILL', child)
+      # Recovered (rescheduled about 6s later), then stop before they rerun.
+      wait_for { jobs.all? { |j| reload_job(j).attempts == 1 } }
+      Process.kill('TERM', -pid)
       status, output = wait_for_launcher(pid, reader)
 
       expect(status).to be_success
@@ -121,11 +147,16 @@ describe 'A worker process dying while running jobs', :processes do
     wait_for { reload_job(slow).locked_by }
     healthy = reload_job(slow).locked_by
     victim = enqueue_process_job(ProcessJobs::KillJob.new('victim', 'KILL'), :queue => 'kill')
+    wait_for { reload_job(victim).attempts == 1 }
+    healthy_pid = healthy[/pid:(\d+)/, 1].to_i
+    wait_for { reload_job(slow).nil? }
+    expect(Process.kill(0, healthy_pid)).to eq 1 # Still running: only the dead worker was replaced.
+    Process.kill('TERM', -pid)
     status, output = wait_for_launcher(pid, reader)
 
     expect(status).to be_success
     expect(output).to match(/Recovered 1 job\(s\) left locked by worker delayed_job\.1/)
-    # The healthy worker was shut down gracefully and finished its job.
+    # The healthy worker finished its job, undisturbed.
     expect(ProcessHelpers::Run.where(:key => 'survivor').count).to eq 1
     expect(reload_job(slow)).to be_nil
     victim = reload_job(victim)

@@ -205,11 +205,56 @@ describe 'Recovering the jobs of a dead worker process' do
         launcher.send(:run_loop)
       end
 
-      it 'recovers the jobs of a SIGKILLed worker before shutting down the others' do
+      it 'recovers the jobs of a SIGKILLed worker, then replaces it' do
         reap(killed)
         expect(launcher).to receive(:recover_jobs_of_worker).with('delayed_job.1', 99, options, killed).ordered
-        expect(launcher).to receive(:shutdown).with(described_class::KILL_TIMEOUT).ordered
+        expect(launcher).to receive(:add_worker).with(options).ordered
+        expect(launcher).not_to receive(:shutdown)
         launcher.send(:run_loop)
+        expect(launcher.instance_variable_get(:@killed)).to be_falsey
+      end
+
+      it 'says that a SIGKILLed worker is replaced' do
+        reap(killed)
+        logger = instance_double(Logger, :info => nil, :warn => nil, :error => nil)
+        allow(launcher).to receive(:logger).and_return(logger)
+        allow(launcher).to receive(:recover_jobs_of_worker)
+        allow(launcher).to receive(:add_worker)
+        launcher.send(:run_loop)
+        expect(logger).to have_received(:warn).with('Worker delayed_job.1 was SIGKILLed (e.g. by the OOM killer); replacing it')
+      end
+
+      it 'does not replace a SIGKILLed worker while stopping' do
+        reap(killed)
+        launcher.instance_variable_set(:@stopped, true)
+        allow(launcher).to receive(:recover_jobs_of_worker)
+        expect(launcher).not_to receive(:add_worker)
+        expect(launcher).not_to receive(:shutdown)
+        launcher.send(:run_loop)
+      end
+
+      context 'with :shutdown_on_worker_kill' do
+        subject(:launcher) { described_class.new(:processes => 2, :shutdown_on_worker_kill => true) }
+
+        it 'recovers the jobs of a SIGKILLed worker before shutting down the others' do
+          reap(killed)
+          expect(launcher).to receive(:recover_jobs_of_worker).with('delayed_job.1', 99, options, killed).ordered
+          expect(launcher).to receive(:shutdown).with(described_class::KILL_TIMEOUT).ordered
+          expect(launcher).not_to receive(:add_worker)
+          launcher.send(:run_loop)
+        end
+
+        it 'still replaces a worker that crashed' do
+          reap(crashed)
+          allow(launcher).to receive(:recover_jobs_of_worker)
+          expect(launcher).to receive(:add_worker).with(options)
+          expect(launcher).not_to receive(:shutdown)
+          launcher.send(:run_loop)
+        end
+
+        it 'is not passed on to the worker processes' do
+          expect(launcher.instance_variable_get(:@options)).not_to have_key(:shutdown_on_worker_kill)
+        end
       end
     end
 

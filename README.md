@@ -470,6 +470,11 @@ so a job that keeps killing its worker eventually stops. `:error` and
 `:failure` plugin callbacks and the job's `error` and `failure` hooks run as
 for any failed attempt.
 
+The dead worker process is then replaced, as is one that exits for any other
+reason. Delayed Job used to shut down every worker when one was `SIGKILL`ed;
+to keep that, pass `--shutdown-on-worker-kill` (rake:
+`SHUTDOWN_ON_WORKER_KILL=1`, launcher option `:shutdown_on_worker_kill`).
+
 If the database can't be reached at that moment, the jobs' locks expire after
 `max_run_time` as before. Backends support this by implementing
 `Delayed::Job.locked_jobs(worker_name)`; for backends without it, the locks are
