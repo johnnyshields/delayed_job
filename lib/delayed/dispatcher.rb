@@ -166,7 +166,7 @@ module Delayed
         num.times do
           _, job = reserve([worker]).first
           break unless job
-          track_job(worker, job) { worker.perform_job(job) } ? success += 1 : failure += 1
+          untrack_job_after(worker) { worker.perform_job(job) } ? success += 1 : failure += 1
           break if worker.stop?
         end
       end
@@ -468,9 +468,9 @@ module Delayed
                         label, limit, Worker.lock_timeout), 'error')
     end
 
-    # Forgets, once the worker is done with the job, when it started and
-    # its time limit (recorded by #job_timed).
-    def track_job(worker, _job)
+    # Runs the block (the worker's job), then forgets when the job started
+    # and its time limit (recorded by #job_timed) and any overrun report.
+    def untrack_job_after(worker)
       yield
     ensure
       synchronize do
@@ -523,7 +523,7 @@ module Delayed
           until (job = inbox.pop).equal?(STOP)
             discard_stale_interrupts
             synchronize { @running[Thread.current] = job }
-            result = with_reloader { track_job(worker, job) { worker.perform_job(job) } }
+            result = with_reloader { untrack_job_after(worker) { worker.perform_job(job) } }
             synchronize { @running.delete(Thread.current) }
             job_finished(worker, result)
           end

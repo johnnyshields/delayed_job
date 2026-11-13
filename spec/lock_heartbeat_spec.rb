@@ -536,14 +536,14 @@ describe 'Lock heartbeats' do
         expect(messages.map(&:last).grep(/Error while refreshing job locks/)).to be_empty
       end
 
-      describe '#track_job' do
+      describe '#untrack_job_after' do
         it 'returns the result of the block' do
-          expect(dispatcher.send(:track_job, worker, job_with_max_run_time(nil)) { :result }).to eq :result
+          expect(dispatcher.send(:untrack_job_after, worker) { :result }).to eq :result
         end
 
         it 'forgets the job and its overrun report once the block is done' do
           job = job_with_max_run_time(1)
-          dispatcher.send(:track_job, worker, job) do
+          dispatcher.send(:untrack_job_after, worker) do
             job_running(worker, job, 2)
             dispatcher.send(:heartbeat_names)
           end
@@ -554,7 +554,7 @@ describe 'Lock heartbeats' do
         it 'forgets them even when the job raises' do
           job = job_with_max_run_time(1)
           expect do
-            dispatcher.send(:track_job, worker, job) do
+            dispatcher.send(:untrack_job_after, worker) do
               job_running(worker, job, 2)
               dispatcher.send(:heartbeat_names)
               raise Delayed::ShutdownInterrupt
