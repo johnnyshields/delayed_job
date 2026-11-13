@@ -647,7 +647,6 @@ describe 'Stopping a worker' do
       d = Delayed::Dispatcher.new(:threads => 3, :sleep_delay => 0.05)
       allow(d).to receive(:say)
       d.workers.each { |w| allow(w).to receive(:say) }
-      d # Worker.new resets the lifecycle.
       exiting = Queue.new
       Delayed::Worker.lifecycle.before(:perform) { |_worker, _job| Thread.current[:ran_job] = true }
       Delayed::Worker.lifecycle.after(:execute) do |_worker|
