@@ -535,6 +535,7 @@ module Delayed
         Worker.lifecycle.run_callbacks(:execute, worker) do
           until (job = inbox.pop).equal?(STOP)
             discard_stale_interrupts
+            next release_unstarted(worker, job) if past_shutdown_deadline?
             synchronize { @running[Thread.current] = job }
             result = with_reloader { untrack_job_after(worker) { worker.perform_job(job) } }
             synchronize { @running.delete(Thread.current) }
@@ -629,7 +630,17 @@ module Delayed
         @threads.each { |thread| thread.raise(error.class, error.message) if thread.alive? }
       end
       wait_for_threads
-      interrupt_threads(synchronize { @running.keys.select(&:alive?) }) if shutdown_deadline
+      return unless shutdown_deadline
+      interrupt_threads(synchronize { @running.keys.select(&:alive?) })
+      # Also wait for the threads that weren't running a job: they may still
+      # be releasing one handed to them too late (see #release_unstarted),
+      # and must run their :execute callbacks (e.g. ClearLocks) before the
+      # process exits - which would kill them.
+      join_threads(monotonic_now + INTERRUPT_GRACE)
+    end
+
+    def join_threads(deadline)
+      @threads.each { |thread| thread.join([deadline - monotonic_now, 0].max) }
     end
 
     # Waits until every thread exits or the shutdown deadline passes. The
@@ -692,6 +703,31 @@ module Delayed
         @in_flight += 1
       end
       @inboxes[worker] << job
+    end
+
+    # Releases a job handed to the worker that it never started, because the
+    # shutdown deadline passed before it could: unlocked, its attempts
+    # unchanged, for another worker to run.
+    def release_unstarted(worker, job)
+      worker.job_say(job, 'not started before shutdown; released for another worker', 'warn')
+      Delayed::Job.clear_locks!(worker.name)
+      Delayed.instrument(:locks_released, :workers => [worker.name], :count => 1, :reason => 'shutdown')
+    rescue StandardError => error
+      say "Could not release the jobs of #{worker.name}: #{error.class}: #{error.message}", 'error'
+      thread_error(error, 'Releasing interrupted jobs', worker.name)
+    ensure
+      synchronize do
+        @in_flight -= 1
+        @idle << worker
+        signal_event
+      end
+    end
+
+    # Whether the shutdown deadline (see #shutdown_deadline) has passed: jobs
+    # are then interrupted, and none is started any more.
+    def past_shutdown_deadline?
+      deadline = stop? && shutdown_deadline
+      deadline ? monotonic_now >= deadline : false
     end
 
     def job_finished(worker, result)

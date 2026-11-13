@@ -550,6 +550,123 @@ describe 'Stopping a worker' do
     end
   end
 
+  describe 'jobs handed to a thread that has not started them by the shutdown deadline' do
+    let(:reported) { [] }
+    let(:dispatcher) { Delayed::Dispatcher.new(:threads => 1, :sleep_delay => 0.05) }
+
+    before do
+      SimpleJob.runs = 0
+      Delayed::Worker.on_thread_error = ->(error, info) { reported << [error, info] }
+    end
+
+    # Holds the worker thread after it took a job off its inbox, before it
+    # starts it, until the gate opens.
+    def hold_before_start
+      held = Queue.new
+      gate = Queue.new
+      allow(dispatcher).to receive(:discard_stale_interrupts) do
+        held << true
+        gate.pop
+      end
+      [held, gate]
+    end
+
+    def run_and_hold
+      held, gate = hold_before_start
+      thread = Thread.new { dispatcher.run }
+      Timeout.timeout(5) { held.pop }
+      [thread, gate]
+    end
+
+    it 'are released unstarted on quit, attempts unchanged' do
+      job = Delayed::Job.enqueue(SimpleJob.new)
+      thread, gate = run_and_hold
+      dispatcher.quit
+      sleep 0.1
+      gate << true
+      Timeout.timeout(10) { thread.join }
+
+      expect(SimpleJob.runs).to eq 0
+      job.reload
+      expect([job.locked_by, job.locked_at, job.attempts]).to eq [nil, nil, 0]
+      expect(log.map(&:last).grep(/not started before shutdown; released for another worker/).size).to eq 1
+      expect(reported).to be_empty
+    end
+
+    it 'are released unstarted once the shutdown timeout passed' do
+      Delayed::Worker.shutdown_timeout = 0.1
+      job = Delayed::Job.enqueue(SimpleJob.new)
+      thread, gate = run_and_hold
+      dispatcher.stop
+      sleep 0.3 # Past the timeout.
+      gate << true
+      Timeout.timeout(10) { thread.join }
+
+      expect(SimpleJob.runs).to eq 0
+      expect(job.reload.locked_by).to be_nil
+    end
+
+    it 'still run when stopped without a shutdown timeout' do
+      job = Delayed::Job.enqueue(SimpleJob.new)
+      thread, gate = run_and_hold
+      dispatcher.stop
+      sleep 0.1
+      gate << true
+      Timeout.timeout(10) { thread.join }
+
+      expect(SimpleJob.runs).to eq 1
+      expect(Delayed::Job.all).not_to include(job)
+    end
+
+    it 'are not counted as failed attempts with count_shutdown_interrupts' do
+      Delayed::Worker.count_shutdown_interrupts = true
+      job = Delayed::Job.enqueue(SimpleJob.new)
+      thread, gate = run_and_hold
+      dispatcher.quit
+      gate << true
+      Timeout.timeout(10) { thread.join }
+      expect(job.reload.attempts).to eq 0
+    end
+
+    it 'publish locks_released' do
+      events = []
+      subscription = ActiveSupport::Notifications.subscribe('locks_released.delayed_job') { |*args| events << args.last }
+      Delayed::Job.enqueue(SimpleJob.new)
+      thread, gate = run_and_hold
+      dispatcher.quit
+      gate << true
+      Timeout.timeout(10) { thread.join }
+      expect(events).to eq [{:workers => [dispatcher.workers.first.name], :count => 1, :reason => 'shutdown'}]
+    ensure
+      ActiveSupport::Notifications.unsubscribe(subscription)
+    end
+  end
+
+  describe 'shutting down with a deadline' do
+    it 'waits for every thread, running a job or not, before returning' do
+      d = Delayed::Dispatcher.new(:threads => 3, :sleep_delay => 0.05)
+      allow(d).to receive(:say)
+      d.workers.each { |w| allow(w).to receive(:say) }
+      d # Worker.new resets the lifecycle.
+      exiting = Queue.new
+      Delayed::Worker.lifecycle.before(:perform) { |_worker, _job| Thread.current[:ran_job] = true }
+      Delayed::Worker.lifecycle.after(:execute) do |_worker|
+        # Slow callbacks (e.g. ClearLocks on a remote database) on the
+        # threads that ran no job: the busy one is done long before them.
+        sleep 0.5 unless Thread.current[:ran_job]
+        exiting << Thread.current
+      end
+      Delayed::Job.enqueue(GateJob.new(:a))
+      thread = Thread.new { d.run }
+      Timeout.timeout(5) { GateJob.started.pop }
+      d.quit
+      Timeout.timeout(10) { thread.join }
+
+      expect(exiting.size).to eq 3 # Every thread ran its :execute callbacks.
+      expect(d.instance_variable_get(:@threads)).to all(satisfy { |t| !t.alive? })
+    end
+  end
+
   describe '#quit' do
     it 'interrupts running jobs at once, even without a shutdown timeout' do
       jobs = enqueue(GateJob.new(:a))

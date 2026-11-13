@@ -162,9 +162,34 @@ describe 'Recovering the jobs of a dead worker process' do
         launcher.send(:recover_jobs_of_worker, 'delayed_job.1', 99, {}, crashed)
       end
 
-      it 'does nothing for a worker that exited cleanly' do
-        expect(Delayed::Worker).not_to receive(:recover_jobs_of)
-        launcher.send(:recover_jobs_of_worker, 'delayed_job.1', 99, options, double(:success? => true))
+      describe 'a worker that exited cleanly' do
+        let(:clean) { double('Process::Status', :success? => true) }
+
+        it 'does not count its jobs as failed attempts' do
+          expect(Delayed::Worker).not_to receive(:recover_jobs_of)
+          launcher.send(:recover_jobs_of_worker, 'delayed_job.1', 99, options, clean)
+        end
+
+        it 'releases locks it left, attempts unchanged' do
+          names = Delayed::Worker.lock_names('delayed_job.1 ', 99, 2)
+          left = Delayed::Job.enqueue(SimpleJob.new)
+          left.locked_by = names.last
+          left.locked_at = Delayed::Job.db_time_now
+          left.save!
+          other = Delayed::Job.enqueue(SimpleJob.new)
+          other.locked_by = 'delayed_job.2 host:x pid:100 thread:0'
+          other.locked_at = Delayed::Job.db_time_now
+          other.save!
+          launcher.send(:recover_jobs_of_worker, 'delayed_job.1', 99, options, clean)
+          expect([left.reload.locked_by, left.locked_at, left.attempts]).to eq [nil, nil, 0]
+          expect(other.reload.locked_by).to eq 'delayed_job.2 host:x pid:100 thread:0' # Another worker's.
+        end
+
+        it 'releases the locks of every one of its threads' do
+          names = Delayed::Worker.lock_names('delayed_job.1 ', 99, 2)
+          names.each { |name| expect(Delayed::Job).to receive(:clear_locks!).with(name) }
+          launcher.send(:recover_jobs_of_worker, 'delayed_job.1', 99, options, clean)
+        end
       end
 
       it 'logs and carries on when the database cannot be reached' do

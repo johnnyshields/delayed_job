@@ -350,8 +350,8 @@ module Delayed
       # attempt (see Delayed::Worker.recover_jobs_of). If the database can't
       # be reached, the locks are left to expire.
       def recover_jobs_of_worker(worker_name, pid, options, status)
-        return if status.success?
         lock_names = Delayed::Worker.lock_names("#{worker_name} ", pid, threads(options))
+        return release_locks_of_exited(lock_names) if status.success?
         count = Delayed::Worker.recover_jobs_of(lock_names, ProcessExitError.new(worker_name, pid, status))
         logger.warn "Recovered #{count} job(s) left locked by child process #{worker_name} (pid #{pid})" if count > 0
       rescue StandardError => error
@@ -360,6 +360,13 @@ module Delayed
         Delayed::Worker.thread_error(error, :context => 'Recovering jobs', :worker => worker_name, :pid => pid)
       ensure
         disconnect_backend
+      end
+
+      # A child process that exited cleanly released its jobs' locks itself;
+      # any left (a job that ignored its shutdown interrupt) are stale now
+      # that it is gone: release them, attempts unchanged, for another worker.
+      def release_locks_of_exited(lock_names)
+        lock_names.each { |name| Delayed::Job.clear_locks!(name) }
       end
 
       # Drops the connections opened by recovery, so the next forked worker
