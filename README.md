@@ -302,8 +302,9 @@ When using threads:
   `config/database.yml`). A warning is logged if it is too small.
 * All threads of a process work the same queues, and every process runs the
   same number of threads.
-* Under Rails, each job runs inside the Rails reloader, so code reloading in
-  development stays safe.
+* Under Rails, each job runs inside the Rails reloader (see Development below),
+  which also resets per-job state such as `ActiveSupport::CurrentAttributes`
+  and returns database connections to the pool after each job.
 * On `SIGTERM`/`SIGINT`, running jobs finish before the process exits, as with
   single-threaded workers.
 
@@ -530,6 +531,13 @@ Rake uses Forking Mode (see above) under-the-hood.
 In `development` environment, Delayed Job runs each job inside the Rails
 reloader, so your application code is reloaded before a job when it has changed.
 You should not need to restart Delayed Job each time you update your code.
+
+With several threads (`--threads`), code is only reloaded once no thread is
+running a job, so a running job never sees half-reloaded classes. While a job
+runs, the other threads keep picking up jobs as usual - but once you change
+code, the next job to start waits until the running ones finish, then runs on
+the new code. So in development a long job holds up the others after each code
+change; run a single thread there if that gets in your way.
 
 ## Advanced Topics
 
