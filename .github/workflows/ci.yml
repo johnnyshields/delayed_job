@@ -51,6 +51,9 @@ jobs:
         github-token: ${{ secrets.github_token }}
         flag-name: run-${{ matrix.ruby }}-${{ matrix.rails_version }}
         parallel: true
+        # Reporting coverage must not fail the build, e.g. on a fork with no
+        # Coveralls project.
+        fail-on-error: false
 
   finish:
     needs: test
@@ -62,3 +65,4 @@ jobs:
       with:
         github-token: ${{ secrets.github_token }}
         parallel-finished: true
+        fail-on-error: false
