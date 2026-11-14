@@ -4,6 +4,26 @@
 require 'active_record'
 require 'delayed_job'
 
+# Waits for a locked SQLite database in Ruby (sleeping, so other threads
+# run), as Rails 8 does. Rails 7.2 sets the C-level busy_timeout instead,
+# which keeps the GVL while it waits: a thread waiting for the lock then
+# stops the thread holding it from committing, until the timeout raises
+# "database is locked" (e.g. a lock heartbeat waiting on a worker thread).
+module SqliteBusyHandlerInRuby
+  def configure_connection
+    super
+    raw = @raw_connection
+    raw.busy_handler_timeout = self.class.type_cast_config_to_integer(@config[:timeout]) if @config[:timeout] && raw.respond_to?(:busy_handler_timeout=)
+  end
+end
+if defined?(ActiveRecord::ConnectionAdapters::SQLite3Adapter) || (begin
+  require 'active_record/connection_adapters/sqlite3_adapter'
+rescue LoadError
+  false
+end)
+  ActiveRecord::ConnectionAdapters::SQLite3Adapter.prepend(SqliteBusyHandlerInRuby)
+end
+
 module Delayed
   module Backend
     module SqliteFile

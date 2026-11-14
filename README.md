@@ -320,6 +320,11 @@ When using threads:
 * The database connection pool must hold at least one connection per thread
   plus one for the dispatcher, and one more with lock heartbeats (`pool` in
   `config/database.yml`). A warning is logged if it is too small.
+* On SQLite with Rails before 8.0, the `timeout` option of `database.yml`
+  waits for a locked database without letting other threads run, so a thread
+  waiting for the lock stops the thread holding it until the timeout raises
+  "database is locked". Use Rails 8, or set
+  `raw_connection.busy_handler_timeout = <ms>` on each connection.
 * All threads of a process work the same queues, and every process runs the
   same number of threads.
 * Under Rails, each job runs inside the Rails reloader (see Development below),

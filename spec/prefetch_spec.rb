@@ -595,9 +595,11 @@ describe 'Prefetching jobs (Worker.prefetch)' do
         m.call
       ensure
         failing.make_false
+        # Only now: threads that finished their jobs earlier would take
+        # their queued jobs and release them themselves (see #work_jobs).
+        GateJob.release = true
       end
       d.stop
-      GateJob.release = true
       Timeout.timeout(10) { thread.join }
       expect(log.map(&:last)).to include 'Could not release the queued jobs: IOError: down'
       expect(Delayed::Job.all.size).to eq 4

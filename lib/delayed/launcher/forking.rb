@@ -1,3 +1,5 @@
+require 'concurrent/array'
+
 module Delayed
   module Launcher
     class Forking < Base
@@ -21,6 +23,9 @@ module Delayed
         super
         @pid_file = pid_file
         @workers_lock = Mutex.new # Before any thread uses it (see #workers_lock).
+        # Before any signal trap uses them (see #child_signals).
+        @stop_signals = Concurrent::Array.new
+        @child_signals = Concurrent::Array.new
       end
 
       def launch
@@ -172,9 +177,7 @@ module Delayed
 
       # Signals that stopped the launcher (a signal, #shutdown or #kill), in
       # the order received. Signal-trap safe: appended to, never replaced.
-      def stop_signals
-        @stop_signals ||= []
-      end
+      attr_reader :stop_signals
 
       # A signal that arrived while booting (before the dispatcher's traps
       # replace the launcher's) is passed on - the same list, so that one
@@ -267,9 +270,10 @@ module Delayed
         child_signals << signal unless child_signals.include?(signal)
       end
 
-      def child_signals
-        @child_signals ||= []
-      end
+      # A Concurrent::Array, as are #stop_signals: on JRuby, signal traps run
+      # on threads of their own, in parallel, and Array#<< could lose one.
+      # On CRuby it is a plain Array, safe in a trap (where a Mutex isn't).
+      attr_reader :child_signals
 
       # Writes the pidfile before anything else, so that a second launcher
       # exits (with Delayed::AlreadyRunningError) before booting workers.

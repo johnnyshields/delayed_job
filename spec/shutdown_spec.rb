@@ -1495,6 +1495,21 @@ describe 'Signals received while a worker process starts up' do
       expect(parent_trap_ran).to be false
     end
 
+    # On JRuby, each signal trap runs on a thread of its own, in parallel.
+    it 'loses no signal recorded by traps running at once' do
+      threads = Array.new(8) do |t|
+        Thread.new do
+          100.times do |i|
+            launcher.send(:child_signal, "S#{t}-#{i}")
+            launcher.send(:stop_signals) << "S#{t}-#{i}"
+          end
+        end
+      end
+      threads.each(&:join)
+      expect(launcher.send(:child_signals).size).to eq 800
+      expect(launcher.send(:stop_signals).compact.size).to eq 800
+    end
+
     it 'records each signal once, though it may arrive twice' do
       pending = launcher.send(:capture_signals)
       Process.kill('TERM', Process.pid)
