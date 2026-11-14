@@ -38,4 +38,22 @@ module ProcessJobs
       exit!(status)
     end
   end
+
+  # Runs a command and records whether its status was read: "<key>:true".
+  SystemJob = Struct.new(:key) do
+    def perform
+      started = Time.now.to_f
+      system('true')
+      ProcessJobs.record("#{key}:#{$?&.success? || false}", started)
+    end
+  end
+
+  # Leaves the process running it unsafe to fork (see
+  # Delayed::Worker.no_longer_fork_safe!), then records its run.
+  ForkUnsafeJob = Struct.new(:key) do
+    def perform
+      Delayed::Worker.no_longer_fork_safe!
+      ProcessJobs.record(key, Time.now.to_f)
+    end
+  end
 end

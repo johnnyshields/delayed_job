@@ -41,6 +41,8 @@ Delayed::ProcessUtil.define_singleton_method(:enable_child_subreaper) { false } 
 broken_mold = options.delete(:broken_mold)
 # Seconds a mold sleeps in a before(:mold) hook, before it is ready.
 mold_hook_delay = options.delete(:mold_hook_delay)
+# Each mold logs "before(:mold) <pid> <generation>" and "after(:mold) ...".
+log_mold_hooks = options.delete(:log_mold_hooks)
 
 Delayed::Backend::SqliteFile::Job.connect(db_path)
 Delayed::Worker.backend = Delayed::Backend::SqliteFile::Job
@@ -105,6 +107,15 @@ if mold_hook_delay
         puts "mold #{pid} hook sleeping"
         sleep mold_hook_delay
       end
+    end
+  end
+end
+
+if log_mold_hooks
+  Delayed::Worker.plugins << Class.new(Delayed::Plugin) do
+    callbacks do |lifecycle|
+      lifecycle.before(:mold) { |pid, generation| puts "before(:mold) #{pid} #{generation}" }
+      lifecycle.after(:mold) { |pid, generation| puts "after(:mold) #{pid} #{generation}" }
     end
   end
 end
