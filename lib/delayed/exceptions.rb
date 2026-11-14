@@ -37,12 +37,16 @@ module Delayed
       @worker_name = worker_name
       @pid = pid
       @status = status
-      reason = if status.signaled? then "was killed by signal #{status.termsig}"
-               elsif status.exitstatus then "exited with status #{status.exitstatus}"
-               else 'exited (status unknown: its mold died first)'
-               end
-      super("Child process #{worker_name} (pid #{pid}) #{reason}")
+      super("Child process #{worker_name} (pid #{pid}) #{exit_reason(status)}")
       set_backtrace([])
+    end
+
+  private
+
+    def exit_reason(status)
+      return "was killed by signal #{status.termsig}" if status.signaled?
+      return "exited with status #{status.exitstatus}" if status.exitstatus
+      'exited (status unknown: its mold died first)'
     end
   end
 end

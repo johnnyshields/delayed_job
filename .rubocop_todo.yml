@@ -40,6 +40,12 @@ Metrics/ClassLength:
     - 'lib/delayed/launcher/base.rb'
     - 'lib/delayed/launcher/forking.rb'
 
+# Configuration parameters: CountComments, Max, CountAsOne.
+Metrics/ModuleLength:
+  Exclude:
+    - 'lib/delayed/launcher/mold.rb'
+    - 'lib/delayed/launcher/mold_supervisor.rb'
+
 # Configuration parameters: AllowedMethods, AllowedPatterns, Max.
 Metrics/CyclomaticComplexity:
   Exclude:

@@ -40,15 +40,18 @@ end
 Workers publish `ActiveSupport::Notifications` events named
 `<event>.delayed_job`. Names are `<subject>_<what happened>`: `job_*` for one
 job, `jobs_*` for several at once, `process_*` for a worker process, and
-`thread_error` for errors outside jobs. Timed events (marked ⏱) cover the work
+`mold_*` for a mold process, and `thread_error` for errors outside jobs. Timed events (marked ⏱) cover the work
 they describe and carry `:exception` when it raised.
 
 | Event | When | Published by | Payload |
 |---|---|---|---|
 | `process_started` | A worker process starts its dispatcher | Worker process | `:dispatcher` (name), `:pid`, `:threads`, `:queues`, `:prefetch`, `:prefetch_dynamic` |
 | `process_stopped` | Its dispatcher stopped | Worker process | as `process_started`, plus `:error` (what stopped it, or nil) |
-| `process_spawned` | The forking parent forked a worker process | Launcher (parent) | `:worker`, `:pid`, `:replaces_pid` (pid of the process it replaces, or nil), `:delay` (seconds waited before forking it) |
-| `process_exited` | A forked worker process exited | Launcher (parent) | `:worker`, `:pid`, `:status` (`Process::Status`), `:uptime` (seconds), `:respawn_in` (seconds until it is replaced: 0 at once, more after quick deaths; nil while stopping) |
+| `process_spawned` | The forking parent (or its mold) forked a worker process | Launcher (parent) | `:worker`, `:pid`, `:replaces_pid` (pid of the process it replaces, or nil), `:delay` (seconds waited before forking it), `:mold_pid` (when a mold forked it) |
+| `process_exited` | A forked worker process exited | Launcher (parent) | `:worker`, `:pid`, `:status` (`Process::Status`, or `Delayed::ReportedStatus` as reported by a mold; both unknown if the mold died first), `:uptime` (seconds), `:respawn_in` (seconds until it is replaced: 0 at once, more after quick deaths; nil when not replaced) |
+| `mold_promoted` | A worker process is promoted to mold (see README, Mold process) | Launcher (parent) | `:worker`, `:pid`, `:jobs` (performed), `:trigger` (`:threshold` or `:signal`) |
+| `mold_activated` | A mold is ready; worker processes are reforked from it | Launcher (parent) | `:pid`, `:generation` (1 for the first mold) |
+| `mold_retired` | The previous mold stops forking; it exits once its worker processes have | Launcher (parent) | `:pid` |
 | `jobs_reserved` ⏱ | A poll for jobs (one query, or one per free slot) | Dispatcher thread | `:dispatcher`, `:requested` (free slots: idle threads, plus queue slots with prefetch), `:depth` (prefetch queue depth), `:reserved` |
 | `job_performed` ⏱ | A job ran (successfully or not) | Worker thread | `:job`, `:worker`, `:success` (absent when interrupted: see `:exception`) |
 | `job_attempt_failed` | A job raised; it is rescheduled or, after `max_attempts`, failed | Worker thread (launcher for a dead process' jobs) | `:job`, `:worker`, `:error`, `:attempts` (including this one) |
@@ -60,7 +63,7 @@ they describe and carry `:exception` when it raised.
 | `thread_error` | An error outside a job's own handling (see below) | Any | `:error`, `:context`, and `:dispatcher`, `:worker`, `:job` where known |
 
 `jobs_released` reasons: `shutdown` (interrupted, or queued and never
-started), `process exit` (recovered from a dead worker process, each counting
+started), `promotion` (queued when its worker process was promoted to mold), `process exit` (recovered from a dead worker process, each counting
 a failed attempt), `lock expired in queue` (with prefetch, its lock expired
 while it waited) and `stuck job` (queued behind a job past its
 `max_run_time`).

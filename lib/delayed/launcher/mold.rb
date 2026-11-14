@@ -125,21 +125,31 @@ module Delayed
         Signal.trap('HUP', 'IGNORE')
       end
 
+      # Until retired or stopping with no children left, or the parent is
+      # gone (life pipe EOF; the children then stop by themselves).
       def mold_loop(wake_read)
-        retired = stopping = false
+        @mold_done = false # Retired or stopping: forks nothing more.
         loop do
-          readers = [wake_read, @life_read]
-          readers << @fork_read unless retired || stopping
-          ready = IO.select(readers, nil, nil, 1)&.first || []
-          codes = wake_read.read_nonblock(64, :exception => false)
-          codes = '' unless codes.is_a?(String)
-          retired ||= codes.include?('U')
-          stopping ||= codes.include?('S')
+          ready = wait_for_mold_work(wake_read)
           reap_mold_children
-          return if ready.include?(@life_read) # EOF: the parent is gone; its children stop by themselves.
-          fork_requested_child if ready.include?(@fork_read) && !retired && !stopping
-          return if (retired || stopping) && @mold_children.empty?
+          return if ready.include?(@life_read)
+          fork_requested_child if ready.include?(@fork_read) && !@mold_done
+          return if @mold_done && @mold_children.empty?
         end
+      end
+
+      # Returns the readable pipes; wakes at least every second.
+      def wait_for_mold_work(wake_read)
+        readers = [wake_read, @life_read]
+        readers << @fork_read unless @mold_done
+        ready = IO.select(readers, nil, nil, 1)&.first || []
+        read_mold_wakeups(wake_read)
+        ready
+      end
+
+      def read_mold_wakeups(wake_read)
+        codes = wake_read.read_nonblock(64, :exception => false)
+        @mold_done = true if codes.is_a?(String) && codes.match?(/[US]/)
       end
 
       def fork_requested_child

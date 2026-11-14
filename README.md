@@ -581,6 +581,67 @@ only cleared. A process holds jobs under one lock name per thread (and per
 prefetch slot), so `locked_jobs` and `clear_locks!` are also called with an
 array of names, to list and clear them all in one query each.
 
+#### Mold process (experimental)
+
+Forked worker processes start out sharing the parent's memory copy-on-write,
+but the parent has never run a job. As each child warms up (loading constants
+lazily, filling caches, compiling with YJIT), its pages are copied, and after
+a few days the children share little. With `--mold`, once a child process has
+performed a number of jobs it is *promoted*: it stops like on `SIGTERM`
+(queued jobs are released, running jobs finish) and becomes a **mold**, a
+process that runs no jobs and only forks new child processes. Every child
+process is then reforked from the mold, so they share its warmed memory.
+
+```
+# Promote after 1000 jobs (the default)
+script/delayed_job --fork -n4 --mold start
+
+# Promote again at each threshold (counted per child process since it started)
+script/delayed_job --fork -n4 --mold=1000,5000,20000 start
+MOLD=1000,5000,20000 NUM_PROCESSES=4 rake jobs:work
+
+# or in an initializer
+Delayed::Worker.mold = [1000, 5000, 20000] # true for [1000]
+```
+
+```
+delayed_job (parent)
+ ├─ delayed_job.1: mold
+ │   ├─ delayed_job.2: 2/5 busy, queues=*
+ │   └─ delayed_job.3: 5/5 busy, queues=*
+```
+
+* The child process with the most jobs performed is promoted, preferring one
+  with no job running, so promotion doesn't wait for a long job. Its running
+  jobs finish first (interrupted and released after `--shutdown-timeout`, if
+  set).
+* Child processes are reforked one at a time: each replacement is forked from
+  the mold and starts working before the process it replaces is stopped, so
+  capacity doesn't drop. The previous mold exits once its child processes have.
+* After the last threshold, `SIGURG` to the parent promotes a new mold at any
+  time.
+* Before forking, the mold disconnects the backend (as the parent does) and
+  compacts its heap. Add your own steps with the `:mold` lifecycle hook, e.g.
+  to close clients the children shouldn't share:
+
+  ```ruby
+  class MoldPlugin < Delayed::Plugin
+    callbacks do |lifecycle|
+      lifecycle.before(:mold) { |_pid| Redis.current.disconnect! }
+      lifecycle.after(:mold) { |_pid| puts 'Mold exiting' }
+    end
+  end
+  ```
+* Dying child processes are recovered and replaced as usual. If the mold
+  itself dies, its child processes stop gracefully (as when their parent
+  dies) and are replaced from the parent, until the next promotion.
+* Needs `fork` (not on JRuby or TruffleRuby), and runs only in forking mode
+  (`--fork` or `rake jobs:work`). With `-n1`, no process works jobs while the
+  only one is promoted. It can't be combined with `--identifier`.
+
+Measure the gain before relying on it: compare the children's total PSS
+(`grep Pss /proc/<pid>/smaps_rollup`) before and after a refork.
+
 ### Running via Rake
 
 You may start a worker process using `rake jobs:work`.
@@ -606,6 +667,9 @@ POOLS=mailers,tasks:2|tweets:1|*:2 rake jobs:workoff
 
 # Run 2 worker processes with 5 threads each
 NUM_PROCESSES=2 NUM_THREADS=5 rake jobs:work
+
+# Refork worker processes from a mold after 1000 jobs (see Mold process)
+MOLD=1000 NUM_PROCESSES=4 rake jobs:work
 
 # Write tmp/pids/delayed_job.pid; refuse to start if another launcher holds it
 PIDFILE=1 rake jobs:work
