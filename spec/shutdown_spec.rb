@@ -333,15 +333,24 @@ describe 'Stopping a worker' do
       allow(Delayed::Dispatcher).to receive(:interrupt_masking?).and_return(false)
     end
 
+    # Whether the method was called by Delayed Job's own code: its direct
+    # caller, past rspec-mocks. Not merely with Delayed Job on the stack:
+    # the timeout gem (called by Worker#run) calls Thread.handle_interrupt
+    # itself, when it starts its thread on the first Timeout.timeout.
+    def called_by_delayed_job?(stack)
+      origin = stack.find { |line| !line.include?('/rspec-mocks') && !line.include?(__FILE__) }
+      origin.to_s.include?('lib/delayed/')
+    end
+
     # The dispatcher's own calls to the masking methods, which must not
     # happen without masking.
     def forbid_masking_calls
       allow(Thread).to receive(:handle_interrupt).and_wrap_original do |m, *args, &block|
-        raise 'Thread.handle_interrupt called by the dispatcher' if caller.any? { |l| l.include?('lib/delayed/') }
+        raise 'Thread.handle_interrupt called by the dispatcher' if called_by_delayed_job?(caller)
         m.call(*args, &block)
       end
       allow(Thread).to receive(:pending_interrupt?).and_wrap_original do |m, *args|
-        raise 'Thread.pending_interrupt? called by the dispatcher' if caller.any? { |l| l.include?('lib/delayed/') }
+        raise 'Thread.pending_interrupt? called by the dispatcher' if called_by_delayed_job?(caller)
         m.call(*args)
       end
     end
