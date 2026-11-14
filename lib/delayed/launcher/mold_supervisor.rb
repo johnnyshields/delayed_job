@@ -395,7 +395,7 @@ module Delayed
         error = SystemCallError.new("mold (pid #{mold_pid}) could not fork child process #{index}", errno.to_i)
         Delayed::Worker.thread_error(error, :context => 'Mold forking', :worker => @launcher.child_name(index), :pid => mold_pid)
         count_boot_failure(nil)
-        @launcher.start_child_safely(index, entry[:options], entry[:spawn])
+        start_from_parent(index, entry)
       end
 
       def mold_reaped_child(mold_pid, pid, exitstatus, termsig)
@@ -441,7 +441,13 @@ module Delayed
         @pipes.drain_fork_requests
         pending = @pending_forks.sort_by(&:first)
         @pending_forks.clear
-        pending.each { |index, entry| @launcher.start_child_safely(index, entry[:options], entry[:spawn]) }
+        pending.each { |index, entry| start_from_parent(index, entry) }
+      end
+
+      # Forked from the (cold) parent, it is of no generation: the next
+      # refork replaces it from a mold.
+      def start_from_parent(index, entry)
+        @launcher.start_child_safely(index, entry[:options], entry[:spawn].merge(:generation => nil))
       end
 
       # Old children keep their slots; replacements are dropped or stopped.
@@ -503,9 +509,10 @@ module Delayed
         lose_active_mold(mold, :hung, "did not fork a child process within #{MOLD_FORK_TIMEOUT}s; killed it")
       end
 
+      # Children forked by a mold only: a fork-unsafe mold can deadlock them.
       def check_boot_timeouts
         @children.each do |pid, info|
-          next if info.booted || monotonic_now - info.started_at < boot_timeout
+          next if info.booted || !info.mold_pid || monotonic_now - info.started_at < boot_timeout
           logger.warn "Child process (pid #{pid}) did not start within #{boot_timeout}s; killing it"
           info.started_at = monotonic_now # Killed once.
           signal(pid, 'KILL')
@@ -575,9 +582,14 @@ module Delayed
         [(@children.size * REFORK_SHARE).ceil, 1].max
       end
 
+      # A child process not of the current generation, not already handled:
+      # idle first, then cold ones (forked by the parent) and the oldest.
       def next_to_refork
-        @children.select { |_, info| !current?(info) && !info.retiring && !info.promoted && info.booted }.
-          min_by { |_, info| [info.busy, info.generation] }&.first
+        @children.select { |_, info| reforkable?(info) }.min_by { |_, info| [info.busy, info.generation || -1] }&.first
+      end
+
+      def reforkable?(info)
+        info.booted && !current?(info) && !info.retiring && !info.promoted
       end
 
       def refork(old_pid)

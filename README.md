@@ -635,7 +635,9 @@ group, the cgroup, or the `process_spawned` events (`:mold_pid`).
   database connections), plus the new mold and, briefly, the old one: leave
   memory and connection headroom for that.
 * After the last threshold, `SIGURG` to the parent promotes a new mold, once
-  any refork in progress has finished.
+  any refork in progress has finished. Send it to the parent's pid only, not
+  to the process group (`kill -URG -<pgid>`): each child process takes
+  `SIGURG` as its own promotion, so they would all stop at once.
 * If the mold dies (e.g. killed by the OOM killer), its child processes carry
   on (adopted by the parent; without a subreaper they stop gracefully and are
   replaced), the parent forks new child processes itself, and a new mold is

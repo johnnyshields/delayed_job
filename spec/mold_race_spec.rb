@@ -155,7 +155,7 @@ describe 'Mold process races' do
         supervisor.tick
 
         expect(sent('KILL')).to eq [900]
-        expect(launcher.started).to include [:start, 7, {}, {:generation => 1}]
+        expect(launcher.started).to include [:start, 7, {}, {:generation => nil}]
         expect(logged).to include "did not fork a child process within #{described_class::MOLD_FORK_TIMEOUT}s"
         line('f', 900, 55, 7)
         expect(sent('TERM')).to eq [55]
@@ -335,7 +335,7 @@ describe 'Mold process races' do
         supervisor.request_fork(3, {}, :generation => 1)
         launcher.stopped = true
         supervisor.reaped(900)
-        expect(launcher.started).to include [:start, 3, {}, {:generation => 1}]
+        expect(launcher.started).to include [:start, 3, {}, {:generation => nil}]
         expect(logged).not_to include 'Lost mold'
       end
     end

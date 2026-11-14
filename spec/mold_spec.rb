@@ -357,13 +357,13 @@ describe 'Mold process (Worker.mold)' do
     it 'forks a child itself when the mold fails to' do
       supervisor.instance_variable_get(:@pending_forks)[4] = {:options => {}, :spawn => {}, :at => 0}
       supervisor.send(:handle_status, 'e', 900, 4, 11)
-      expect(launcher.started).to include [:start, 4, {}, {}]
+      expect(launcher.started).to include [:start, 4, {}, {:generation => nil}]
     end
 
     it 'kills a child process that does not boot in time' do
       described_class.boot_timeout = 0
       launcher.workers[10] = ['delayed_job.10', {}]
-      supervisor.child_started(10, {})
+      supervisor.child_started(10, :mold_pid => 900)
       supervisor.send(:check_boot_timeouts)
       expect(signals).to include ['KILL', 10]
     ensure
@@ -403,7 +403,7 @@ describe 'Mold process (Worker.mold)' do
       supervisor.send(:handle_status, 'm', 900, 10)
       supervisor.request_fork(7, {}, {:generation => 1})
       expect(supervisor.reaped(900)).to be true
-      expect(launcher.started).to include [:start, 7, {}, {:generation => 1}]
+      expect(launcher.started).to include [:start, 7, {}, {:generation => nil}]
       expect(supervisor).not_to be_forking_from_mold
       expect(launcher.logged.join).to include 'promoting a new mold in'
     end
@@ -564,6 +564,33 @@ describe 'Mold process (Worker.mold)' do
         expect(lines).to eq ['Mold (pid 900) lost (exited), generation 2; promoting a new mold in 10s',
                              'Promotion of child process (pid 10) to mold failed (timeout); retrying in 20s']
       end
+    end
+
+    it 'only times out the boot of children forked by a mold' do
+      described_class.boot_timeout = 0
+      launcher.workers[10] = ['delayed_job.10', {}]
+      supervisor.child_started(10, {})
+      supervisor.child_started(11, :mold_pid => 900, :generation => 0)
+      supervisor.send(:check_boot_timeouts)
+      expect(signals).to eq [['KILL', 11]]
+    ensure
+      described_class.boot_timeout = 60
+    end
+
+    it 'reforks from the mold a child the parent forked when the mold could not' do
+      boot(10)
+      boot(11)
+      supervisor.send(:handle_status, 'p', 10, 6, 0, 0)
+      supervisor.send(:handle_status, 'M', 10, 900)
+      supervisor.send(:handle_status, 'm', 900, 10)
+      supervisor.instance_variable_get(:@pending_forks)[4] = {:options => {}, :spawn => {:generation => 1}, :at => 0}
+      supervisor.send(:handle_status, 'e', 900, 4, 11)
+      expect(launcher.started).to include [:start, 4, {}, {:generation => nil}]
+      launcher.workers[40] = ['delayed_job.40', {}]
+      supervisor.child_started(40, :generation => nil)
+      supervisor.send(:handle_status, 'b', 40)
+      supervisor.send(:advance_refork)
+      expect(launcher.started).to include [:add, {}, 40]
     end
 
     it 'ignores SIGURG during a promotion' do
