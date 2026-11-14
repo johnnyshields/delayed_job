@@ -184,9 +184,13 @@ describe 'Mold process', :processes do
     enqueue_sleepers(20)
     pid, reader = spawn_launcher(launch_options)
     output = +''
+    # SQLite's own files are left out: it opens its -shm file lazily, so
+    # their count varies by one from child to child.
     fds = lambda do |mold|
       wait_for { mold_children(output << read_available(reader), mold).size >= 2 }
-      mold_children(output, mold).map { |child| Dir.children("/proc/#{child}/fd").size rescue nil }.compact.max
+      mold_children(output, mold).map do |child|
+        Dir.children("/proc/#{child}/fd").count { |fd| !File.readlink("/proc/#{child}/fd/#{fd}").start_with?(@process_db) rescue false }
+      end.max
     end
     molds = [read_until(reader, output, /Mold \(pid (\d+)\) ready/)[1].to_i]
     counts = [fds.call(molds.last)]
