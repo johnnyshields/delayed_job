@@ -246,6 +246,18 @@ describe Delayed::Command do
     end
   end
 
+  describe '--batch-reserve arg' do
+    context 'not set' do
+      let(:options) { [] }
+      it { expect(output_options[:batch_reserve]).to eq nil }
+    end
+
+    context 'set' do
+      let(:options) { %w[--batch-reserve] }
+      it { expect(output_options[:batch_reserve]).to be true }
+    end
+  end
+
   describe '--pid-dir arg' do
     context 'not set' do
       let(:options) { [] }

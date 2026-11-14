@@ -120,6 +120,24 @@ describe 'Rake tasks' do
       end
     end
 
+    context 'BATCH_RESERVE=1' do
+      let(:env) { {'BATCH_RESERVE' => '1'} }
+      let(:exp_args) { {:quiet => false, :processes => 1, :batch_reserve => true} }
+      it do
+        expect_success
+        run_task
+      end
+    end
+
+    context 'BATCH_RESERVE=0' do
+      let(:env) { {'BATCH_RESERVE' => '0'} }
+      let(:exp_args) { {:quiet => false, :processes => 1} }
+      it do
+        expect_success
+        run_task
+      end
+    end
+
     context 'PREFETCH_DYNAMIC=false' do
       let(:env) { {'PREFETCH_DYNAMIC' => 'false'} }
       let(:exp_args) { {:quiet => false, :processes => 1} }

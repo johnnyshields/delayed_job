@@ -49,6 +49,7 @@ or stops them if they're orphaned.
 | Processes | `-n`, `--processes` | `NUM_PROCESSES` | 1 |
 | Threads per process | `-t`, `--threads` | `NUM_THREADS` | 1 |
 | Jobs queued per thread (prefetch) | `--prefetch`, `--prefetch-dynamic` | `PREFETCH`, `PREFETCH_DYNAMIC=1` | 0, off |
+| Batch reservation (backend support) | `--batch-reserve` | `BATCH_RESERVE=1` | off |
 | Queues / pools | `--queues`, `--pool` | `QUEUES`, `POOLS` | all |
 | Idle poll interval (s) | `--sleep-delay` | `SLEEP_DELAY` | 1 |
 | Shutdown timeout (s) | `--shutdown-timeout` | `SHUTDOWN_TIMEOUT` | none (wait) |

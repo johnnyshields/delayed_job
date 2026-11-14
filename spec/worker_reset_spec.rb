@@ -14,6 +14,14 @@ describe 'Delayed::Worker.reset' do
     expect([Delayed::Worker.min_priority, Delayed::Worker.max_priority]).to eq [nil, nil]
   end
 
+  it 'defaults batch_reserve to off, set by Worker.new and reset' do
+    expect(Delayed::Worker.batch_reserve).to be false
+    Delayed::Worker.new(:batch_reserve => true)
+    expect(Delayed::Worker.batch_reserve).to be true
+    Delayed::Worker.reset
+    expect(Delayed::Worker.batch_reserve).to be false
+  end
+
   it 'resets default_queue_name' do
     Delayed::Worker.default_queue_name = 'mail'
     Delayed::Worker.reset

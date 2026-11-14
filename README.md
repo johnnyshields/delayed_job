@@ -384,14 +384,20 @@ locked under a slot name of its own, e.g. `... pid:123 thread:2 slot:1`. Also:
 * If a worker process dies, its queued jobs are recovered like its running ones,
   each counting a failed attempt.
 
+With `--batch-reserve` (`BATCH_RESERVE=1`, `Delayed::Worker.batch_reserve`), a
+worker reserves the jobs for all its free threads in one batch query, on
+backends that implement one (`delayed_job_mongoid` does); others reserve one job
+per thread as before. It is off by default.
+
 Backend authors may override `Delayed::Job.reserve_batch(workers, max_run_time)`
-to reserve jobs for several threads in one query; each returned job must be
+to reserve jobs for several threads in one query, used when
+`Delayed::Worker.batch_reserve` is set; each returned job must be
 locked under the name of the worker it is paired with. A backend whose batch
 may come back short while jobs are still available (it lost candidates to other
 processes) also returns true from `Delayed::Job.partial_batch_may_leave_jobs?`:
 the worker then polls again at once after a short batch. Otherwise (the default)
 a short batch means the queue ran dry, and idle threads poll again after
-`sleep_delay`. `delayed_job_mongoid` does this with `batch_reserve = true`.
+`sleep_delay`.
 
 ### Exit On Complete Mode
 

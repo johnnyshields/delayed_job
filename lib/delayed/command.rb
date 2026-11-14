@@ -120,6 +120,9 @@ module Delayed
         opt.on('--prefetch N', 'Jobs each thread may hold queued behind the one it runs, to start the next one without waiting for a poll (default: 0)') do |n|
           @options[:prefetch] = parse(:prefetch, n)
         end
+        opt.on('--batch-reserve', 'Reserve jobs for several free threads in one query, on backends that support it (e.g. delayed_job_mongoid)') do
+          @options[:batch_reserve] = true
+        end
         opt.on('--prefetch-dynamic', 'Scale the prefetch queue depth with demand: from 0, one level deeper after each poll that gets every job it asks for, back to 0 after one that gets fewer') do
           @options[:prefetch_dynamic] = true
         end

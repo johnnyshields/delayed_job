@@ -32,7 +32,8 @@ module Delayed
         # Reserves up to one job per worker; returns [worker, job] pairs in
         # workers' order, each job locked under its paired worker's name.
         # The default calls #reserve per worker and stops at the first miss;
-        # backends may override with a single query.
+        # backends may override with a single query, used when
+        # Worker.batch_reserve is set.
         def reserve_batch(workers, max_run_time = Worker.max_run_time)
           reserved = []
           workers.each do |worker|

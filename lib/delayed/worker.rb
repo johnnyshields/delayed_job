@@ -39,6 +39,11 @@ module Delayed
     # poll (up to prefetch), and reset to 0 after a partial one.
     cattr_accessor :prefetch, :prefetch_dynamic
 
+    # Reserve jobs for several free threads in one batch query, on backends
+    # that implement one (Job.reserve_batch; e.g. delayed_job_mongoid).
+    # Default false: one reservation per thread.
+    cattr_accessor :batch_reserve
+
     # Called with errors outside job execution (reservation, heartbeats,
     # thread crashes, failure hooks, job recovery); job errors go to the
     # :error lifecycle callback instead. Handler errors are logged and ignored.
@@ -101,6 +106,7 @@ module Delayed
       self.count_shutdown_interrupts = false
       self.prefetch          = DEFAULT_PREFETCH
       self.prefetch_dynamic  = false
+      self.batch_reserve     = false
       self.exit_on_complete  = nil
       self.min_priority      = nil
       self.max_priority      = nil
@@ -315,7 +321,7 @@ module Delayed
 
       [:min_priority, :max_priority, :sleep_delay, :read_ahead, :queues, :exit_on_complete, :shutdown_timeout,
        :lock_heartbeat_interval, :lock_timeout, :silence_polling, :count_shutdown_interrupts,
-       :prefetch, :prefetch_dynamic].each do |option|
+       :prefetch, :prefetch_dynamic, :batch_reserve].each do |option|
         self.class.send("#{option}=", options[option]) if options.key?(option)
       end
 
