@@ -1,7 +1,7 @@
 module Delayed
   module Launcher
-    # Mold process (experimental), parent side; prepended to Forking. Without
-    # Worker.mold every method defers to Forking. See Mold for the pipes.
+    # Mold process (experimental), parent side; included in Forking. Without
+    # Worker.mold every method defers to ForkingBase. See Mold for the pipes.
     #
     # A child process reaching the next threshold (or the busiest one, on
     # SIGURG to the parent) is promoted: it stops gracefully and forks a mold.

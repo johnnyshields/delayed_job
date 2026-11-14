@@ -3,9 +3,8 @@ require 'concurrent/array'
 
 module Delayed
   module Launcher
-    class Forking < Base
-      include Mold
-      prepend MoldSupervisor
+    # The forking launcher without mold support; see Forking.
+    class ForkingBase < Base
       # Seconds past the shutdown timeout (or QUIT) before the parent SIGKILLs
       # workers, so they can interrupt and release their jobs.
       SHUTDOWN_GRACE = Delayed::Dispatcher::INTERRUPT_GRACE + 5
@@ -477,6 +476,12 @@ module Delayed
         return true if pools
         !process_identifier && processes > 1
       end
+    end
+
+    # MoldSupervisor overrides ForkingBase only in mold mode (Worker.mold).
+    class Forking < ForkingBase
+      include Mold
+      include MoldSupervisor
     end
   end
 end
