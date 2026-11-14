@@ -243,8 +243,8 @@ class GateJob
   end
 
   def perform
-    self.class.started << key
     if stubborn
+      self.class.started << key
       # Ignores interrupts, as a job that rescues Exception would.
       loop do
         sleep 0.01 until self.class.release
@@ -254,6 +254,8 @@ class GateJob
       end
     else
       begin
+        # Inside: an interrupt arriving as soon as it started still counts.
+        self.class.started << key
         sleep 0.01 until self.class.release
       rescue StandardError
         raise 'a StandardError rescue must not catch the interrupt'

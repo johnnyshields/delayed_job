@@ -92,4 +92,47 @@ describe 'Dispatcher robustness' do
       Delayed::Worker.setup_lifecycle
     end
   end
+
+  describe 'a worker thread that crashes' do
+    let(:crash) { Class.new(Exception) } # rubocop:disable Lint/InheritException -- escapes job handling
+
+    it 'is recorded before ClearLocks unlocks its job, so no poll can hand that job on' do
+      Delayed::Job.enqueue(SimpleJob.new)
+      crashed_name = nil
+      recorded_at_unlock = Concurrent::Array.new
+      allow(Delayed::Job).to(receive(:clear_locks!).and_wrap_original do |m, name|
+        recorded_at_unlock << !dispatcher.instance_variable_get(:@thread_error).nil? if name == crashed_name
+        m.call(name)
+      end)
+      dispatcher.workers.each do |w|
+        allow(w).to receive(:perform_job) do
+          crashed_name = w.name
+          raise crash, 'escaped'
+        end
+      end
+      expect { run_to_completion(dispatcher) }.to raise_error(crash)
+      expect(recorded_at_unlock).not_to be_empty
+      expect(recorded_at_unlock).to all(be true)
+    end
+
+    it 'stops a poll that finished after it from handing out the jobs it reserved' do
+      Delayed::Job.enqueue(SimpleJob.new)
+      error = crash.new('escaped')
+      allow(dispatcher).to(receive(:poll).and_wrap_original do |m, *args|
+        m.call(*args).tap { dispatcher.instance_variable_set(:@thread_error, error) } # A crash meanwhile.
+      end)
+      expect(dispatcher).not_to receive(:dispatch)
+      expect { run_to_completion(dispatcher) }.to raise_error(crash)
+      expect(Delayed::Job.all.map(&:locked_by)).to eq [nil] # Its lock cleared as the threads exit.
+    end
+
+    it 'is reported once, though both its rescues see it' do
+      reported = []
+      Delayed::Worker.on_thread_error = ->(e, info) { reported << [e.message, info[:context]] }
+      Delayed::Job.enqueue(SimpleJob.new)
+      dispatcher.workers.each { |w| allow(w).to receive(:perform_job).and_raise(crash, 'escaped') }
+      expect { run_to_completion(dispatcher) }.to raise_error(crash)
+      expect(reported).to eq [['escaped', 'Worker thread']]
+    end
+  end
 end

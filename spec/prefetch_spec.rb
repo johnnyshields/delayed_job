@@ -127,16 +127,17 @@ describe 'Prefetching jobs (Worker.prefetch)' do
       d = dispatcher(1)
       thread = run_in_thread(d)
       wait_until { GateJob.started.size == 1 && locked_jobs.size == 2 }
-      # From now on, polls hang until the test ends.
-      blocked = Queue.new
+      # From now on, polls hang until the jobs are done (every poll: the
+      # dispatcher may poll again before it notices the stop).
+      polls_open = Concurrent::AtomicBoolean.new(false)
       allow(Delayed::Job).to receive(:reserve_batch) do |*|
-        blocked.pop
+        sleep 0.01 until polls_open.true?
         []
       end
       GateJob.release = true
       wait_until { (Delayed::Job.all & jobs).empty? }
       expect(GateJob.finished).to eq [0, 1]
-      blocked << :done
+      polls_open.make_true
       d.stop
       Timeout.timeout(10) { thread.join }
     end

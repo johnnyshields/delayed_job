@@ -286,9 +286,12 @@ module Delayed
         free, seen = snapshot
         polled_at = monotonic_now # No later than the jobs' locks were taken.
         reserved = free.empty? ? [] : poll(free)
-        # A signal exception may cut this short: undispatched jobs stay locked
-        # until their worker's names are cleared on thread exit (ClearLocks,
-        # #clear_slot_locks).
+        # A crashed thread's job is unlocked only after its crash is recorded:
+        # a poll that reserved it stops here instead of handing it to another
+        # thread. Undispatched jobs (also after a signal exception) stay
+        # locked until their worker's names are cleared on thread exit
+        # (ClearLocks, #clear_slot_locks).
+        raise_thread_error
         reserved.each { |slot, job| dispatch(slot, job, polled_at) }
         deeper = adjust_depth(free.size, reserved.size)
 
@@ -567,6 +570,11 @@ module Delayed
       self.class.deferring_interrupts do
         Worker.lifecycle.run_callbacks(:execute, worker) do
           work_jobs(worker, inbox)
+        rescue *SHUTDOWN_INTERRUPTS
+          raise
+        rescue Exception => error # rubocop:disable Lint/RescueException
+          crashed(worker, error) # Before ClearLocks unlocks its job (see #poll_loop).
+          raise
         ensure
           clear_slot_locks(worker)
         end
@@ -576,13 +584,20 @@ module Delayed
       # process is stopping, so this is no crash.
       synchronize { @running.delete(Thread.current) }
     rescue Exception => error # rubocop:disable Lint/RescueException
-      thread_error(error, 'Worker thread', worker.name)
-      synchronize do
+      crashed(worker, error)
+    end
+
+    # Records a worker thread's crash, once: the poll loop then stops.
+    def crashed(worker, error)
+      first = synchronize do
+        next false if @dead.include?(worker)
         @running.delete(Thread.current)
         retire(worker)
         @thread_error ||= error
         signal_event
+        true
       end
+      thread_error(error, 'Worker thread', worker.name) if first
     end
 
     def work_jobs(worker, inbox)
