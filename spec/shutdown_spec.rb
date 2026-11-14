@@ -1079,7 +1079,7 @@ end
 describe Delayed::Dispatcher, 'shutdown timeout message' do
   it 'formats whole and fractional seconds the same way, whatever their type' do
     dispatcher = described_class.new
-    messages = []
+    messages = Concurrent::Array.new
     allow(dispatcher).to receive(:say) { |text, *| messages << text }
     thread = Thread.new { sleep }
     [1, 1.0, 2.5].each do |timeout|

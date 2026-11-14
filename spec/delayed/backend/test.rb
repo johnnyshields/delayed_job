@@ -29,12 +29,16 @@ module Delayed
           hash.each { |k, v| send(:"#{k}=", v) }
         end
 
+        # Created up front: a lazy `@jobs ||= []` could hand two threads
+        # different lists (JRuby).
+        @jobs = []
+
         def self.all
-          @jobs ||= []
+          @jobs
         end
 
         def self.count
-          all.size
+          synchronize { all.size }
         end
 
         def self.delete_all
@@ -100,7 +104,15 @@ module Delayed
           Time.current
         end
 
+        class << self
+          # Called with each job about to be destroyed (specs): a hook
+          # rather than a stub, as rspec-mocks stubs aren't thread-safe.
+          attr_accessor :before_destroy
+        end
+
         def destroy
+          hook = self.class.before_destroy
+          hook.call(self) if hook
           self.class.synchronize { self.class.all.delete(self) }
         end
 

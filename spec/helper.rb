@@ -97,6 +97,13 @@ end
 require 'concurrent/array'
 
 RSpec.configure do |config|
+  # Each example starts with no job in the test backend: one left behind by
+  # an earlier example (e.g. a job that never got to run) would otherwise be
+  # run by the next dispatcher, which may then wait for it forever.
+  config.before(:each) do
+    Delayed::Backend::Test::Job.delete_all
+  end
+
   config.after(:each) do
     Delayed::Worker.reset
   end

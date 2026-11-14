@@ -13,6 +13,8 @@ describe 'Races' do
     Delayed::Worker.on_thread_error = ->(error, info) { reported << [error, info] }
   end
 
+  after { Delayed::Backend::Test::Job.before_destroy = nil }
+
   def quiet_dispatcher(options)
     Delayed::Dispatcher.new(options).tap do |d|
       allow(d).to receive(:say)
@@ -33,10 +35,11 @@ describe 'Races' do
         # Deleting a finished job takes a moment, as in a database: once it
         # has started, the job is done and must never be released.
         past_job = Queue.new
-        allow_any_instance_of(Delayed::Backend::Test::Job).to receive(:destroy).and_wrap_original do |m|
-          past_job << m.receiver.id
+        # Not allow_any_instance_of: rspec-mocks sets it up on each instance
+        # as it is first called, which isn't thread-safe (JRuby).
+        Delayed::Backend::Test::Job.before_destroy = lambda do |job|
+          past_job << job.id
           sleep 0.005
-          m.call
         end
         thread = Thread.new { d.run }
         sleep random.rand * 0.15
@@ -87,7 +90,7 @@ describe 'Races' do
         touches += 1
         m.call(names)
       end)
-      messages = []
+      messages = Concurrent::Array.new # Appended to from every worker thread.
       d = Delayed::Dispatcher.new(:threads => 4, :sleep_delay => 0.01)
       allow(d).to receive(:say)
       d.workers.each { |w| allow(w).to receive(:say) { |text, *| messages << text } }
