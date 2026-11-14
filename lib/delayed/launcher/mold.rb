@@ -135,17 +135,29 @@ module Delayed
             end
           end
         end
-        Signal.trap('HUP', 'IGNORE')
+        Signal.trap('HUP') {} # rubocop:disable Lint/EmptyBlock
       end
 
       # Threads don't survive fork: whatever they were doing is frozen,
       # mid-way, in every child forked from here.
       def warn_about_threads
-        others = Thread.list.reject { |thread| thread == Thread.current || !thread.alive? }
+        others = Thread.list.reject { |thread| thread == Thread.current || !thread.alive? || fork_safe_thread?(thread) }
         return if others.empty?
-        names = others.map { |thread| thread.name || thread.inspect }.join(', ')
+        names = others.map { |thread| thread_label(thread) }.join(', ')
         @launcher.logger.warn "Mold (pid #{Process.pid}) has #{others.size} other thread(s) running, which child processes " \
                               "won't have: #{names}. See Fork safety in the README."
+      end
+
+      # Marked fork safe (as Puma honours, e.g. Active Record's pool reaper),
+      # or known to handle fork itself.
+      FORK_SAFE_THREAD_NAMES = ['Timeout stdlib thread'].freeze
+
+      def thread_label(thread)
+        "#{thread.name || thread.inspect} (at #{thread.backtrace&.first})"
+      end
+
+      def fork_safe_thread?(thread)
+        thread.thread_variable_get(:fork_safe) || FORK_SAFE_THREAD_NAMES.include?(thread.name)
       end
 
       def fork_loop
@@ -172,12 +184,22 @@ module Delayed
         readers = [@wake_read, @pipes.life_read]
         readers << @pipes.fork_read unless done?
         ready = IO.select(readers, nil, nil, 1)&.first || []
-        codes = @wake_read.read_nonblock(64, :exception => false)
-        if codes.is_a?(String)
-          @retired ||= codes.include?('U')
-          @stopping ||= codes.include?('S')
-        end
+        read_wakeups
         ready
+      end
+
+      def read_wakeups
+        codes = @wake_read.read_nonblock(64, :exception => false)
+        return unless codes.is_a?(String)
+        @retired ||= codes.include?('U')
+        return unless codes.include?('S') && !@stopping
+        @stopping = true
+        report_stopping
+      end
+
+      # So the parent replaces it at once if it alone was signalled.
+      def report_stopping
+        @pipes.report("s #{Process.pid}") unless @retired
       end
 
       # A failed fork (EAGAIN, ENOMEM) is reported; the parent forks the

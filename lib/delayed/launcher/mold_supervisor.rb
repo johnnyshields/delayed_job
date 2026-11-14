@@ -38,6 +38,10 @@ module Delayed
       MOLD_STABLE_UPTIME = 600
       MAX_RETRY_DELAY = 600
 
+      # Failed promotions (or lost molds) in a row before promotion stops
+      # until SIGURG to the parent re-arms it.
+      MAX_FAILURES = 5
+
       # Share of child processes reforked at once (at least one).
       REFORK_SHARE = 0.1
 
@@ -51,7 +55,7 @@ module Delayed
       # Status line type => handler (see Mold::Pipes).
       STATUS_HANDLERS = {
         'b' => :child_booted, 'p' => :child_pinged, 'M' => :mold_forked, 'm' => :mold_ready,
-        'f' => :mold_forked_child, 'e' => :mold_fork_failed, 'x' => :mold_reaped_child
+        'f' => :mold_forked_child, 'e' => :mold_fork_failed, 'x' => :mold_reaped_child, 's' => :mold_stopping
       }.freeze
 
       attr_reader :generation
@@ -88,13 +92,27 @@ module Delayed
       # Asks the active mold to fork a child process; its pid is recorded
       # when the mold reports it.
       def request_fork(index, options, spawn)
-        @pending_forks[index] = {:options => options, :spawn => spawn, :at => monotonic_now}
-        @pipes.request_fork(index, Mold.pool_index(@launcher.pools, options), spawn[:generation])
+        @pending_forks[index] = {:options => options, :spawn => spawn}
+        send_fork_requests
         nil
       end
 
+      def promoted?(pid)
+        @children[pid]&.promoted || false
+      end
+
+      # False when the slot `replaces_pid` held is no longer to be filled:
+      # its refork step was aborted, and it keeps its slot.
+      def replacement_needed?(replaces_pid)
+        info = @children[replaces_pid]
+        !info || info.retiring || @steps.key?(replaces_pid)
+      end
+
       def child_started(pid, spawn)
-        info = Child.new(:mold_pid => spawn[:mold_pid], :generation => spawn.fetch(:generation, @generation),
+        # A child forked by a mold that isn't the active one (e.g. retiring)
+        # has its memory, not the active mold's: reforked like a cold one.
+        generation = spawn[:mold_pid] && spawn[:mold_pid] != @active_mold ? nil : spawn.fetch(:generation, @generation)
+        info = Child.new(:mold_pid => spawn[:mold_pid], :generation => generation,
                          :started_at => monotonic_now, :jobs => 0, :busy => 0, :booted => false, :retiring => false,
                          :promoted => false, :unsafe => false, :orphaned => false)
         replaced = spawn[:replaces_pid]
@@ -125,7 +143,7 @@ module Delayed
       # its "M" or "m" is read: remembered, it isn't tracked then.
       def reaped(pid)
         unless @molds.key?(pid)
-          @reaped[pid] = monotonic_now
+          @reaped[pid] = monotonic_now unless @launcher.workers.key?(pid)
           return false
         end
         mold_exited(pid)
@@ -135,10 +153,9 @@ module Delayed
       # One pass of the launcher's run loop.
       def tick
         @pipes.each_status(0.1) { |type, *args| handle_status(type, *args) }
-        unless @reaps_orphans # Otherwise reaped as this process's children.
-          check_molds
-          check_orphans
-        end
+        check_molds unless @reaps_orphans # Otherwise reaped as this process's children.
+        check_orphans
+        send_fork_requests
         check_timeouts
         handle_promotion_requests
         advance_refork
@@ -184,9 +201,22 @@ module Delayed
         logger.warn "Ignoring malformed mold status line #{[type, *args].join(' ').inspect}: #{error.message}"
       end
 
-      def child_booted(pid)
+      # "b <pid> <worker index> <mold pid>": a child whose "f" isn't read yet
+      # (or never will be: its mold died first) is adopted if its slot is
+      # still pending; one the parent no longer wants is stopped.
+      def child_booted(pid, index = nil, mold_pid = nil)
         info = @children[pid]
-        info ? mark_booted(info) : @early_boots[pid] = monotonic_now
+        return mark_booted(info) if info
+        return @early_boots[pid] = monotonic_now unless index && mold_pid
+        entry = @pending_forks.delete(index)
+        return stop_stray(pid, mold_pid) unless entry
+        @launcher.child_started(@launcher.child_name(index), pid, entry[:options], entry[:spawn].merge(:mold_pid => mold_pid))
+        mark_booted(@children[pid]) if @children[pid]
+      end
+
+      def stop_stray(pid, mold_pid)
+        logger.warn "Stopping child process (pid #{pid}) forked by mold (pid #{mold_pid}) after the parent gave up on it"
+        signal(pid, 'TERM')
       end
 
       def child_pinged(pid, jobs, busy, unsafe = 0)
@@ -197,7 +227,7 @@ module Delayed
         info.busy = busy
         info.unsafe = unsafe == 1
         threshold = @thresholds[@threshold_index]
-        promote(:threshold) if threshold && jobs >= threshold && settled? && !held?
+        promote(:threshold) if threshold && jobs >= threshold && settled? && !held? && !@disabled
       end
 
       # A refork replacement booting completes its step: the old child stops.
@@ -241,6 +271,7 @@ module Delayed
         end
         info.promoted = true
         @retry_trigger = nil
+        @pss_before = total_pss_mb # With the promoted child still running.
         @promotion = {:pid => pid, :trigger => trigger, :at => monotonic_now}
         worker_name, = @launcher.workers[pid]
         logger.info "Promoting child process #{worker_name} (pid #{pid}) to mold after #{info.jobs} job(s) (#{trigger})"
@@ -263,9 +294,16 @@ module Delayed
         @promote_requested = false
         if requested
           return logger.warn('Received SIGURG while a promotion or refork is in progress; ignoring it') if @promotion || !refork_idle?
+          rearm if @disabled
           return promote(:signal)
         end
         promote(@retry_trigger) if @retry_trigger && !held?
+      end
+
+      def rearm
+        logger.info 'Received SIGURG: promoting to mold again'
+        @disabled = false
+        @failures = 0
       end
 
       # Exited cleanly: it forked its mold (which may be ready already), and
@@ -333,13 +371,13 @@ module Delayed
         @promotion = nil
         @threshold_index += 1 if trigger == :threshold
         @hold_until = nil
+        @retry_trigger = nil # This mold replaces any lost one.
         retire(@active_mold) if @active_mold
         @molds[mold_pid] = :active
         @active_mold = mold_pid
         @active_since = monotonic_now
         @boot_failures = 0
         @generation += 1
-        @pss_before = total_pss_mb
         logger.info "Mold (pid #{mold_pid}) ready; reforking child processes from it (generation #{@generation}#{pss_note(@pss_before)})"
         Delayed.instrument(:mold_activated, :pid => mold_pid, :generation => @generation, :pss_mb => @pss_before,
                                             :subreaper => @reaps_orphans)
@@ -369,8 +407,11 @@ module Delayed
       # Back-off doubling per failure in a row. A threshold promotion is
       # retried by the next ping past it; others are retried as such.
       # Returns the delay in seconds.
+      # Returns the delay in seconds, or nil once MAX_FAILURES in a row
+      # disable promotion.
       def retry_promotion(trigger, message)
         @failures += 1
+        return disable(message) if @failures >= MAX_FAILURES
         delay = [retry_delay_unit * 2**(@failures - 1), MAX_RETRY_DELAY].min
         @hold_until = monotonic_now + delay
         @retry_trigger = trigger unless trigger == :threshold
@@ -378,12 +419,22 @@ module Delayed
         delay
       end
 
+      # Each try stops a working child process: stop trying.
+      def disable(message)
+        @disabled = true
+        @retry_trigger = nil
+        logger.error "#{message}; #{@failures} mold promotions failed in a row, so no more are tried " \
+                     '(child processes are forked from the parent). Send SIGURG to the parent to try again.'
+        Delayed.instrument(:mold_disabled, :failures => @failures)
+        nil
+      end
+
       def mold_forked_child(mold_pid, pid, index)
+        return if @children.key?(pid) || @launcher.workers.key?(pid) # Adopted on its "b".
         entry = @pending_forks.delete(index)
         unless entry
           @early_boots.delete(pid)
-          logger.warn "Stopping child process (pid #{pid}) forked by mold (pid #{mold_pid}) after the parent gave up on it"
-          return signal(pid, 'TERM')
+          return stop_stray(pid, mold_pid)
         end
         @launcher.child_started(@launcher.child_name(index), pid, entry[:options], entry[:spawn].merge(:mold_pid => mold_pid))
       end
@@ -394,7 +445,7 @@ module Delayed
         logger.warn "Mold (pid #{mold_pid}) could not fork child process #{index} (errno #{errno}); forking it from the parent"
         error = SystemCallError.new("mold (pid #{mold_pid}) could not fork child process #{index}", errno.to_i)
         Delayed::Worker.thread_error(error, :context => 'Mold forking', :worker => @launcher.child_name(index), :pid => mold_pid)
-        count_boot_failure(nil)
+        count_boot_failure(nil) # May abort the refork the fork was for.
         start_from_parent(index, entry)
       end
 
@@ -447,6 +498,7 @@ module Delayed
       # Forked from the (cold) parent, it is of no generation: the next
       # refork replaces it from a mold.
       def start_from_parent(index, entry)
+        return unless replacement_needed?(entry[:spawn][:replaces_pid])
         @launcher.start_child_safely(index, entry[:options], entry[:spawn].merge(:generation => nil))
       end
 
@@ -484,9 +536,40 @@ module Delayed
 
       # Without a subreaper, children of a dead mold stop by themselves
       # (Process.ppid changes); the parent can't wait for them, so it polls.
+      #
+      # With a subreaper, a dead mold's children are this process's: reaped
+      # with their real status. Polled too, for one the mold reaped but died
+      # before reporting ("x"); an unreaped zombie is left to be reaped.
       def check_orphans
-        gone = @children.select { |pid, info| info.mold_pid && !@molds.key?(info.mold_pid) && !ProcessUtil.alive?(pid) }.keys
+        gone = @children.select { |pid, info| info.mold_pid && !@molds.key?(info.mold_pid) && gone?(pid) }.keys
         gone.each { |pid| @launcher.handle_exit(pid, ReportedStatus.new(pid, nil, nil)) }
+      end
+
+      def gone?(pid)
+        @reaps_orphans ? !ProcessUtil.exists?(pid) : !ProcessUtil.alive?(pid)
+      end
+
+      # Held while a promoted mold isn't activated or abandoned ones may still
+      # run (as Puma does): such a mold would read and fork them.
+      def send_fork_requests
+        return if holding_forks?
+        @pending_forks.each do |index, entry|
+          next if entry[:sent]
+          entry[:sent] = monotonic_now
+          @pipes.request_fork(index, Mold.pool_index(@launcher.pools, entry[:options]), entry[:spawn][:generation])
+        end
+      end
+
+      def holding_forks?
+        (@promotion && @promotion[:mold_pid]) || @molds.value?(:abandoned)
+      end
+
+      # "s <mold pid>": a mold stopped by a signal sent to it alone forks no
+      # more child processes; it is replaced like a lost one.
+      def mold_stopping(mold_pid)
+        return unless @molds[mold_pid] == :active && !@launcher.stopped?
+        retire(mold_pid)
+        lose_active_mold(mold_pid, :stopped, 'was stopped by a signal')
       end
 
       def check_timeouts
@@ -494,19 +577,29 @@ module Delayed
         check_boot_timeouts
         check_promotion
         stop_lingering_molds if @launcher.stopped?
-        @early_boots.delete_if { |_, at| monotonic_now - at > boot_timeout }
+        expire_early_boots
         @reaped.delete_if { |_, at| monotonic_now - at > MOLD_READY_TIMEOUT }
         @failures = 0 if @failures > 0 && @active_mold && monotonic_now - @active_since >= MOLD_STABLE_UPTIME
       end
 
       # A hung mold is killed (it runs no jobs).
       def check_pending_forks
-        return if @pending_forks.empty? || !@active_mold
-        oldest = @pending_forks.values.map { |entry| entry[:at] }.min
-        return if monotonic_now - oldest < MOLD_FORK_TIMEOUT
+        sent = @pending_forks.values.map { |entry| entry[:sent] }.compact
+        return if sent.empty? || !@active_mold
+        return if monotonic_now - sent.min < MOLD_FORK_TIMEOUT
         mold = @active_mold
         abandon(mold)
         lose_active_mold(mold, :hung, "did not fork a child process within #{MOLD_FORK_TIMEOUT}s; killed it")
+      end
+
+      # A child process that booted but was never reported (e.g. its mold
+      # died first, with an old-format "b") is stopped if still running.
+      def expire_early_boots
+        @early_boots.delete_if do |pid, at|
+          next false if monotonic_now - at < boot_timeout
+          signal(pid, 'TERM') if ProcessUtil.alive?(pid)
+          true
+        end
       end
 
       # Children forked by a mold only: a fork-unsafe mold can deadlock them.

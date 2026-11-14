@@ -1221,7 +1221,10 @@ describe Delayed::Launcher::Forking, 'on SIGHUP' do
     traps['HUP'].call
     expect(launcher.send(:child_signals)).to be_empty
     launcher.send(:capture_signals)
-    expect(traps['HUP']).to eq 'IGNORE'
+    # A no-op handler rather than 'IGNORE', which would outlive exec in
+    # commands jobs run.
+    expect(traps['HUP']).to be_a(Proc)
+    expect { traps['HUP'].call }.not_to(change { launcher.send(:child_signals).size })
   end
 
   context 'with a single worker process (not forked)' do

@@ -39,6 +39,7 @@ module Delayed
         Delayed::Worker.validate_settings!(@options)
         validate_mold! if molding?
         setup_logger
+        warn_mold_ignored
         setup_pidfile
         begin
           if forking? && !fork_available?
@@ -113,11 +114,14 @@ module Delayed
       def fork_mold_child(worker_index, pool_index, generation, close_ios)
         options = pool_index == Mold::NO_POOL ? @options : @options.merge(:queues => pools[pool_index].first)
         child_signals.clear # Before forking: the child's traps append to it.
+        mold_pid = Process.pid
         fork do
           pending_signals = capture_signals
           close_ios.each(&:close)
           %w[CHLD URG].each { |signal| Signal.trap(signal, 'DEFAULT') }
-          @mold_generation = generation
+          @mold_generation = @known_generation = generation
+          @child_index = worker_index
+          @forked_by_mold = mold_pid
           run_worker(get_name(worker_index), options, pending_signals)
         end
       end
@@ -236,6 +240,7 @@ module Delayed
       # it to).
       def add_worker(options, replaces_pid: nil, delay: 0, streak: nil)
         return if stop_signals.any?
+        return if replaces_pid && @mold_supervisor && !@mold_supervisor.replacement_needed?(replaces_pid)
         spawn = {:replaces_pid => replaces_pid, :delay => delay, :streak => streak}
         return start_child(options, spawn) unless @mold_supervisor&.forking_from_mold?
         index = @worker_index
@@ -286,7 +291,9 @@ module Delayed
       end
 
       def fork_worker(worker_name, options)
+        generation = @mold_supervisor&.generation
         fork do
+          @known_generation = generation
           pending_signals = capture_signals
           run_worker(worker_name, options, pending_signals)
         end
@@ -310,7 +317,9 @@ module Delayed
           end
         end
         # The parent forwards HUP as TERM (see #trap_hangup_signal).
-        Signal.trap('HUP', 'IGNORE') if Signal.list.key?('HUP')
+        # A handler, not 'IGNORE': an ignored signal stays ignored across exec,
+        # in commands jobs run.
+        Signal.trap('HUP') {} if Signal.list.key?('HUP') # rubocop:disable Lint/EmptyBlock
         pending
       end
 
@@ -413,10 +422,11 @@ module Delayed
       def handle_exit(worker_pid, child_status)
         worker_name, options = workers_lock.synchronize { workers.delete(worker_pid) }
         return false unless worker_name
+        promoted = promoted_child?(worker_pid)
         # The supervisor fills the slot of a reforked or promoted child.
         replace = !@stopped && !@mold_supervisor&.child_exited(worker_pid, child_status, options)
         logger.info "Child process #{worker_name} (pid #{worker_pid}) exited: #{child_status}"
-        recover_jobs_of_worker(worker_name, worker_pid, options, child_status)
+        recover_jobs_of_worker(worker_name, worker_pid, options, child_status, :promoted => promoted)
         publish_child_exited(worker_name, worker_pid, child_status, replace)
         warn_if_sigkilled(worker_name, worker_pid, child_status, replace)
         replace ? replace_worker(worker_name, worker_pid, options, child_status) : forget_child(worker_pid)
@@ -544,10 +554,16 @@ module Delayed
 
       # Unlocks jobs a dead worker held, rather than waiting out max_run_time.
       # A crash counts as a failed attempt.
-      def recover_jobs_of_worker(worker_name, pid, options, status)
+      def promoted_child?(pid)
+        @mold_supervisor ? @mold_supervisor.promoted?(pid) : false
+      end
+
+      # A child promoted to mold that forked none (PROMOTION_FAILED) gave up
+      # cleanly too: a promotion never costs a job an attempt.
+      def recover_jobs_of_worker(worker_name, pid, options, status, promoted: false) # rubocop:disable Metrics/ParameterLists
         lock_names = Delayed::Worker.lock_names("#{worker_name} ", pid, threads(options), prefetch(options))
         # Clean exit: leftover locks are stale; release, attempts unchanged.
-        return Delayed::Job.clear_locks!(lock_names) if status.success?
+        return Delayed::Job.clear_locks!(lock_names) if status.success? || (promoted && status.exitstatus == Mold::PROMOTION_FAILED)
         count = Delayed::Worker.recover_jobs_of(lock_names, ProcessExitError.new(worker_name, pid, status))
         logger.warn "Recovered #{count} job(s) left locked by child process #{worker_name} (pid #{pid})" if count > 0
       rescue StandardError => error
@@ -613,8 +629,14 @@ module Delayed
         @mold_thresholds = Delayed::Worker.mold_thresholds(@options.fetch(:mold, Delayed::Worker.mold))
       end
 
+      # Off with exit_on_complete: it would never promote.
       def molding?
-        !mold_thresholds.nil?
+        !mold_thresholds.nil? && !@options[:exit_on_complete]
+      end
+
+      def warn_mold_ignored
+        return unless mold_thresholds && @options[:exit_on_complete]
+        logger.warn 'mold is ignored with exit_on_complete (workoff): child processes stop before any could be promoted'
       end
 
       def validate_mold!
@@ -654,11 +676,13 @@ module Delayed
       def run_dispatcher(worker_name, dispatcher, pending_signals)
         return super unless @mold_pipes
         Signal.trap('URG') { dispatcher.promote }
-        @mold_pipes.report("b #{Process.pid}") # After the trap: only booted children are promoted.
+        # After the trap: only booted children are promoted. Its index and
+        # mold let the parent adopt it if the mold's "f" never comes.
+        @mold_pipes.report("b #{Process.pid} #{@child_index || '-'} #{@forked_by_mold || '-'}")
         ping = start_mold_ping(dispatcher)
         super
         ping.kill.join
-        exit!(Mold::PROMOTION_FAILED) if dispatcher.promotion_cancelled? # The parent then retries.
+        flush_and_exit!(Mold::PROMOTION_FAILED) if dispatcher.promotion_cancelled? # The parent then retries.
         return unless dispatcher.promoted?
         child_signals.clear
         capture_signals # Signals now only recorded: the mold checks them.
@@ -680,17 +704,25 @@ module Delayed
       def promote_to_mold(worker_name, dispatcher)
         if !dispatcher.cleanly_stopped?
           logger.error "Child process #{worker_name} (pid #{Process.pid}) promoted to mold still has threads running; not forking a mold"
+        elsif !Delayed::Worker.fork_safe? # Since its last ping.
+          logger.error "Child process #{worker_name} (pid #{Process.pid}) promoted to mold is no longer fork safe; not forking a mold"
         elsif child_signals.empty? && dispatcher.promoted?
           return fork_mold(worker_name)
         end
-        exit!(Mold::PROMOTION_FAILED)
+        flush_and_exit!(Mold::PROMOTION_FAILED)
+      end
+
+      # exit! skips at_exit, which would flush buffered log output.
+      def flush_and_exit!(status)
+        [$stdout, $stderr].each { |io| io.flush rescue nil }
+        exit!(status)
       end
 
       # This process then exits, orphaning the mold; as a child subreaper,
       # the parent adopts it.
       def fork_mold(worker_name)
         Delayed::Worker.before_fork
-        info = {:promoted_pid => Process.pid, :generation => @mold_generation.to_i + 1, :exit_when_retired => @reaps_orphans}
+        info = {:promoted_pid => Process.pid, :generation => @known_generation.to_i + 1, :exit_when_retired => @reaps_orphans}
         launcher_pid = @launcher_pid
         mold_pid = fork do
           run_mold(worker_name, info, launcher_pid)
@@ -709,10 +741,10 @@ module Delayed
         end
       rescue Exception => error # rubocop:disable Lint/RescueException
         status = 1
-        logger.error "Mold (pid #{Process.pid}) failed: #{error.class}: #{error.message}"
+        logger.error "Mold (pid #{Process.pid}) failed: #{error.class}: #{error.message}\n#{Array(error.backtrace).first(10).join("\n")}"
+        Delayed::Worker.thread_error(error, :context => 'Mold', :pid => Process.pid) if error.is_a?(StandardError)
       ensure
-        [$stdout, $stderr].each { |io| io.flush rescue nil }
-        exit!(status) # Not the dispatcher's at_exit hooks again.
+        flush_and_exit!(status) # Not the dispatcher's at_exit hooks again.
       end
 
       public :workers, :handle_exit, :add_worker, :start_child, :child_started, :child_signal, :child_signals, :logger, :warmup_heap

@@ -34,7 +34,9 @@ end
 
 `info[:context]` is one of `Reservation`, `Lock heartbeat`, `Worker thread`,
 `Dispatcher`, `Failure hook`, `Recovering jobs`, `Releasing interrupted jobs`,
-`Forking`, and with `--mold`, `Mold forking` and `Mold supervisor`. Report job errors through an `:error` lifecycle callback or the
+`Forking`, and with `--mold`, `Mold` (an error in the mold, e.g. in a
+`:mold` hook; reported from the mold process), `Mold forking` and
+`Mold supervisor`. Report job errors through an `:error` lifecycle callback or the
 `job_attempt_failed` event.
 
 ## Events
@@ -55,8 +57,9 @@ they describe and carry `:exception` when it raised.
 | `mold_activated` | A mold is ready; worker processes are reforked from it | Launcher (parent) | `:pid`, `:generation` (1 for the first mold), `:pss_mb` (total PSS of the processes, Linux), `:subreaper` (false: a mold's child processes stop if it dies) |
 | `mold_refork_completed` | Every worker process is reforked from the active mold | Launcher (parent) | `:pid`, `:generation`, `:pss_mb`, `:pss_mb_before` (at activation) |
 | `mold_retired` | The previous mold stops forking (and exits) | Launcher (parent) | `:pid` |
-| `mold_lost` | The active mold died, was broken (child processes it forked kept failing to start) or hung | Launcher (parent) | `:pid`, `:generation`, `:reason` (`:exited`, `:broken`, `:hung`), `:retry_in` (seconds until a new mold is promoted) |
-| `mold_promotion_failed` | A promotion produced no mold | Launcher (parent) | `:pid` (promoted child), `:mold_pid` (if one was forked), `:trigger`, `:reason` (`:child_exited`, `:mold_exited`, `:timeout`), `:retry_in` |
+| `mold_lost` | The active mold died, was broken (child processes it forked kept failing to start) or hung | Launcher (parent) | `:pid`, `:generation`, `:reason` (`:exited`, `:broken`, `:hung`, `:stopped` by a signal sent to it alone), `:retry_in` (seconds until a new mold is promoted; nil once promotion is disabled) |
+| `mold_promotion_failed` | A promotion produced no mold | Launcher (parent) | `:pid` (promoted child), `:mold_pid` (if one was forked), `:trigger`, `:reason` (`:child_exited`, `:mold_exited`, `:timeout`), `:retry_in` (nil once promotion is disabled) |
+| `mold_disabled` | Promotion stopped after 5 failures (or lost molds) in a row; child processes are forked from the parent until `SIGURG` to the parent re-arms it | Launcher (parent) | `:failures` |
 | `jobs_reserved` ⏱ | A poll for jobs (one query, or one per free slot) | Dispatcher thread | `:dispatcher`, `:requested` (free slots: idle threads, plus queue slots with prefetch), `:depth` (prefetch queue depth), `:reserved` |
 | `job_performed` ⏱ | A job ran (successfully or not) | Worker thread | `:job`, `:worker`, `:success` (absent when interrupted: see `:exception`) |
 | `job_attempt_failed` | A job raised; it is rescheduled or, after `max_attempts`, failed | Worker thread (launcher for a dead process' jobs) | `:job`, `:worker`, `:error`, `:attempts` (including this one) |
@@ -98,6 +101,10 @@ ActiveSupport::Notifications.subscribe(/\.delayed_job\z/) do |event|
     METRICS.increment("dj.#{name}", p[:jobs] || p[:count], tags: ["reason:#{p[:reason]}"])
   when 'process_spawned'
     METRICS.increment('dj.process_spawned')
+  when 'mold_promoted', 'mold_lost', 'mold_promotion_failed', 'mold_disabled'
+    METRICS.increment("dj.#{name}", tags: ["reason:#{p[:reason] || p[:trigger]}"])
+  when 'mold_activated', 'mold_refork_completed'
+    METRICS.gauge('dj.mold_pss_mb', p[:pss_mb]) if p[:pss_mb]
   end
 end
 ```
@@ -137,7 +144,7 @@ behind them. The database can't tell the two apart; the number running is the
 | No workers | No launcher process, or no `job_performed`/`jobs_reserved` events for 5 minutes while the backlog is > 0 |
 | Crash loop | `process_exited` with `respawn_in > 0` for 10 minutes |
 | Infrastructure | Any `thread_error` with context `Reservation`, `Lock heartbeat`, `Forking`, `Mold forking`, `Mold supervisor` or `Recovering jobs` |
-| Mold unhealthy | `mold_lost` or `mold_promotion_failed` more than 3 times an hour (check fork safety and memory limits; see the README) |
+| Mold unhealthy | `mold_lost` or `mold_promotion_failed` more than 3 times an hour, or any `mold_disabled` (check fork safety and memory limits; see the README) |
 | Stuck jobs | Any `job_stuck`, or `stale_locks > 0` |
 | Duplicate runs | Any `job_lock_lost` (raise `LOCK_TIMEOUT`) |
 | Failures | Rise in the `job_failed` rate or the `failed` count |

@@ -303,6 +303,8 @@ that locks jobs under its own name (e.g. `... pid:123 thread:2`).
 
 Plugin callbacks: `:loop` wraps each poll and yields the `Delayed::Dispatcher`;
 `:execute` wraps each worker thread's lifetime and yields its `Delayed::Worker`;
+`:mold` (with `--mold`) wraps a mold process's life and yields its pid and
+generation;
 `:perform`, `:error` and `:failure` yield the `Delayed::Worker` running the job.
 
 When using threads:
@@ -446,6 +448,9 @@ with its busy threads and queues, and whether it is stopping:
 delayed_job.0: 3/4 busy, queues=mailers
 delayed_job.1: stopping, 1/4 busy, queues=*
 delayed_job.2: 4/4 busy, 3 queued, depth 1/2, queues=*   # with --prefetch=2 --prefetch-dynamic
+delayed_job.3: promoting, 1/4 busy, queues=*            # with --mold: finishing its jobs
+delayed_job.3: mold gen 2                               # with --mold
+delayed_job.5 gen 2: 2/4 busy, queues=*                 # forked by that mold
 ```
 
 #### Pidfile
@@ -624,30 +629,43 @@ group, the cgroup, or the `process_spawned` events (`:mold_pid`).
 * The child process with the most jobs performed is promoted, preferring one
   with no job running, so promotion doesn't wait for a long job. Its running
   jobs finish first (interrupted and released after `--shutdown-timeout`, if
-  set, never counting as a failed attempt). If it is still busy after 5
-  minutes, its slot is refilled meanwhile.
+  set, never counting as a failed attempt). Meanwhile one process fewer works
+  jobs; if it is still busy after 5 minutes, its slot is refilled. With
+  `-n1`, set `--shutdown-timeout`, or no process works jobs until it finishes.
 * Child processes are reforked about 10% at a time (at least one), idle ones
   first: each replacement is forked from the mold, and the process it replaces
   is stopped once it has started, so capacity doesn't drop. If a replacement
-  dies before starting, the old process is kept. The previous mold then
-  exits.
+  dies before starting, the old process is kept. The previous mold is retired
+  when the new one is ready: with a subreaper it exits at once (its children
+  carry on); without, once its last child has exited.
 * While reforking, up to N + 10% child processes run (each holding its
-  database connections), plus the new mold and, briefly, the old one: leave
-  memory and connection headroom for that.
-* After the last threshold, `SIGURG` to the parent promotes a new mold, once
-  any refork in progress has finished. Send it to the parent's pid only, not
-  to the process group (`kill -URG -<pgid>`): each child process takes
-  `SIGURG` as its own promotion, so they would all stop at once.
+  database connections), plus the new mold and the old one: leave memory and
+  connection headroom for that.
+* `SIGURG` to the parent promotes a new mold at any time, without using up a
+  threshold, and skipping any retry back-off. It is ignored (with a warning)
+  while a promotion or refork is in progress: send it again after
+  `mold_refork_completed`. Send it to the parent's pid only, not to the
+  process group (`kill -URG -<pgid>`): each child process takes `SIGURG` as
+  its own promotion, so they would all stop at once. Init processes that
+  forward signals to the whole group do that: `dumb-init` (by default) and
+  `tini -g`. `docker kill -s URG` and `kubectl exec ... kill -URG 1` are safe
+  only when the parent is the container's PID 1.
 * If the mold dies (e.g. killed by the OOM killer), its child processes carry
   on (adopted by the parent; without a subreaper they stop gracefully and are
   replaced), the parent forks new child processes itself, and a new mold is
   promoted, with a back-off growing after each failure in a row. A promotion
   that fails (the mold never gets ready) is retried the same way. A mold
-  whose child processes keep failing to start, or that stops forking them,
-  is killed and replaced the same way.
+  whose child processes keep failing to start, that stops forking them, or
+  that is stopped by a signal sent to it alone, is replaced the same way.
+  After 5 failures in a row, promotion stops (`mold_disabled` event; child
+  processes are forked from the parent) until `SIGURG` re-arms it.
 * Before forking, the mold runs your `:mold` hooks, compacts its heap, and
   disconnects the backend before each fork. Use the hook to close clients
-  the children shouldn't share (it's passed the mold's pid and generation):
+  the children shouldn't share (it's passed the mold's pid and generation).
+  `before(:mold)` and the heap compaction must finish within 2 minutes of the
+  promoted child exiting, or the promotion fails. `after(:mold)` doesn't run
+  if the mold is killed (e.g. when replaced). An exception in a hook is
+  reported to `on_thread_error` (context `Mold`) and fails the promotion:
 
   ```ruby
   class MoldPlugin < Delayed::Plugin
@@ -658,14 +676,32 @@ group, the cgroup, or the `process_spawned` events (`:mold_pid`).
   end
   ```
 * Needs `fork` (not on JRuby or TruffleRuby), and runs only in forking mode
-  (`--fork` or `rake jobs:work`). With `-n1`, no process works jobs while the
-  only one is promoted. It can't be combined with `--identifier`.
+  (`--fork` or `rake jobs:work`). It can't be combined with `--identifier`,
+  and is ignored (with a warning) with `--exit-on-complete` / `jobs:workoff`,
+  which stop before any process could be promoted.
+* With `--prefetch`, the promoted child's queued jobs are released (reason
+  `promotion`); with lock heartbeats, the mold is forked only once its
+  heartbeat thread has stopped. Both, and pools, work as without a mold.
 
 The parent logs the total PSS (proportional set size, which counts shared
-pages once) of its child processes and molds when a mold is activated and
+pages once) of its child processes and molds when a child is promoted and
 again once every child process is reforked (`mold_activated` and
-`mold_refork_completed` events, `:pss_mb`). Check the gain before relying on
-it.
+`mold_refork_completed` events, `:pss_mb`; Linux 4.14+). Check the gain
+before relying on it.
+
+**Containers.** A container's memory limit counts shared pages once (cgroup
+`memory.current`, the `container_memory_working_set_bytes` metric), so the
+gain shows there, while per-process RSS overstates usage. Size the limit for
+the peak during a refork. On Kubernetes with cgroup v2, an OOM kill may take
+down every process in the container (`memory.oom.group`), parent included,
+rather than just the mold; check your Kubernetes version's behaviour (the
+kubelet's `singleProcessOOMKill` setting).
+
+**Operating it.** Enable it with `--mold` or `MOLD`; watch the `mold_*`
+events (or log lines), the process titles and the PSS figures. It can't be
+turned off at runtime: remove the option and restart, which is also the
+rollback. Alert on repeated `mold_lost` or `mold_promotion_failed`, and on
+`mold_disabled` (see docs/monitoring.md).
 
 ##### Fork safety
 

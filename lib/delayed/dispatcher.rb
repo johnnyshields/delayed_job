@@ -237,6 +237,7 @@ module Delayed
     # Process title, e.g. "delayed_job.0: 3/4 busy, queues=mail,sms".
     def procline
       state = if quit? then 'quitting, '
+      elsif promoted? then 'promoting, '
       elsif stop? then 'stopping, '
       end
       busy, held = synchronize { [busy_count, @slot_jobs.size] }

@@ -64,6 +64,27 @@ describe 'Mold process (Worker.mold)' do
       expect(launcher.instance_variable_get(:@worker_index)).to eq 0
     end
 
+    it "clears a promoted child's leftover locks without an attempt when it forks no mold (status 75)" do
+      launcher = Delayed::Launcher::Forking.new({})
+      allow(launcher).to receive(:disconnect_backend)
+      expect(Delayed::Job).to receive(:clear_locks!)
+      expect(Delayed::Worker).not_to receive(:recover_jobs_of)
+      status = Delayed::ReportedStatus.new(10, Delayed::Launcher::Mold::PROMOTION_FAILED, nil)
+      launcher.send(:recover_jobs_of_worker, 'delayed_job.1', 10, {}, status, :promoted => true)
+    end
+
+    it "still recovers a child's jobs with an attempt when it exits 75 unpromoted" do
+      launcher = Delayed::Launcher::Forking.new({})
+      allow(launcher).to receive(:disconnect_backend)
+      expect(Delayed::Worker).to receive(:recover_jobs_of).and_return(0)
+      status = Delayed::ReportedStatus.new(10, Delayed::Launcher::Mold::PROMOTION_FAILED, nil)
+      launcher.send(:recover_jobs_of_worker, 'delayed_job.1', 10, {}, status)
+    end
+
+    it 'is off with exit_on_complete, which would never promote' do
+      expect(Delayed::Launcher::Forking.new(:mold => true, :exit_on_complete => true).send(:molding?)).to be false
+    end
+
     it 'forks even one process' do
       expect(Delayed::Launcher::Forking.new(:mold => true).send(:forking?)).to be true
       expect(Delayed::Launcher::Forking.new({}).send(:forking?)).to be false
@@ -132,6 +153,12 @@ describe 'Mold process (Worker.mold)' do
     it 'accepts any of several parents' do
       dispatcher = described_class.new(:supervisor_pid => [-1, Process.ppid])
       expect(dispatcher.send(:supervisor_gone?)).to be false
+    end
+
+    it "shows 'promoting' in the process title while a promoted child finishes its jobs" do
+      dispatcher = described_class.new(:procline => 'delayed_job.1')
+      dispatcher.promote
+      expect(dispatcher.procline).to start_with 'delayed_job.1: promoting, '
     end
 
     it 'reports a promotion cancelled by a signal' do
@@ -591,6 +618,133 @@ describe 'Mold process (Worker.mold)' do
       supervisor.send(:handle_status, 'b', 40)
       supervisor.send(:advance_refork)
       expect(launcher.started).to include [:add, {}, 40]
+    end
+
+    describe 'hardening' do
+      def activate_mold(pid = 900)
+        boot(10)
+        boot(11)
+        supervisor.send(:handle_status, 'p', 10, 6, 0, 0)
+        supervisor.send(:handle_status, 'M', 10, pid)
+        supervisor.send(:handle_status, 'm', pid, 10)
+      end
+
+      it "adopts a booted child whose mold's \"f\" never came, and ignores a late \"f\"" do
+        activate_mold
+        supervisor.request_fork(7, {}, {:generation => 1})
+        supervisor.send(:handle_status, 'b', 70, 7, 900)
+        expect(launcher.workers).to have_key(70)
+        supervisor.send(:handle_status, 'f', 900, 70, 7)
+        expect(signals).not_to include ['TERM', 70]
+        expect(launcher.started.count { |kind, pid| kind == :child && pid == 70 }).to eq 1
+      end
+
+      it 'stops a booted child whose slot is no longer pending' do
+        activate_mold
+        supervisor.send(:handle_status, 'b', 70, 7, 900)
+        expect(signals).to include ['TERM', 70]
+        expect(launcher.workers).not_to have_key(70)
+      end
+
+      it 'reports a child gone once its mold died without reporting its exit (subreaper)' do
+        activate_mold
+        supervisor.child_started(70, :mold_pid => 900, :generation => 1)
+        allow(Delayed::ProcessUtil).to receive(:exists?).and_call_original
+        allow(Delayed::ProcessUtil).to receive(:exists?).with(70).and_return(false)
+        supervisor.reaped(900)
+        supervisor.send(:check_orphans)
+        expect(launcher.exits.map(&:first)).to include 70
+      end
+
+      it "doesn't fork a replacement for a refork step aborted by the circuit breaker" do
+        activate_mold
+        launcher.workers[11] = ['delayed_job.11', {}]
+        supervisor.send(:advance_refork)
+        index = launcher.started.find { |kind, _, pid| kind == :add && pid == 11 } && 20
+        supervisor.instance_variable_get(:@pending_forks)[index] = {:options => {}, :spawn => {:replaces_pid => 11, :generation => 1}, :sent => 0}
+        supervisor.instance_variable_set(:@boot_failures, 2)
+        supervisor.send(:handle_status, 'e', 900, index, 12)
+        expect(launcher.started).not_to include [:start, index, {}, {:replaces_pid => 11, :generation => nil}]
+        expect(supervisor.replacement_needed?(11)).to be false
+      end
+
+      it 'drops a stale retry once a mold activates' do
+        activate_mold(900)
+        supervisor.request_promotion
+        supervisor.send(:handle_promotion_requests) # Ignored: refork in progress.
+        supervisor.instance_variable_set(:@steps, {})
+        supervisor.instance_variable_get(:@children).each_value { |info| info.generation = 1 }
+        supervisor.instance_variable_set(:@retry_trigger, :mold_lost)
+        boot(12, :mold_pid => 900, :generation => 1)
+        supervisor.send(:promote, :signal)
+        promoted = signals.reverse.find { |signal, _| signal == 'URG' }.last
+        supervisor.send(:handle_status, 'M', promoted, 901)
+        supervisor.send(:handle_status, 'm', 901, promoted)
+        expect(supervisor.instance_variable_get(:@retry_trigger)).to be_nil
+      end
+
+      it "doesn't remember a reaped child process as a reaped mold" do
+        launcher.workers[10] = ['delayed_job.10', {}]
+        supervisor.reaped(10)
+        expect(supervisor.instance_variable_get(:@reaped)).not_to have_key(10)
+      end
+
+      it 'replaces a mold stopped by a signal sent to it alone' do
+        activate_mold
+        supervisor.send(:handle_status, 's', 900)
+        expect(supervisor).not_to be_forking_from_mold
+        expect(launcher.logged.join).to include 'was stopped by a signal'
+      end
+
+      it "records a child forked by a mold that isn't active as of no generation" do
+        activate_mold
+        supervisor.child_started(70, :mold_pid => 800, :generation => 1)
+        expect(supervisor.instance_variable_get(:@children)[70].generation).to be_nil
+      end
+
+      it 'stops promoting after MAX_FAILURES in a row, until SIGURG' do
+        described_class.retry_delay_unit = 0
+        events = []
+        subscriber = ActiveSupport::Notifications.subscribe('mold_disabled.delayed_job') { |*, payload| events << payload }
+        boot(10)
+        described_class::MAX_FAILURES.times do |i|
+          boot(20 + i)
+          supervisor.instance_variable_set(:@hold_until, nil)
+          supervisor.send(:handle_status, 'p', 20 + i, 6, 0, 0)
+          supervisor.child_exited(20 + i, status(false), {})
+        end
+        expect(events).to eq [{:failures => described_class::MAX_FAILURES}]
+        urgs = signals.count { |signal, _| signal == 'URG' }
+        supervisor.send(:handle_status, 'p', 10, 60, 0, 0)
+        expect(signals.count { |signal, _| signal == 'URG' }).to eq urgs
+        supervisor.request_promotion
+        supervisor.send(:handle_promotion_requests)
+        expect(signals.count { |signal, _| signal == 'URG' }).to eq urgs + 1
+      ensure
+        described_class.retry_delay_unit = 10
+        ActiveSupport::Notifications.unsubscribe(subscriber) if subscriber
+      end
+
+      it 'holds fork requests while a promoted mold is not yet ready' do
+        activate_mold(900)
+        boot(12, :mold_pid => 900, :generation => 1)
+        supervisor.instance_variable_set(:@steps, {})
+        supervisor.instance_variable_get(:@children).each_value { |info| info.generation = 1 }
+        supervisor.send(:promote, :signal)
+        promoted = signals.reverse.find { |signal, _| signal == 'URG' }.last
+        supervisor.send(:handle_status, 'M', promoted, 901)
+        supervisor.request_fork(30, {}, {:generation => 1})
+        expect(pipes).not_to have_received(:request_fork).with(30, anything, anything)
+        supervisor.send(:handle_status, 'm', 901, promoted)
+        supervisor.send(:send_fork_requests)
+        expect(pipes).to have_received(:request_fork).with(30, anything, 1)
+      end
+
+      it 'measures PSS before promotion, with the promoted child still running' do
+        allow(Delayed::ProcessUtil).to receive(:pss_kb).and_return(1024)
+        activate_mold
+        expect(launcher.logged.join).to include 'PSS 2 MB'
+      end
     end
 
     it 'ignores SIGURG during a promotion' do

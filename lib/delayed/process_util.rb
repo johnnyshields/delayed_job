@@ -25,6 +25,16 @@ module Delayed
       false
     end
 
+    # Whether the pid exists at all (a zombie does).
+    def exists?(pid)
+      Process.kill(0, pid)
+      true
+    rescue Errno::ESRCH
+      false
+    rescue Errno::EPERM
+      true
+    end
+
     def zombie?(pid)
       stat = File.read("/proc/#{pid}/stat")
       stat[stat.rindex(')') + 2] == 'Z' # The state follows "(comm) ".
