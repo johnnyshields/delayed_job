@@ -836,7 +836,7 @@ describe 'Stopping a worker' do
     end
 
     it 'quits on QUIT' do
-      skip 'no SIGQUIT on this platform' unless Signal.list.key?('QUIT')
+      skip_unless_quit_trappable
       traps['QUIT'].call
       expect(dispatcher).to be_quit
     end
@@ -890,6 +890,7 @@ describe 'Stopping a worker' do
     end
 
     it 'does not warn when QUIT can be trapped' do
+      skip_unless_quit_trappable
       allow(dispatcher).to receive(:trap) { |signal, &block| traps[signal] = block }
       dispatcher.send(:trap_signals)
       expect(log.map(&:last).grep(/SIGQUIT/)).to be_empty
@@ -1061,7 +1062,7 @@ describe Delayed::Launcher::Forking, 'stopping worker processes' do
   end
 
   describe 'on SIGQUIT' do
-    before { skip 'no SIGQUIT on this platform' unless Signal.list.key?('QUIT') }
+    before { skip_unless_quit_trappable }
 
     it 'forwards QUIT to every worker and kills those still running after SHUTDOWN_GRACE seconds' do
       expect(Process).to receive(:kill).with('QUIT', 11)
@@ -1418,7 +1419,7 @@ describe Delayed::Launcher::Forking, 'traps inherited by a freshly forked child 
 
   %w[TERM INT QUIT].each do |signal|
     context "on SIG#{signal}" do
-      before { skip 'no SIGQUIT on this platform' if signal == 'QUIT' && !Signal.list.key?('QUIT') }
+      before { skip_unless_quit_trappable if signal == 'QUIT' }
 
       it 'only record it, in a child process' do
         allow(Process).to receive(:pid).and_return(Process.pid + 1)

@@ -599,7 +599,8 @@ describe 'Prefetching jobs (Worker.prefetch)' do
   end
 
   describe 'a queued job whose lock expires, with lock heartbeats' do
-    let(:heartbeat_thread) { Thread.new { sleep }.tap { |t| t.report_on_exception = false } } # Killed after.
+    let(:heartbeat_stop) { Queue.new }
+    let(:heartbeat_thread) { Thread.new { heartbeat_stop.pop } } # Alive until the example ends.
 
     before do
       Delayed::Worker.prefetch = 1
@@ -609,7 +610,10 @@ describe 'Prefetching jobs (Worker.prefetch)' do
       allow(Delayed::Job).to receive(:lock_heartbeats?).and_return(true)
     end
 
-    after { heartbeat_thread.kill.join }
+    after do
+      heartbeat_stop << :stop
+      heartbeat_thread.join
+    end
 
     def now
       Process.clock_gettime(Process::CLOCK_MONOTONIC)

@@ -35,3 +35,13 @@ describe 'Delayed.parse_seconds' do
     end
   end
 end
+
+describe 'Delayed.check_trappable!' do
+  it 'refuses QUIT on the JVM only, without trapping it (which would print a JVM warning)' do
+    stub_const('RUBY_ENGINE', 'jruby')
+    expect { Delayed.check_trappable!('QUIT') }.to raise_error(ArgumentError, "can't trap reserved signal: SIGQUIT")
+    expect { Delayed.check_trappable!('TERM') }.not_to raise_error
+    stub_const('RUBY_ENGINE', 'ruby')
+    expect { Delayed.check_trappable!('QUIT') }.not_to raise_error
+  end
+end

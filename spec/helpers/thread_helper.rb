@@ -1,5 +1,12 @@
 # Runs dispatchers in specs, and waits for conditions.
 module ThreadHelper
+  # Skips the example where QUIT can't be trapped: no such signal, or the
+  # JVM (JRuby), which reserves it (see Delayed.check_trappable!).
+  def skip_unless_quit_trappable
+    skip 'no SIGQUIT on this platform' unless Signal.list.key?('QUIT')
+    skip 'the JVM reserves SIGQUIT' if RUBY_ENGINE == 'jruby'
+  end
+
   # Waits until the block returns true; raises Timeout::Error after
   # `timeout` seconds.
   def wait_until(timeout = 5)
