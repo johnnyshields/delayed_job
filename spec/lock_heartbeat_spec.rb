@@ -598,7 +598,6 @@ describe 'Lock heartbeats' do
             dispatcher.send(:heartbeat_names)
           end
           expect(dispatcher.instance_variable_get(:@jobs_started)).to be_empty
-          expect(dispatcher.instance_variable_get(:@overrun_reported)).to be_empty
         end
 
         it 'forgets them even when the job raises' do
@@ -611,7 +610,6 @@ describe 'Lock heartbeats' do
             end
           end.to raise_error(Delayed::ShutdownInterrupt)
           expect(dispatcher.instance_variable_get(:@jobs_started)).to be_empty
-          expect(dispatcher.instance_variable_get(:@overrun_reported)).to be_empty
         end
 
         it 'has jobs run by worker threads timed while they run' do

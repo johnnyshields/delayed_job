@@ -183,11 +183,15 @@ module Delayed
       backend.after_fork
     end
 
-    def self.lifecycle
-      # In case a worker has not been set up, job enqueueing needs a lifecycle.
-      setup_lifecycle unless @lifecycle
+    LIFECYCLE_LOCK = Mutex.new
 
-      @lifecycle
+    # In case a worker has not been set up, job enqueueing needs a lifecycle:
+    # set up once, though several threads (e.g. web requests) enqueue at once.
+    def self.lifecycle
+      @lifecycle || LIFECYCLE_LOCK.synchronize do
+        setup_lifecycle unless @lifecycle # Plugins set up here read @lifecycle, without the lock.
+        @lifecycle
+      end
     end
 
     def self.setup_lifecycle

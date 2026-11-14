@@ -46,10 +46,12 @@ module Delayed
             reserved << [worker, job]
           end
           reserved
-        rescue StandardError
-          # Don't strand jobs that were already locked; if the error persists
-          # it will be raised again by the next reservation.
+        rescue StandardError => error
+          # Don't strand jobs that were already locked: return them, and
+          # report the error (it is raised again by the next reservation if
+          # it persists).
           raise if reserved.empty?
+          Delayed::Worker.thread_error(error, :context => 'Reservation')
           reserved
         end
 

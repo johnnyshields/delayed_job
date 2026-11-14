@@ -1,3 +1,5 @@
+require 'set'
+
 module Delayed
   # Runs a worker process: owns one or more Delayed::Workers, each on its own
   # thread, and feeds them jobs. Every worker process (forked, daemonized,
@@ -29,8 +31,11 @@ module Delayed
     # Exceptions raised into worker threads to interrupt their jobs on
     # shutdown (see #work).
     SHUTDOWN_INTERRUPTS = [ShutdownInterrupt, SignalException].freeze
-    DEFER_SHUTDOWN_INTERRUPTS = Hash[SHUTDOWN_INTERRUPTS.map { |klass| [klass, :never] }].freeze
-    ALLOW_SHUTDOWN_INTERRUPTS = Hash[SHUTDOWN_INTERRUPTS.map { |klass| [klass, :immediate] }].freeze
+
+    # Stops one run's lock heartbeat thread (see #start_lock_heartbeat).
+    HeartbeatControl = Struct.new(:mutex, :cond, :stopped)
+    DEFER_SHUTDOWN_INTERRUPTS = SHUTDOWN_INTERRUPTS.to_h { |klass| [klass, :never] }.freeze
+    ALLOW_SHUTDOWN_INTERRUPTS = SHUTDOWN_INTERRUPTS.to_h { |klass| [klass, :immediate] }.freeze
 
     # Give up (raising FatalBackendError) after this many consecutive
     # failures to reserve jobs.
@@ -122,9 +127,9 @@ module Delayed
       @depth = 0
       @threads = []
       @running = {} # thread => job it is running
-      @jobs_started = {} # worker => [job it is running, when it started, its time limit, its log label]
-      @overrun_reported = {} # worker => its job reported as overrun
-      @in_flight = 0
+      # worker => [job it is running, when it started, its time limit, its
+      # log label, whether it was reported as overrun (see #report_overrun)]
+      @jobs_started = {}
       @events = 0
       @thread_error = nil
       @failed_reserve_count = 0
@@ -164,15 +169,13 @@ module Delayed
       begin
         with_lock_heartbeat do
           start_threads
-          begin
-            poll_loop
-          rescue Exception => error # rubocop:disable Lint/RescueException
-            # A worker thread's crash was reported by the thread itself.
-            thread_error(error, 'Dispatcher') unless stopping_error?(error)
-            raise
-          ensure
-            stop_threads(error)
-          end
+          poll_loop
+        rescue Exception => error # rubocop:disable Lint/RescueException
+          # A worker thread's crash was reported by the thread itself.
+          thread_error(error, 'Dispatcher') unless stopping_error?(error)
+          raise
+        ensure
+          stop_threads(error)
         end
       ensure
         Delayed.instrument(:process_stopped, process_payload.merge(:error => error || @thread_error))
@@ -228,7 +231,7 @@ module Delayed
       state = if quit? then 'quitting, '
       elsif stop? then 'stopping, '
       end
-      busy, held = synchronize { [busy_count, @in_flight] }
+      busy, held = synchronize { [busy_count, @slot_jobs.size] }
       "#{@procline_name}: #{state}#{busy}/#{thread_count} busy#{prefetch_state(held - busy)}, queues=#{queue_names}"
     end
 
@@ -454,13 +457,11 @@ module Delayed
             'locks expire after max_run_time', 'warn'
         return false
       end
-      @heartbeat_stopped = false
       @last_beat_at = monotonic_now
-      @heartbeat_mutex = Mutex.new
-      @heartbeat_cond = ConditionVariable.new
-      @heartbeat = Thread.new { lock_heartbeat_loop(Worker.lock_heartbeat_interval) }
-      @heartbeat.report_on_exception = false if @heartbeat.respond_to?(:report_on_exception=)
-      @heartbeat.name = 'delayed_job heartbeat' if @heartbeat.respond_to?(:name=)
+      # Its own, not shared with a later run's heartbeat: one left behind
+      # (see #stop_lock_heartbeat) must not come back to life.
+      control = @heartbeat_control = HeartbeatControl.new(Mutex.new, ConditionVariable.new, false)
+      @heartbeat = spawn_thread('delayed_job heartbeat') { lock_heartbeat_loop(Worker.lock_heartbeat_interval, control) }
       true
     end
 
@@ -469,9 +470,10 @@ module Delayed
     # seconds rather than keeping the process from exiting; it stops at its
     # next beat if it ever returns.
     def stop_lock_heartbeat
-      @heartbeat_mutex.synchronize do
-        @heartbeat_stopped = true
-        @heartbeat_cond.broadcast
+      control = @heartbeat_control
+      control.mutex.synchronize do
+        control.stopped = true
+        control.cond.broadcast
       end
       return if @heartbeat.join(HEARTBEAT_STOP_TIMEOUT)
       say "Lock heartbeat did not stop within #{HEARTBEAT_STOP_TIMEOUT}s (a lock refresh may be stuck); " \
@@ -483,13 +485,14 @@ module Delayed
     # locks of running jobs stay alive - until MAX_HEARTBEAT_CRASHES in a
     # row, when it gives up: the locks then expire after lock_timeout, and
     # other workers may take those jobs over. Signals and exits end it at once.
-    def lock_heartbeat_loop(interval)
+    def lock_heartbeat_loop(interval, control = @heartbeat_control)
       crashes = 0
       loop do
-        @heartbeat_mutex.synchronize do
-          @heartbeat_cond.wait(@heartbeat_mutex, interval) unless @heartbeat_stopped
+        stopped = control.mutex.synchronize do
+          control.cond.wait(control.mutex, interval) unless control.stopped
+          control.stopped
         end
-        break if @heartbeat_mutex.synchronize { @heartbeat_stopped }
+        break if stopped
         begin
           heartbeat
           crashes = 0
@@ -544,12 +547,14 @@ module Delayed
       end
     end
 
-    # Logs, once per job, that its lock is no longer refreshed.
+    # Logs, once per job, that its lock is no longer refreshed: marks its
+    # #job_timed entry, if the job still runs (it may have ended since the
+    # heartbeat looked).
     def report_overrun(worker, job, limit, label)
       first = synchronize do
-        next false if @overrun_reported[worker].equal?(job)
-        @overrun_reported[worker] = job
-        true
+        started = @jobs_started[worker]
+        next false unless started && started[0].equal?(job) && !started[4]
+        started[4] = true
       end
       return unless first
       # Published on the lock heartbeat thread: :job_name was worked out on
@@ -561,15 +566,12 @@ module Delayed
                         label, limit, Worker.lock_timeout), 'error')
     end
 
-    # Runs the block (the worker's job), then forgets when the job started
-    # and its time limit (recorded by #job_timed) and any overrun report.
+    # Runs the block (the worker's job), then forgets when the job started,
+    # its time limit and any overrun report (see #job_timed).
     def untrack_job_after(worker)
       yield
     ensure
-      synchronize do
-        @jobs_started.delete(worker)
-        @overrun_reported.delete(worker)
-      end
+      synchronize { @jobs_started.delete(worker) }
     end
 
     # How Worker#job_say names the job.
@@ -588,7 +590,8 @@ module Delayed
       return if names.empty?
       # The jobs held under those names now: their locks were taken, so the
       # refresh below reaches them.
-      held = synchronize { @slot_jobs.select { |slot, _job| names.include?(slot.name) } }
+      wanted = names.to_set
+      held = synchronize { @slot_jobs.select { |slot, _job| wanted.include?(slot.name) } }
       polling { Delayed::Job.touch_locks(names) }
       beaten(held, beat_at)
     rescue StandardError => error
@@ -596,14 +599,22 @@ module Delayed
       thread_error(error, 'Lock heartbeat')
     end
 
+    # Recorded one by one: if starting one fails, those already started are
+    # still stopped (see #run).
     def start_threads
       build_slots
-      @threads = workers.each_with_index.map do |worker, index|
+      @threads = []
+      workers.each_with_index do |worker, index|
         inbox = @inboxes[worker] = Inbox.new
-        Thread.new { work(worker, inbox) }.tap do |thread|
-          thread.report_on_exception = false if thread.respond_to?(:report_on_exception=)
-          thread.name = "delayed_job worker:#{index}" if thread.respond_to?(:name=)
-        end
+        @threads << spawn_thread("delayed_job worker:#{index}") { work(worker, inbox) }
+      end
+    end
+
+    # A thread that reports its own errors (see #thread_error).
+    def spawn_thread(name, &block)
+      Thread.new(&block).tap do |thread|
+        thread.report_on_exception = false
+        thread.name = name
       end
     end
 
@@ -863,10 +874,7 @@ module Delayed
       say "Could not release the queued jobs: #{error.class}: #{error.message}", 'error'
       thread_error(error, 'Releasing interrupted jobs')
     ensure
-      synchronize do
-        (queued || []).map(&:first).each { |slot| free_slot(slot) }
-        signal_event
-      end
+      slots_done((queued || []).map(&:first))
     end
 
     def join_threads(deadline)
@@ -923,29 +931,32 @@ module Delayed
     # with Worker.count_shutdown_interrupts, it is recorded as a failed
     # attempt (rescheduled with back-off, or failed after max_attempts).
     def release_interrupted(worker, job, interrupt, slot)
-      if Worker.count_shutdown_interrupts
-        worker.job_say(job, 'interrupted by shutdown; counted as a failed attempt', 'warn')
-        worker.fail_attempt(job, interrupt)
-      else
-        worker.job_say(job, 'interrupted by shutdown; released for another worker', 'warn')
+      release_slot(worker, slot, 'shutdown') do
+        if Worker.count_shutdown_interrupts
+          worker.job_say(job, 'interrupted by shutdown; counted as a failed attempt', 'warn')
+          worker.fail_attempt(job, interrupt)
+        else
+          worker.job_say(job, 'interrupted by shutdown; released for another worker', 'warn')
+        end
       end
+    end
+
+    # Runs the block (logging, or counting a failed attempt), then clears
+    # the lock of the worker's job in `slot` and publishes jobs_released.
+    # An error is reported; the slot is freed whatever happens.
+    def release_slot(worker, slot, event_reason)
+      yield
       Delayed::Job.clear_locks!(slot.name)
-      Delayed.instrument(:jobs_released, :workers => [slot.name], :count => 1, :reason => 'shutdown')
+      Delayed.instrument(:jobs_released, :workers => [slot.name], :count => 1, :reason => event_reason)
     rescue StandardError => error
       say "Could not release the jobs of #{slot.name}: #{error.class}: #{error.message}", 'error'
       thread_error(error, 'Releasing interrupted jobs', worker.name)
     ensure
-      synchronize do
-        free_slot(slot)
-        signal_event
-      end
+      slots_done([slot])
     end
 
     def dispatch(slot, job, reserved_at = monotonic_now)
-      synchronize do
-        @slot_jobs[slot] = job
-        @in_flight += 1
-      end
+      synchronize { @slot_jobs[slot] = job }
       @inboxes[@slot_owner.fetch(slot, slot)].push(slot, job, reserved_at)
     end
 
@@ -961,17 +972,7 @@ module Delayed
     # taken over.
     def release_unstarted(worker, slot, job, reason = :shutdown)
       message, event_reason = UNSTARTED_REASONS.fetch(reason)
-      worker.job_say(job, "#{message}; released for another worker", 'warn')
-      Delayed::Job.clear_locks!(slot.name)
-      Delayed.instrument(:jobs_released, :workers => [slot.name], :count => 1, :reason => event_reason)
-    rescue StandardError => error
-      say "Could not release the jobs of #{slot.name}: #{error.class}: #{error.message}", 'error'
-      thread_error(error, 'Releasing interrupted jobs', worker.name)
-    ensure
-      synchronize do
-        free_slot(slot)
-        signal_event
-      end
+      release_slot(worker, slot, event_reason) { worker.job_say(job, "#{message}; released for another worker", 'warn') }
     end
 
     # Whether the shutdown deadline (see #shutdown_deadline) has passed: jobs
@@ -985,15 +986,23 @@ module Delayed
       synchronize do
         result ? @success += 1 : @failure += 1
         @running_slot.delete(worker)
-        free_slot(slot)
-        signal_event
       end
+      slots_done([slot])
     end
 
     # Under the mutex: the slot's job finished or was released.
     def free_slot(slot)
       @slot_refreshed.delete(slot)
-      @in_flight -= 1 if @slot_jobs.delete(slot)
+      @slot_jobs.delete(slot)
+    end
+
+    # The slots' jobs finished or were released: frees them, and wakes the
+    # dispatcher to refill them.
+    def slots_done(slots)
+      synchronize do
+        slots.each { |slot| free_slot(slot) }
+        signal_event
+      end
     end
 
     # Waits until a worker finishes a job (or dies), the dispatcher is stopped, or
@@ -1031,7 +1040,7 @@ module Delayed
 
     def free_slots
       # Not behind a job that overran its max_run_time (see #heartbeat_names).
-      plan = (workers - @dead - @overrun_reported.keys).map do |worker|
+      plan = (workers - @dead - overrun_workers).map do |worker|
         slots = @slots[worker] || [worker]
         held = slots.count { |slot| @slot_jobs.key?(slot) }
         [slots.reject { |slot| @slot_jobs.key?(slot) }, held]
@@ -1042,6 +1051,11 @@ module Delayed
           free << slot if slot
         end
       end
+    end
+
+    # Under the mutex: workers running a job reported as overrun.
+    def overrun_workers
+      @jobs_started.select { |_worker, started| started[4] }.keys
     end
 
     # Under the mutex: workers holding a job (running it or about to).
@@ -1055,8 +1069,10 @@ module Delayed
       synchronize { @events != seen }
     end
 
+    # Jobs handed to workers and not finished or released yet (running or
+    # queued).
     def in_flight
-      synchronize { @in_flight }
+      synchronize { @slot_jobs.size }
     end
 
     def completed
