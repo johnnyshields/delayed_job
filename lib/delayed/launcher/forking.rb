@@ -26,6 +26,8 @@ module Delayed
       def launch
         @stopped = !!@options[:exit_on_complete]
         @killed = false
+        stop_signals.clear
+        Delayed::Worker.validate_settings!(@options)
         setup_logger
         setup_pidfile
         begin
@@ -62,6 +64,7 @@ module Delayed
 
       def shutdown(timeout = nil)
         @stopped = true
+        stop_signals << 'TERM' if stop_signals.empty?
         message = " with #{timeout} second grace period" if timeout
         logger.info "Shutdown invoked#{message}"
         signal_workers('TERM')
@@ -71,6 +74,7 @@ module Delayed
       def kill(exit_status = 0, message = nil)
         @stopped = true
         @killed = true
+        stop_signals << 'KILL'
         message = " #{message}" if message
         logger.warn "Kill invoked#{message}"
         killed = workers_lock.synchronize { workers.dup }
@@ -86,6 +90,27 @@ module Delayed
         trap_shutdown_signal('INT')
         trap_shutdown_signal('TERM')
         trap_quit_signal if Signal.list.key?('QUIT')
+        trap_hangup_signal if forking? && Signal.list.key?('HUP')
+      end
+
+      # SIGHUP (e.g. the terminal closed) stops the worker processes
+      # gracefully, as TERM does: by default it would end the parent at once,
+      # deleting its pidfile while they still run, so that a second launcher
+      # could start beside them. Forwarded to them as TERM; they ignore HUP
+      # itself (see #capture_signals). A single worker process (not forked)
+      # keeps the default.
+      def trap_hangup_signal
+        Signal.trap('HUP') do
+          next if forked_child?
+          Thread.new { logger.info('Received SIGHUP. Waiting for workers to finish current job...') }
+          @stopped = true
+          stop_signals << 'TERM' unless stop_signals.include?('TERM')
+          forward_signal('TERM')
+          timeout = shutdown_timeout
+          schedule_kill(timeout + SHUTDOWN_GRACE) if timeout
+        end
+      rescue ArgumentError => error
+        logger.warn "Cannot trap SIGHUP on this platform (#{error.message})"
       end
 
       # Stops the run loop and forwards the signal to the worker processes:
@@ -98,6 +123,7 @@ module Delayed
           next child_signal(signal) if forked_child?
           Thread.new { logger.info("Received SIG#{signal}. Waiting for workers to finish current job...") }
           @stopped = true
+          stop_signals << signal unless stop_signals.include?(signal)
           forward_signal(signal)
           timeout = shutdown_timeout
           schedule_kill(timeout + SHUTDOWN_GRACE) if timeout
@@ -113,6 +139,7 @@ module Delayed
           next child_signal('QUIT') if forked_child?
           Thread.new { logger.info('Received SIGQUIT. Interrupting running jobs...') }
           @stopped = true
+          stop_signals << 'QUIT' unless stop_signals.include?('QUIT')
           forward_signal('QUIT')
           schedule_kill(SHUTDOWN_GRACE)
         end
@@ -143,14 +170,27 @@ module Delayed
       # its keys, as a Mutex can't be locked in a trap.
       attr_reader :workers_lock
 
+      # Signals that stopped the launcher (a signal, #shutdown or #kill), in
+      # the order received. Signal-trap safe: appended to, never replaced.
+      def stop_signals
+        @stop_signals ||= []
+      end
+
+      # A signal that arrived while booting (before the dispatcher's traps
+      # replace the launcher's) is passed on - the same list, so that one
+      # arriving until then isn't lost either.
       def setup_single_worker
         set_process_name(get_name(process_identifier))
-        Delayed::Dispatcher.new(@options.merge(:procline => $0)).start
+        Delayed::Dispatcher.new(@options.merge(:procline => $0)).start(stop_signals)
       end
 
       # Forks a child process. `replaces_pid` and `delay`: the pid of the child
       # process it replaces and the seconds waited before forking it, if any.
+      # Once stopped by a signal (e.g. one that arrived while booting, before
+      # any child existed to forward it to), forks none and returns nil; a
+      # child forked as the signal arrived is sent it (see #catch_up_on_stop).
       def add_worker(options, replaces_pid: nil, delay: 0)
+        return if stop_signals.any?
         worker_name = get_name(@worker_index)
         worker_pid = fork_worker(worker_name, options)
 
@@ -163,7 +203,19 @@ module Delayed
         started_at[worker_pid] = monotonic_now
         @worker_index += 1
         Delayed.instrument(:child_spawned, :worker => worker_name, :pid => worker_pid, :replaces_pid => replaces_pid, :delay => delay)
+        catch_up_on_stop(worker_pid)
         worker_pid
+      end
+
+      # Sends a child just recorded in #workers the signal that stopped the
+      # launcher, if one arrived after the check in #add_worker: the trap
+      # forwarded it only to the children recorded at the time.
+      def catch_up_on_stop(pid)
+        signal = stop_signals.last
+        return unless signal
+        Process.kill(signal, pid)
+      rescue Errno::ESRCH
+        nil
       end
 
       def fork_worker(worker_name, options)
@@ -194,6 +246,9 @@ module Delayed
             nil # Can't be trapped here (QUIT on the JVM); the dispatcher warns.
           end
         end
+        # The parent stops this process on SIGHUP (sent to the whole process
+        # group when the terminal closes) with a TERM: see #trap_hangup_signal.
+        Signal.trap('HUP', 'IGNORE') if Signal.list.key?('HUP')
         pending
       end
 
@@ -329,7 +384,7 @@ module Delayed
       # that died at once, instead of crashing the launcher.
       def respawn(worker_name, pid, options, status, streak, delay) # rubocop:disable Metrics/ParameterLists
         new_pid = add_worker(options, :replaces_pid => pid, :delay => delay)
-        respawn_streaks[new_pid] = streak
+        respawn_streaks[new_pid] = streak if new_pid
         new_pid
       rescue SystemCallError => error
         retry_delay = respawn_delay(streak + 1)

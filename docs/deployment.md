@@ -58,8 +58,9 @@ or stops them if they're orphaned.
 | Pidfile | `--pid-file[=PATH]` | `PIDFILE=1` or a path | off |
 | Quiet polling queries | `--silence-polling` | `SILENCE_POLLING=1` | off |
 
-Each is also a `Delayed::Worker` setting (e.g.
-`Delayed::Worker.shutdown_timeout = 20`) for an initializer.
+All but processes, threads, pools and the pidfile are also
+`Delayed::Worker` settings (e.g. `Delayed::Worker.shutdown_timeout = 20`) for an
+initializer; command-line options and environment variables override them.
 
 ## Stopping and deploying
 
@@ -67,6 +68,7 @@ Each is also a `Delayed::Worker` setting (e.g.
 |---|---|
 | `TERM`, `INT` | Stop polling; let running jobs finish (up to the shutdown timeout, then interrupt and release them); exit |
 | `QUIT` | Interrupt and release running jobs at once; exit |
+| `HUP` | Forking mode: as `TERM` (worker processes ignore `HUP` itself) |
 
 The launcher forwards signals to its children. Released jobs are unlocked with
 attempts unchanged and run again from the start elsewhere, so **jobs must be

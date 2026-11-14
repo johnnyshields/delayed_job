@@ -126,10 +126,13 @@ module Delayed
 
       ParseObjectFromYaml = %r{!ruby/\w+:([^\s]+)} # rubocop:disable Naming/ConstantName
 
+      # The payload's display_name or class name; for a payload that can't be
+      # loaded, the class named in the handler, if any.
       def name
         @name ||= payload_object.respond_to?(:display_name) ? payload_object.display_name : payload_object.class.name
       rescue DeserializationError
-        ParseObjectFromYaml.match(handler)[1]
+        match = ParseObjectFromYaml.match(handler.to_s)
+        match ? match[1] : 'Unknown'
       end
 
       def payload_object=(object)
@@ -170,16 +173,22 @@ module Delayed
       rescue DeserializationError # rubocop:disable Lint/SuppressedException
       end
 
+      # A payload that can't be loaded gets the default back-off and
+      # max_attempts (e.g. when a dead worker's jobs are recovered).
       def reschedule_at
         if payload_object.respond_to?(:reschedule_at)
           payload_object.reschedule_at(self.class.db_time_now, attempts)
         else
-          self.class.db_time_now + (attempts**4) + 5
+          default_reschedule_at
         end
+      rescue DeserializationError
+        default_reschedule_at
       end
 
       def max_attempts
         payload_object.max_attempts if payload_object.respond_to?(:max_attempts)
+      rescue DeserializationError
+        nil
       end
 
       def max_run_time
@@ -210,9 +219,14 @@ module Delayed
         self.run_at ||= self.class.db_time_now
       end
 
+      def default_reschedule_at
+        self.class.db_time_now + (attempts**4) + 5
+      end
+
       # Call during reload operation to clear out internal state
       def reset
         @payload_object = nil
+        @name = nil
       end
     end
   end

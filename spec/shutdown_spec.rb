@@ -1076,6 +1076,160 @@ describe Delayed::Launcher::Forking, 'stopping worker processes' do
   end
 end
 
+describe Delayed::Launcher::Forking, 'on SIGHUP' do
+  subject(:launcher) { described_class.new(options) }
+  let(:options) { {:processes => 2} }
+  let(:traps) { {} }
+  let(:logger) { instance_double(Logger, :info => nil, :warn => nil, :error => nil) }
+
+  before do
+    skip 'no SIGHUP on this platform' unless Signal.list.key?('HUP')
+    allow(launcher).to receive(:logger).and_return(logger)
+    allow(Signal).to receive(:trap) { |signal, *args, &block| traps[signal] = block || args.first }
+    launcher.send(:workers).merge!(11 => ['delayed_job.0', {}], 12 => ['delayed_job.1', {}])
+  end
+
+  it 'stops gracefully, forwarding TERM to every worker, instead of exiting (and deleting the pidfile)' do
+    launcher.send(:trap_signals)
+    expect(Process).to receive(:kill).with('TERM', 11)
+    expect(Process).to receive(:kill).with('TERM', 12)
+    traps['HUP'].call
+    expect(launcher.instance_variable_get(:@stopped)).to be true
+    expect(launcher.send(:add_worker, {})).to be_nil
+  end
+
+  it 'kills workers still running SHUTDOWN_GRACE seconds after the shutdown timeout' do
+    options[:shutdown_timeout] = 20
+    launcher.send(:trap_signals)
+    allow(Process).to receive(:kill)
+    expect(launcher).to receive(:schedule_kill).with(20 + described_class::SHUTDOWN_GRACE)
+    traps['HUP'].call
+  end
+
+  it 'is ignored by a freshly forked child (the parent sends it TERM)' do
+    launcher.send(:trap_signals)
+    launcher.instance_variable_set(:@launcher_pid, Process.pid + 1)
+    expect(Process).not_to receive(:kill)
+    traps['HUP'].call
+    expect(launcher.send(:child_signals)).to be_empty
+    launcher.send(:capture_signals)
+    expect(traps['HUP']).to eq 'IGNORE'
+  end
+
+  context 'with a single worker process (not forked)' do
+    let(:options) { {} }
+
+    it 'is left to its default' do
+      launcher.send(:trap_signals)
+      expect(traps).not_to have_key('HUP')
+    end
+  end
+end
+
+describe Delayed::Launcher::Forking, 'checking the settings before forking' do
+  subject(:launcher) { described_class.new(options) }
+  let(:options) { {:processes => 2} }
+
+  before do
+    allow(launcher).to receive(:setup_logger)
+    allow(launcher).to receive(:fork_worker)
+    allow(launcher).to receive(:trap_signals)
+  end
+
+  it 'refuses a prefetch set in an initializer beyond the maximum, forking nothing' do
+    Delayed::Worker.prefetch = 30
+    expect { launcher.launch }.to raise_error(ArgumentError, /prefetch must be a whole number from 0 to 20 \(got 30\)/)
+    expect(launcher).not_to have_received(:fork_worker)
+  end
+
+  it 'refuses a heartbeat that the lock_timeout set in an initializer would let locks expire between' do
+    Delayed::Worker.lock_timeout = 60
+    options[:lock_heartbeat_interval] = 45
+    expect { launcher.launch }.to raise_error(ArgumentError, /lock_timeout \(60\) must be at least twice lock_heartbeat_interval \(45\)/)
+    expect(launcher).not_to have_received(:fork_worker)
+  end
+
+  it 'lets options override the Worker settings' do
+    Delayed::Worker.prefetch = 30
+    Delayed::Worker.lock_timeout = 60
+    expect { Delayed::Worker.validate_settings!(:prefetch => 2, :lock_heartbeat_interval => 10, :lock_timeout => 30) }.not_to raise_error
+    expect { Delayed::Worker.validate_settings!(:prefetch => 21) }.to raise_error(ArgumentError, /got 21/)
+  end
+end
+
+describe Delayed::Launcher::Forking, 'a signal that arrives while the launcher boots' do
+  subject(:launcher) { described_class.new(options) }
+  let(:options) { {:processes => 2} }
+  let(:traps) { {} }
+  let(:logger) { instance_double(Logger, :info => nil, :warn => nil, :error => nil) }
+  let(:forked) { [] }
+
+  before do
+    allow(launcher).to receive(:logger).and_return(logger)
+    allow(launcher).to receive(:setup_logger)
+    allow(Signal).to receive(:trap) { |signal, &block| traps[signal] = block }
+    allow(Delayed::Worker).to receive(:before_fork)
+    allow(launcher).to receive(:run_loop)
+    allow(launcher).to receive(:fork_worker) do |name, _|
+      forked << name
+      100 + forked.size
+    end
+    allow(Process).to receive(:kill)
+  end
+
+  %w[TERM INT].each do |signal|
+    it "forks no worker after SIG#{signal} during prepare_for_fork, so none is left running" do
+      allow(launcher).to receive(:prepare_for_fork) { traps[signal].call }
+      launcher.launch
+      expect(forked).to be_empty
+      expect(launcher.send(:workers)).to be_empty
+    end
+  end
+
+  it 'sends the signal to a child forked as it arrived (the trap only reached the children recorded then)' do
+    allow(launcher).to receive(:prepare_for_fork)
+    allow(launcher).to receive(:fork_worker) do |name, _|
+      forked << name
+      traps['TERM'].call if forked.size == 1 # Arrives during the fork: no child is recorded yet.
+      100 + forked.size
+    end
+    launcher.launch
+    expect(forked.size).to eq 1
+    expect(Process).to have_received(:kill).with('TERM', 101)
+  end
+
+  it 'replaces no worker once stopped by a signal' do
+    launcher.send(:trap_signals)
+    traps['TERM'].call
+    expect(launcher.send(:add_worker, {}, :replaces_pid => 7)).to be_nil
+    expect(forked).to be_empty
+  end
+
+  it 'still forks the workers with exit_on_complete (stopped, but not by a signal)' do
+    options[:exit_on_complete] = true
+    allow(launcher).to receive(:prepare_for_fork)
+    launcher.launch
+    expect(forked.size).to eq 2
+    expect(Process).not_to have_received(:kill)
+  end
+
+  context 'with a single worker process' do
+    let(:options) { {} }
+
+    it 'hands the signal to the dispatcher, which stops before running any job' do
+      dispatcher = instance_double(Delayed::Dispatcher)
+      allow(Delayed::Dispatcher).to receive(:new).and_return(dispatcher)
+      allow(launcher).to receive(:set_process_name)
+      allow(launcher).to receive(:trap_signals).and_wrap_original do |m|
+        m.call
+        traps['TERM'].call # Before the dispatcher installs its own traps.
+      end
+      expect(dispatcher).to receive(:start).with(['TERM'])
+      launcher.launch
+    end
+  end
+end
+
 describe Delayed::Dispatcher, 'shutdown timeout message' do
   it 'formats whole and fractional seconds the same way, whatever their type' do
     dispatcher = described_class.new
@@ -1115,7 +1269,7 @@ describe Delayed::Launcher::Forking, 'where QUIT cannot be trapped (the JVM)' do
   it 'still traps TERM and INT, and warns about QUIT' do
     skip 'no SIGQUIT on this platform' unless Signal.list.key?('QUIT')
     expect { launcher.send(:trap_signals) }.not_to raise_error
-    expect(traps.keys).to contain_exactly('TERM', 'INT')
+    expect(traps.keys).to contain_exactly('TERM', 'INT', 'HUP')
     expect(logger).to have_received(:warn).with("Cannot trap SIGQUIT on this platform (can't trap reserved signal: " \
                                                  'SIGQUIT); use TERM or INT to stop')
   end
@@ -1129,7 +1283,7 @@ describe Delayed::Launcher::Forking, 'where QUIT cannot be trapped (the JVM)' do
 
   it 'still records TERM and INT in a starting worker process' do
     pending_signals = launcher.send(:capture_signals)
-    expect(traps.keys).to contain_exactly('TERM', 'INT')
+    expect(traps.keys).to contain_exactly('TERM', 'INT', 'HUP')
     traps['TERM'].call
     expect(pending_signals).to eq ['TERM']
   end

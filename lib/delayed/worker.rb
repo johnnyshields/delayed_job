@@ -225,9 +225,9 @@ module Delayed
 
     # Raises ArgumentError unless prefetch is a whole number from 0 to
     # MAX_PREFETCH.
-    def self.validate_prefetch!
-      return if prefetch.is_a?(Integer) && prefetch.between?(0, MAX_PREFETCH)
-      raise ArgumentError, "prefetch must be a whole number from 0 to #{MAX_PREFETCH} (got #{prefetch.inspect})"
+    def self.validate_prefetch!(value = prefetch)
+      return if value.is_a?(Integer) && value.between?(0, MAX_PREFETCH)
+      raise ArgumentError, "prefetch must be a whole number from 0 to #{MAX_PREFETCH} (got #{value.inspect})"
     end
 
     # Recovers the jobs left locked by workers whose process died while
@@ -243,15 +243,31 @@ module Delayed
           Delayed::Job.clear_locks!(worker_name)
           next count
         end
+        # A job that had already failed permanently keeps its lock (as when
+        # a live worker fails it, until ClearLocks runs on exit): it wasn't
+        # running, so it only has its lock cleared, below.
+        jobs = jobs.reject(&:failed?)
         worker = named(worker_name)
-        jobs.each { |job| worker.fail_attempt(job, error) }
-        # Jobs failed permanently keep their lock (as when a live worker fails
-        # them, until ClearLocks runs on exit); the dead worker can't clear it.
+        recovered = jobs.count { |job| recover_job(worker, job, error) }
         Delayed::Job.clear_locks!(worker_name)
         Delayed.instrument(:locks_released, :workers => [worker_name], :count => jobs.size, :reason => 'process exit', :error => error) unless jobs.empty?
-        count + jobs.size
+        count + recovered
       end
     end
+
+    # Counts a failed attempt of a job recovered from a dead worker. An
+    # error doing so (e.g. a failure hook that raises, or a lost database
+    # connection) is reported, and leaves this job's lock to be cleared (see
+    # #recover_jobs_of): the dead worker's other jobs are still recovered.
+    # Returns whether it was recovered.
+    def self.recover_job(worker, job, exit_error)
+      worker.fail_attempt(job, exit_error)
+      true
+    rescue StandardError => error
+      thread_error(error, :context => 'Recovering jobs', :worker => worker.name, :job => job)
+      false
+    end
+    private_class_method :recover_job
 
     # Reports an error raised outside of a job's own handling: publishes a
     # thread_error event and calls Worker.on_thread_error. Never raises.
@@ -288,12 +304,22 @@ module Delayed
 
     # Raises ArgumentError for lock heartbeat settings that would let a live
     # worker's locks expire between two heartbeats.
-    def self.validate_lock_heartbeats!
-      return if lock_heartbeat_interval.nil?
-      raise ArgumentError, 'lock_heartbeat_interval must be greater than 0' unless lock_heartbeat_interval > 0
-      return if lock_timeout && lock_timeout >= 2 * lock_heartbeat_interval
-      raise ArgumentError, "lock_timeout (#{lock_timeout.inspect}) must be at least twice " \
-                           "lock_heartbeat_interval (#{lock_heartbeat_interval})"
+    def self.validate_lock_heartbeats!(interval = lock_heartbeat_interval, timeout = lock_timeout)
+      return if interval.nil?
+      raise ArgumentError, 'lock_heartbeat_interval must be greater than 0' unless interval > 0
+      return if timeout && timeout >= 2 * interval
+      raise ArgumentError, "lock_timeout (#{timeout.inspect}) must be at least twice " \
+                           "lock_heartbeat_interval (#{interval})"
+    end
+
+    # Raises ArgumentError for settings a worker process would refuse to
+    # start with: the Worker settings (e.g. from an initializer) overridden
+    # by `options` (as Worker.new does). Lets the launcher fail at once,
+    # rather than every worker process it forks.
+    def self.validate_settings!(options = {})
+      setting = ->(name) { options.key?(name) ? options[name] : send(name) }
+      validate_prefetch!(setting.call(:prefetch))
+      validate_lock_heartbeats!(setting.call(:lock_heartbeat_interval), setting.call(:lock_timeout))
     end
 
     # A worker that only records job outcomes under the given name. Unlike

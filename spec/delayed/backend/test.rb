@@ -41,6 +41,10 @@ module Delayed
           synchronize { all.size }
         end
 
+        def self.find(id)
+          synchronize { all.detect { |job| job.id == id } } || raise(ArgumentError, "no job with id #{id}")
+        end
+
         def self.delete_all
           synchronize { all.clear }
         end

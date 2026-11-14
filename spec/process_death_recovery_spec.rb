@@ -121,6 +121,64 @@ describe 'Recovering the jobs of a dead worker process' do
       expect(job.attempts).to eq 1
     end
 
+    context 'with a job whose payload cannot be loaded (e.g. its class was removed)' do
+      def unloadable_job(locked_by, attrs = {})
+        locked_job(locked_by, attrs).tap do |job|
+          job.handler = "--- !ruby/object:NoSuchJobClass\nx: 1\n"
+          job.send(:reset) # Forget the payload loaded when it was created.
+        end
+      end
+
+      it 'reschedules it with the default back-off, and still recovers the other names' do
+        bad = unloadable_job('dj.1 pid:77 thread:0')
+        good = locked_job('dj.1 pid:77 thread:1')
+        names = ['dj.1 pid:77 thread:0', 'dj.1 pid:77 thread:1']
+        expect(Delayed::Worker.recover_jobs_of(names, error)).to eq 2
+        expect([bad.attempts, bad.locked_by, bad.failed_at]).to eq [1, nil, nil]
+        expect(bad.run_at).to be_within(2).of(now + 6)
+        expect([good.attempts, good.locked_by]).to eq [1, nil]
+      end
+
+      it 'fails it permanently after the default max_attempts' do
+        Delayed::Worker.destroy_failed_jobs = false
+        bad = unloadable_job('dj.1 pid:77', :attempts => Delayed::Worker.max_attempts - 1)
+        Delayed::Worker.recover_jobs_of(['dj.1 pid:77'], error)
+        expect(bad.failed_at).not_to be_nil
+        expect(bad.locked_by).to be_nil
+      ensure
+        Delayed::Worker.destroy_failed_jobs = true
+      end
+    end
+
+    it 'reports a job it cannot recover, clears its lock, and carries on with the others' do
+      reported = []
+      Delayed::Worker.on_thread_error = ->(e, info) { reported << [e.message, info[:context]] }
+      broken = locked_job('dj.1 pid:77 thread:0')
+      good = locked_job('dj.1 pid:77 thread:1')
+      allow(broken).to receive(:save!).and_raise(IOError, 'connection lost')
+      allow(Delayed::Job).to receive(:locked_jobs).and_call_original
+      allow(Delayed::Job).to receive(:locked_jobs).with('dj.1 pid:77 thread:0').and_return([broken])
+      names = ['dj.1 pid:77 thread:0', 'dj.1 pid:77 thread:1']
+      expect(Delayed::Worker.recover_jobs_of(names, error)).to eq 1
+      expect(reported).to eq [['connection lost', 'Recovering jobs']]
+      expect(broken.locked_by).to be_nil
+      expect([good.attempts, good.locked_by]).to eq [1, nil]
+    end
+
+    it 'only clears the lock of a job that had already failed permanently (it was not running)' do
+      Delayed::Worker.destroy_failed_jobs = false
+      failed_at = now - 60
+      job = locked_job('dj.1 pid:77', :attempts => 25, :failed_at => failed_at, :last_error => 'the original error')
+      events = []
+      subscription = ActiveSupport::Notifications.subscribe(/delayed_job/) { |name, *| events << name }
+      expect(Delayed::Worker.recover_jobs_of(['dj.1 pid:77'], error)).to eq 0
+      expect([job.attempts, job.failed_at, job.last_error, job.locked_by]).to eq [25, failed_at, 'the original error', nil]
+      expect(events.grep(/attempt_failed|job_failed|locks_released/)).to be_empty
+    ensure
+      ActiveSupport::Notifications.unsubscribe(subscription) if subscription
+      Delayed::Worker.destroy_failed_jobs = true
+    end
+
     context 'when the backend cannot list locked jobs' do
       before { allow(Delayed::Job).to receive(:locked_jobs).and_return(nil) }
 

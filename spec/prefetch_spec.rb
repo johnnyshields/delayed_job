@@ -221,17 +221,58 @@ describe 'Prefetching jobs (Worker.prefetch)' do
       expect(d.send(:heartbeat_names)).to eq [queued.name]
     end
 
-    it 'stops refreshing the lock of an overrun job, not of queued ones' do
-      Delayed::Worker.max_run_time = 10
-      d = prepare(dispatcher(1))
-      worker = d.workers.first
-      running, queued = d.instance_variable_get(:@slots)[worker]
-      job = Delayed::Job.enqueue(SimpleJob.new)
-      d.send(:dispatch, running, job)
-      d.send(:dispatch, queued, Delayed::Job.enqueue(SimpleJob.new))
-      d.instance_variable_get(:@running_slot)[worker] = running
-      d.instance_variable_get(:@jobs_started)[worker] = [job, Process.clock_gettime(Process::CLOCK_MONOTONIC) - 11, 10, 'Job']
-      expect(d.send(:heartbeat_names)).to eq [queued.name]
+    context 'behind a job that overran its max_run_time (stuck, e.g. in native code)' do
+      let(:released) { Concurrent::Array.new }
+      let!(:subscriber) { ActiveSupport::Notifications.subscribe('locks_released.delayed_job') { |*, p| released << p } }
+
+      after { ActiveSupport::Notifications.unsubscribe(subscriber) }
+
+      # Two workers; the first runs a stuck job with one queued behind it.
+      def stuck_setup
+        Delayed::Worker.max_run_time = 10
+        d = prepare(dispatcher(2))
+        worker = d.workers.first
+        running, queued = d.instance_variable_get(:@slots)[worker]
+        stuck = Delayed::Job.enqueue(SimpleJob.new)
+        waiting = Delayed::Job.enqueue(SimpleJob.new)
+        [[running, stuck], [queued, waiting]].each do |slot, job|
+          job.locked_by = slot.name
+          job.locked_at = Delayed::Job.db_time_now
+          d.send(:dispatch, slot, job)
+        end
+        d.instance_variable_get(:@inboxes)[worker].pop # The worker took the stuck job.
+        d.instance_variable_get(:@running_slot)[worker] = running
+        d.instance_variable_get(:@jobs_started)[worker] = [stuck, Process.clock_gettime(Process::CLOCK_MONOTONIC) - 11, 10, 'Job']
+        [d, worker, stuck, waiting]
+      end
+
+      it 'releases the queued jobs for other workers, and refreshes neither lock' do
+        d, worker, stuck, waiting = stuck_setup
+        expect(d.send(:heartbeat_names)).to eq []
+        expect(waiting.locked_by).to be_nil
+        expect(stuck.locked_by).not_to be_nil
+        expect(d.instance_variable_get(:@inboxes)[worker].size).to eq 0
+        expect(d.send(:in_flight)).to eq 1
+        expect(released).to eq [{:workers => [Delayed::Worker.slot_name(worker.name, 1)], :count => 1, :reason => 'stuck job'}]
+        expect(log).to include(['warn', 'Released 1 queued job(s) queued behind a job that overran its max_run_time'])
+      end
+
+      it 'queues no more jobs behind it, until it finishes' do
+        d, worker, = stuck_setup
+        other = d.workers.last
+        d.send(:heartbeat_names)
+        owners = d.send(:snapshot).first.map { |slot| d.instance_variable_get(:@slot_owner)[slot] }
+        expect(owners.uniq).to eq [other]
+        d.send(:untrack_job_after, worker) { nil } # The stuck job ends at last.
+        owners = d.send(:snapshot).first.map { |slot| d.instance_variable_get(:@slot_owner)[slot] }
+        expect(owners.uniq).to contain_exactly(worker, other)
+      end
+
+      it 'releases them once, however many heartbeats follow' do
+        d, = stuck_setup
+        3.times { d.send(:heartbeat_names) }
+        expect(released.size).to eq 1
+      end
     end
   end
 
@@ -257,18 +298,23 @@ describe 'Prefetching jobs (Worker.prefetch)' do
   describe 'a queued job whose lock expires (no lock heartbeats)' do
     before { Delayed::Worker.prefetch = 1 }
 
+    def now
+      Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    end
+
+    def a_slot(dispatcher)
+      dispatcher.instance_variable_get(:@slots)[dispatcher.workers.first][1]
+    end
+
     it 'runs with what is left of max_run_time as its time limit' do
       Delayed::Worker.max_run_time = 60
       d = prepare(dispatcher(1))
-      expect(d.send(:lock_time_left, Process.clock_gettime(Process::CLOCK_MONOTONIC) - 15.5)).to eq 44
+      expect(d.send(:lock_time_left, a_slot(d), now - 15.5)).to eq 44
     end
 
-    it 'has no extra limit after a short wait, or with lock heartbeats' do
+    it 'has no extra limit after a short wait' do
       d = prepare(dispatcher(1))
-      now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-      expect(d.send(:lock_time_left, now - 0.5)).to be_nil
-      allow(Delayed::Worker).to receive(:lock_heartbeats?).and_return(true)
-      expect(d.send(:lock_time_left, now - 3600)).to be_nil
+      expect(d.send(:lock_time_left, a_slot(d), now - 0.5)).to be_nil
     end
 
     it 'passes the time left to the worker running a job that waited' do
@@ -323,7 +369,7 @@ describe 'Prefetching jobs (Worker.prefetch)' do
       wait_until { Delayed::Job.count.zero? } # Reserved again, and run.
       expect(released.size).to eq 1
       expect(released.first).to include(:reason => 'lock expired in queue', :count => 1)
-      expect(log.map(&:last).grep(/waited in its queue until its lock \(max_run_time\) expired/).size).to eq 1
+      expect(log.map(&:last).grep(/waited in its queue until its lock expired/).size).to eq 1
       expect(GateJob.finished).to eq [0, 1]
       stop_and_join(d, thread)
     ensure
@@ -587,6 +633,130 @@ describe 'Prefetching jobs (Worker.prefetch)' do
       expect(reported).to include ['down', 'Releasing interrupted jobs']
       expect(log.map(&:last)).to include 'Could not release the queued jobs: IOError: down'
       expect(d.send(:in_flight)).to eq 0
+    end
+  end
+
+  describe 'a queued job whose lock expires, with lock heartbeats' do
+    let(:heartbeat_thread) { Thread.new { sleep } }
+
+    before do
+      Delayed::Worker.prefetch = 1
+      Delayed::Worker.lock_heartbeat_interval = 10
+      Delayed::Worker.lock_timeout = 60
+      Delayed::Worker.max_run_time = 3600
+      allow(Delayed::Job).to receive(:lock_heartbeats?).and_return(true)
+    end
+
+    after { heartbeat_thread.kill.join }
+
+    def now
+      Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    end
+
+    # A dispatcher whose heartbeat last refreshed locks `ago` seconds ago.
+    def heartbeat_dispatcher(ago:, alive: true)
+      d = prepare(dispatcher(1))
+      d.instance_variable_set(:@heartbeat, alive ? heartbeat_thread : Thread.new {}.tap(&:join))
+      d.instance_variable_set(:@last_beat_at, now - ago)
+      d
+    end
+
+    def held(dispatcher, refreshed_ago: nil)
+      slot = dispatcher.instance_variable_get(:@slots)[dispatcher.workers.first][1]
+      dispatcher.send(:dispatch, slot, Delayed::Job.enqueue(SimpleJob.new), now - 3000)
+      dispatcher.instance_variable_get(:@slot_refreshed)[slot] = now - refreshed_ago if refreshed_ago
+      slot
+    end
+
+    it 'starts a job reserved just now, even with a lock_timeout under a second' do
+      Delayed::Worker.lock_heartbeat_interval = 0.1
+      Delayed::Worker.lock_timeout = 0.5
+      d = heartbeat_dispatcher(:ago => 0.05)
+      slot = held(d)
+      expect(d.send(:lock_time_left, slot, now)).to be_nil
+      d.instance_variable_set(:@heartbeat, Thread.new {}.tap(&:join))
+      expect(d.send(:lock_time_left, slot, now)).to be_between(0.4, 0.5)
+    end
+
+    it 'has no extra limit while the heartbeat keeps its lock alive' do
+      d = heartbeat_dispatcher(:ago => 5)
+      expect(d.send(:lock_time_left, held(d, :refreshed_ago => 5), now - 3000)).to be_nil
+    end
+
+    it 'is released when its lock was not refreshed for lock_timeout' do
+      d = heartbeat_dispatcher(:ago => 5)
+      slot = held(d) # Reserved 3000s ago, never refreshed (e.g. failed beats).
+      expect(d.send(:lock_time_left, slot, now - 3000)).to be <= 0
+    end
+
+    it 'is limited to its lock expiry once the heartbeat gave up' do
+      d = heartbeat_dispatcher(:ago => 30, :alive => false)
+      expect(d.send(:lock_time_left, held(d, :refreshed_ago => 30), now - 3000)).to eq 29
+    end
+
+    it 'is limited to its lock expiry while a refresh hangs for lock_timeout' do
+      d = heartbeat_dispatcher(:ago => 61)
+      slot = held(d, :refreshed_ago => 59.5)
+      expect(d.send(:lock_time_left, slot, now - 3000)).to be_between(0.4, 0.5) # Under a second: not rounded down to none.
+      d.instance_variable_get(:@slot_refreshed)[slot] = now - 61
+      expect(d.send(:lock_time_left, slot, now - 3000)).to be <= 0
+    end
+
+    describe 'the heartbeat' do
+      it 'records when it refreshed the lock of each job it reached' do
+        d = heartbeat_dispatcher(:ago => 30)
+        slot = held(d)
+        allow(Delayed::Job).to receive(:touch_locks).and_return(1)
+        before = now
+        d.send(:heartbeat)
+        expect(d.instance_variable_get(:@slot_refreshed)[slot]).to be_between(before, now)
+        expect(d.instance_variable_get(:@last_beat_at)).to be_between(before, now)
+      end
+
+      it 'does not count a refresh for a job that took the slot meanwhile' do
+        d = heartbeat_dispatcher(:ago => 30)
+        slot = held(d)
+        allow(Delayed::Job).to receive(:touch_locks) do
+          d.send(:synchronize) { d.send(:free_slot, slot) }
+          d.send(:dispatch, slot, Delayed::Job.enqueue(SimpleJob.new))
+          1
+        end
+        d.send(:heartbeat)
+        expect(d.instance_variable_get(:@slot_refreshed)).not_to have_key(slot)
+      end
+
+      it 'records nothing when the refresh fails' do
+        d = heartbeat_dispatcher(:ago => 30)
+        slot = held(d)
+        allow(Delayed::Job).to receive(:touch_locks).and_raise(IOError, 'gone')
+        allow(d).to receive(:thread_error)
+        d.send(:heartbeat)
+        expect(d.instance_variable_get(:@slot_refreshed)).not_to have_key(slot)
+      end
+
+      it 'forgets the refresh once the slot is freed' do
+        d = heartbeat_dispatcher(:ago => 30)
+        slot = held(d, :refreshed_ago => 1)
+        d.send(:synchronize) { d.send(:free_slot, slot) }
+        expect(d.instance_variable_get(:@slot_refreshed)).not_to have_key(slot)
+      end
+    end
+
+    it 'runs a queued job end to end after the heartbeat stopped, timed out at its lock expiry' do
+      Delayed::Job.enqueue(SimpleJob.new)
+      d = dispatcher(1)
+      caps = Concurrent::Array.new
+      allow(d.workers.first).to receive(:perform_job) { |_job, cap| caps << cap }
+      allow(d).to receive(:start_lock_heartbeat).and_return(false) # As if it had died.
+      allow(d).to receive(:heartbeat_alive?).and_return(false)
+      allow(d).to receive(:dispatch).and_wrap_original do |m, slot, reserved, reserved_at|
+        m.call(slot, reserved, reserved_at - 20.5)
+      end
+      thread = run_in_thread(d)
+      wait_until { caps.any? }
+      expect(caps.first).to eq 39 # lock_timeout 60 - 20.5
+      d.stop
+      Timeout.timeout(10) { thread.join }
     end
   end
 end

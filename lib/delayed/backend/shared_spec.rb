@@ -259,6 +259,75 @@ shared_examples_for 'a delayed_job backend' do
     end
   end
 
+  describe 'reserve_batch' do
+    def batch_workers(*names)
+      names.map { |name| Delayed::Worker.named(name) }
+    end
+
+    def reload_job(job)
+      described_class.find(job.id)
+    end
+
+    it 'reserves one job for each worker, in order, each locked under the name it is paired with' do
+      jobs = Array.new(3) { |i| create_job(:priority => i) }
+      workers = batch_workers('w0', 'w1', 'w2')
+      reserved = described_class.reserve_batch(workers)
+      expect(reserved.map(&:first)).to eq workers
+      expect(reserved.map { |_, job| job.id }.uniq.size).to eq 3
+      expect(reserved.map { |_, job| job.id }.sort).to eq jobs.map(&:id).sort
+      reserved.each do |worker, job|
+        expect(job.locked_by).to eq worker.name
+        expect(reload_job(job).locked_by).to eq worker.name
+        expect(reload_job(job).locked_at).not_to be_nil
+      end
+    end
+
+    it 'gives the most urgent jobs to the first workers' do
+      [5, 1, 3].each { |priority| create_job(:priority => priority) }
+      reserved = described_class.reserve_batch(batch_workers('w0', 'w1', 'w2'))
+      expect(reserved.map { |_, job| job.priority }).to eq [1, 3, 5]
+    end
+
+    it 'reserves for the first workers only when there are fewer jobs, leaving the rest out' do
+      2.times { create_job }
+      workers = batch_workers('w0', 'w1', 'w2', 'w3')
+      reserved = described_class.reserve_batch(workers)
+      expect(reserved.map(&:first)).to eq workers.first(2)
+    end
+
+    it 'reserves nothing when no job is available' do
+      create_job(:run_at => described_class.db_time_now + 3600)
+      expect(described_class.reserve_batch(batch_workers('w0', 'w1'))).to eq []
+    end
+
+    it 'never reserves a job locked by another worker' do
+      taken = create_job(:locked_by => 'other', :locked_at => described_class.db_time_now)
+      free = create_job
+      reserved = described_class.reserve_batch(batch_workers('w0', 'w1'))
+      expect(reserved.map { |_, job| job.id }).to eq [free.id]
+      expect(reload_job(taken).locked_by).to eq 'other'
+    end
+
+    it 'returns a job already locked under a worker name again, to that worker (crash recovery)' do
+      mine = create_job(:locked_by => 'w1', :locked_at => described_class.db_time_now)
+      reserved = described_class.reserve_batch(batch_workers('w1'))
+      expect(reserved.map { |worker, job| [worker.name, job.id] }).to eq [['w1', mine.id]]
+    end
+
+    it 'returns no job twice across batches while they stay locked' do
+      4.times { create_job }
+      first = described_class.reserve_batch(batch_workers('w0', 'w1'))
+      second = described_class.reserve_batch(batch_workers('w2', 'w3'))
+      ids = (first + second).map { |_, job| job.id }
+      expect(ids.size).to eq 4
+      expect(ids.uniq.size).to eq 4
+    end
+
+    it 'says whether a partial batch may leave jobs behind' do
+      expect(described_class.partial_batch_may_leave_jobs?).to be(true).or be(false)
+    end
+  end
+
   context '#name' do
     it 'is the class name of the job that was enqueued' do
       expect(described_class.create(:payload_object => ErrorJob.new).name).to eq('ErrorJob')
@@ -279,6 +348,19 @@ shared_examples_for 'a delayed_job backend' do
       job.payload_object.object.destroy
       expect(job.reload.name).to eq('Delayed::PerformableMethod')
     end
+
+    it 'is Unknown for a handler that is not valid YAML, rather than raising' do
+      job = described_class.new(:handler => 'message: "no ending quote')
+      expect(job.name).to eq('Unknown')
+    end
+
+    it 'is recomputed after a reload' do
+      job = described_class.create(:payload_object => NamedJob.new)
+      expect(job.name).to eq('named_job')
+      job.handler = ErrorJob.new.to_yaml
+      job.send(:reset)
+      expect(job.name).to eq('ErrorJob')
+    end
   end
 
   context 'worker prioritization' do
@@ -290,9 +372,9 @@ shared_examples_for 'a delayed_job backend' do
 
     it 'fetches jobs ordered by priority' do
       10.times { described_class.enqueue SimpleJob.new, :priority => rand(10) }
-      jobs = []
-      10.times { jobs << described_class.reserve(worker) }
-      expect(jobs.size).to eq(10)
+      # A fresh worker name each time: a worker gets its own locked job back.
+      jobs = Array.new(10) { |i| described_class.reserve(Delayed::Worker.named("w#{i}")) }
+      expect(jobs.compact.map(&:id).uniq.size).to eq(10)
       jobs.each_cons(2) do |a, b|
         expect(a.priority).to be <= b.priority
       end
@@ -358,7 +440,8 @@ shared_examples_for 'a delayed_job backend' do
 
     it 'does not clear locks for other workers' do
       described_class.clear_locks!('different_worker')
-      expect(described_class.reserve(worker)).not_to eq(@job)
+      expect(described_class.reserve(worker)).to be_nil
+      expect(described_class.find(@job.id).locked_by).to eq('worker1')
     end
   end
 

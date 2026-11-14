@@ -73,7 +73,7 @@ reporting when every worker is down:
 ```ruby
 now = Delayed::Job.db_time_now
 waiting = Delayed::Job.where(failed_at: nil, locked_at: nil).where('run_at <= ?', now)
-expiry = Delayed::Worker.lock_heartbeat_interval ? Delayed::Worker.lock_timeout : Delayed::Worker.max_run_time
+expiry = Delayed::Worker.lock_expiry # lock_timeout with working heartbeats, else max_run_time
 
 METRICS.gauge('dj.backlog', waiting.count)
 METRICS.gauge('dj.oldest_waiting_seconds', (now - (waiting.minimum(:run_at) || now)).to_i)

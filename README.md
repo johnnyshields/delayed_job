@@ -257,7 +257,14 @@ RAILS_ENV=production script/delayed_job -n4 restart
 
 You must pass the same arguments to `restart` that you used when calling `start`.
 
-You may also send `SIGTERM` to stop Delayed Job.
+You may also send `SIGTERM` to stop Delayed Job. In forking mode the parent
+also treats `SIGHUP` (e.g. its terminal closing) as `SIGTERM`, and its worker
+processes ignore `SIGHUP`, so the parent's pidfile stays until they have all
+exited. A signal that arrives while the parent is still booting stops it before
+it forks any worker process. Settings that every worker process would refuse
+(e.g. `prefetch` above 20, or a `lock_timeout` set in an initializer that is
+less than twice `--lock-heartbeat`) make the parent exit with an `ArgumentError`
+before it forks.
 
 ### Worker Queues and Pools
 
@@ -361,7 +368,14 @@ locked under a slot name of its own, e.g. `... pid:123 thread:2 slot:1`. Also:
   it as its time limit, so it stops before another worker could take it over;
   one whose lock expired while queued is released unstarted instead (a
   `locks_released` event, `reason: 'lock expired in queue'`). With heartbeats,
-  queued jobs' locks are refreshed and run with their full `max_run_time`.
+  queued jobs' locks are refreshed and run with their full `max_run_time` -
+  unless the heartbeat has stopped refreshing locks (it gave up after repeated
+  failures, or a refresh has hung for `lock_timeout`): jobs started then are
+  limited to what is left of their lock (`lock_timeout` from its last refresh),
+  as without heartbeats.
+* With heartbeats, a job that runs past its `max_run_time` without stopping
+  (e.g. blocked in native code) also has the jobs queued behind it released
+  (`reason: 'stuck job'`), and no more are queued on its thread until it ends.
 * If a worker process dies, its queued jobs are recovered like its running ones,
   each counting a failed attempt.
 
@@ -778,7 +792,7 @@ Workers publish `ActiveSupport::Notifications` events named `<event>.delayed_job
 | `lock_lost` | `:job`, `:worker`, `:outcome` - the job's lock was taken over, so this run's outcome was discarded |
 | `thread_error` | `:error`, `:context`, and `:dispatcher`, `:worker`, `:job` where known - an error outside job handling (see `on_thread_error` above) |
 | `interrupt` | `:dispatcher`, `:jobs`, `:reason` - running jobs interrupted by the shutdown timeout or `SIGQUIT` |
-| `locks_released` | `:workers`, `:count`, `:reason` (`shutdown`, `process exit` or `lock expired in queue`) |
+| `locks_released` | `:workers`, `:count`, `:reason` (`shutdown`, `process exit`, `lock expired in queue` or `stuck job`) |
 | `child_exited` | `:worker`, `:pid`, `:status`, `:uptime` (seconds), `:respawn_in` (seconds until it is replaced; 0 at once, more after quick deaths - see "Worker processes that die"; nil if the launcher is stopping) - a forked child process exited |
 | `child_spawned` | `:worker`, `:pid`, `:replaces_pid` (the pid of the child process it replaces, or nil), `:delay` (seconds waited before forking it) - the forking parent forked a child process |
 | `job_stuck` | `:job`, `:job_name`, `:worker`, `:max_run_time`, `:lock_timeout` - published on the lock heartbeat thread, so read only plain fields of `:job`; a job ran past its `max_run_time` without stopping (e.g. blocked in native code); with lock heartbeats, its lock is no longer refreshed and another worker may run it after `lock_timeout` |

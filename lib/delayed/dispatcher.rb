@@ -108,6 +108,7 @@ module Delayed
       @slots = {} # worker => the names (Workers) it locks its jobs under
       @slot_owner = {} # slot => worker
       @slot_jobs = {} # slot => job it holds (queued or running)
+      @slot_refreshed = {} # slot => when the heartbeat last refreshed its job's lock (monotonic)
       @running_slot = {} # worker => slot of the job it is running
       @dead = [] # workers whose thread crashed: no more jobs for them
       @prefetch = 0
@@ -448,6 +449,7 @@ module Delayed
         return false
       end
       @heartbeat_stopped = false
+      @last_beat_at = monotonic_now
       @heartbeat_mutex = Mutex.new
       @heartbeat_cond = ConditionVariable.new
       @heartbeat = Thread.new { lock_heartbeat_loop(Worker.lock_heartbeat_interval) }
@@ -515,11 +517,24 @@ module Delayed
       end
       overrun.each { |worker, (job, _, limit, label)| report_overrun(worker, job, limit, label) }
       return (workers - overrun.keys).map(&:name) if @prefetch.zero?
+      # The jobs queued behind a stuck one would wait as long as it runs,
+      # their locks refreshed all along: release them for other workers (no
+      # more are queued behind it, see #free_slots).
+      release_queued(overrun.keys.map { |worker| @inboxes[worker] }.compact, :stuck)
       # With prefetch, jobs are only locked under slot names: those holding
       # a job (running or queued), but an overrun one.
       synchronize do
         stuck = overrun.keys.map { |worker| @running_slot[worker] }
         (@slot_jobs.keys - stuck).map(&:name)
+      end
+    end
+
+    # Records that the locks of the `held` jobs were refreshed at `beat_at`,
+    # for those still in the same slot (see #lock_time_left).
+    def beaten(held, beat_at)
+      synchronize do
+        @last_beat_at = beat_at
+        held.each { |slot, job| @slot_refreshed[slot] = beat_at if @slot_jobs[slot].equal?(job) }
       end
     end
 
@@ -562,8 +577,14 @@ module Delayed
     # the next heartbeat tries again; the locks only expire if heartbeats
     # keep failing for lock_timeout seconds.
     def heartbeat
+      beat_at = monotonic_now # No later than the locks are refreshed.
       names = heartbeat_names
-      polling { Delayed::Job.touch_locks(names) } unless names.empty?
+      return if names.empty?
+      # The jobs held under those names now: their locks were taken, so the
+      # refresh below reaches them.
+      held = synchronize { @slot_jobs.select { |slot, _job| names.include?(slot.name) } }
+      polling { Delayed::Job.touch_locks(names) }
+      beaten(held, beat_at)
     rescue StandardError => error
       say "Error while refreshing job locks: #{error.class}: #{error.message}", 'error'
       thread_error(error, 'Lock heartbeat')
@@ -634,8 +655,8 @@ module Delayed
         slot, job, reserved_at = item
         discard_stale_interrupts
         next release_unstarted(worker, slot, job) if past_shutdown_deadline? || (@prefetch > 0 && stop?)
-        lock_left = lock_time_left(reserved_at)
-        next release_unstarted(worker, slot, job, :lock_expired) if lock_left && lock_left < 1
+        lock_left = lock_time_left(slot, reserved_at)
+        next release_unstarted(worker, slot, job, :lock_expired) if lock_left && lock_left <= 0
         synchronize do
           @running[Thread.current] = job
           @running_slot[worker] = slot
@@ -649,16 +670,33 @@ module Delayed
       release_interrupted(worker, job, error, slot)
     end
 
-    # Whole seconds left before the lock of a job reserved at `reserved_at`
-    # expires, if it waited in a queue for a second or more and its lock is
-    # not refreshed (no lock heartbeats): the lock was taken as it was
-    # reserved, so the job must stop by then, or another worker could take
-    # it over while it still runs (see Worker#run). Else nil.
-    def lock_time_left(reserved_at)
-      return nil if Worker.lock_heartbeats?
-      waited = monotonic_now - reserved_at
-      return nil if waited < 1
-      (Worker.max_run_time - waited).floor
+    # Seconds left (whole, unless under one) before the lock of the job in `slot`, reserved at
+    # `reserved_at`, expires - the job must stop by then, or another worker
+    # could take it over while it still runs (see Worker#run) - or nil for
+    # no limit. The lock was taken as the job was reserved, or last
+    # refreshed by the lock heartbeat (see #beaten); it lasts
+    # Worker.lock_expiry. No limit:
+    # - while the lock heartbeat keeps refreshing locks (see
+    #   #heartbeat_alive?), unless the lock already expired;
+    # - without heartbeats, for a job that waited less than a second: its
+    #   lock lasts as long as it may run.
+    def lock_time_left(slot, reserved_at)
+      refreshed = synchronize { @slot_refreshed[slot] } || reserved_at
+      waited = monotonic_now - refreshed
+      left = Worker.lock_expiry - waited
+      return left if left <= 0 # Expired.
+      return nil if heartbeat_alive?
+      return nil if waited < 1 && !Worker.lock_heartbeats?
+      left >= 1 ? left.floor : left
+    end
+
+    # Whether the lock heartbeat is running and refreshed locks within the
+    # last lock_timeout seconds, so it may be relied on to keep a job's lock
+    # alive while it runs: not after it gave up (see #lock_heartbeat_loop),
+    # nor while a refresh has hung for that long.
+    def heartbeat_alive?
+      return false unless Worker.lock_heartbeats? && @heartbeat && @heartbeat.alive?
+      synchronize { @last_beat_at && monotonic_now - @last_beat_at < Worker.lock_timeout }
     end
 
     # As the worker's thread exits (also on a crash), with prefetch: clears
@@ -783,13 +821,21 @@ module Delayed
     # Releases the jobs still queued for workers (with prefetch), unstarted:
     # unlocked, their attempts unchanged, for another worker to run. A job a
     # worker already took is released by the worker itself (see #work).
-    def release_queued
-      queued = @inboxes.flat_map { |_worker, inbox| inbox.drain }
+    QUEUED_RELEASE_REASONS = {
+      :shutdown => ['on shutdown', 'shutdown'],
+      :stuck => ['queued behind a job that overran its max_run_time', 'stuck job']
+    }.freeze
+
+    # Releases the jobs queued in the given inboxes (all of them by
+    # default): unlocked, their attempts unchanged, for other workers.
+    def release_queued(inboxes = @inboxes.values, reason = :shutdown)
+      queued = inboxes.flat_map(&:drain)
       return if queued.empty?
+      message, event_reason = QUEUED_RELEASE_REASONS.fetch(reason)
       names = queued.map { |slot, _job| slot.name }
       with_executor { names.each { |slot_name| Delayed::Job.clear_locks!(slot_name) } }
-      say "Released #{queued.size} queued job(s) on shutdown"
-      Delayed.instrument(:locks_released, :workers => names, :count => queued.size, :reason => 'shutdown')
+      say "Released #{queued.size} queued job(s) #{message}", reason == :shutdown ? 'info' : 'warn'
+      Delayed.instrument(:locks_released, :workers => names, :count => queued.size, :reason => event_reason)
     rescue StandardError => error
       say "Could not release the queued jobs: #{error.class}: #{error.message}", 'error'
       thread_error(error, 'Releasing interrupted jobs')
@@ -878,13 +924,14 @@ module Delayed
 
     UNSTARTED_REASONS = {
       :shutdown => ['not started before shutdown', 'shutdown'],
-      :lock_expired => ['waited in its queue until its lock (max_run_time) expired', 'lock expired in queue']
+      :lock_expired => ['waited in its queue until its lock expired', 'lock expired in queue']
     }.freeze
 
     # Releases a job handed to the worker that it never started: unlocked,
     # its attempts unchanged, for another worker to run. Because the process
     # is stopping, or (:lock_expired) because it waited queued for as long
-    # as its lock lasts, so it may already have been taken over.
+    # as its lock lasts (see #lock_time_left), so it may already have been
+    # taken over.
     def release_unstarted(worker, slot, job, reason = :shutdown)
       message, event_reason = UNSTARTED_REASONS.fetch(reason)
       worker.job_say(job, "#{message}; released for another worker", 'warn')
@@ -918,6 +965,7 @@ module Delayed
 
     # Under the mutex: the slot's job finished or was released.
     def free_slot(slot)
+      @slot_refreshed.delete(slot)
       @in_flight -= 1 if @slot_jobs.delete(slot)
     end
 
@@ -955,7 +1003,8 @@ module Delayed
     end
 
     def free_slots
-      plan = (workers - @dead).map do |worker|
+      # Not behind a job that overran its max_run_time (see #heartbeat_names).
+      plan = (workers - @dead - @overrun_reported.keys).map do |worker|
         slots = @slots[worker] || [worker]
         held = slots.count { |slot| @slot_jobs.key?(slot) }
         [slots.reject { |slot| @slot_jobs.key?(slot) }, held]
