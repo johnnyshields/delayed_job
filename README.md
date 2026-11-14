@@ -419,7 +419,9 @@ RAILS_ENV=production script/delayed_job --fork -n4 start
 RAILS_ENV=production script/delayed_job --fork --pool=mailers,tasks:2 --pool=*:2 start
 ```
 
-Forking mode does not yet support the `restart`, `stop`, etc. script commands.
+Forking mode does not support the `restart`, `stop`, etc. script commands: they
+raise an `ArgumentError` (rather than starting another launcher). Stop it with a
+signal instead (see Stopping and Restarting).
 Use `SIGTERM` or `SIGINT` to allow workers to finish their current job then gracefully shutdown.
 The parent forwards these signals to its worker processes, so sending them to the
 parent alone (as `docker stop`, Kubernetes and systemd do) stops every worker.
@@ -564,7 +566,11 @@ up resets it.
 If the database can't be reached at that moment, the jobs' locks expire after
 `max_run_time` as before. Backends support this by implementing
 `Delayed::Job.locked_jobs(worker_name)`; for backends without it, the locks are
-only cleared.
+only cleared. A process holds jobs under one lock name per thread (and per
+prefetch slot), so backends should also override
+`Delayed::Job.locked_jobs_of(names)` and `clear_locks_of!(names)` to list and
+clear them all in one query each; the defaults call `locked_jobs` and
+`clear_locks!` once per name.
 
 ### Running via Rake
 
@@ -863,7 +869,7 @@ Delayed::Worker.delay_jobs = ->(job) {
 }
 ```
 
-You may need to raise exceptions on SIGTERM signals, `Delayed::Worker.raise_signal_exceptions = :term` will cause the worker to raise a `SignalException` causing the running job to abort and be unlocked, which makes the job available to other workers. The default for this option is false.
+You may need to raise exceptions on SIGTERM signals, `Delayed::Worker.raise_signal_exceptions = :term` will cause the worker to raise a `SignalException` causing the running job to abort and be unlocked, which makes the job available to other workers. The default for this option is false. As with a shutdown timeout, the interrupted job is released with its attempts unchanged (unless `count_shutdown_interrupts` is set), and only the job's `perform` is interrupted: its hooks (`success`, `after`, ...) always run to the end, so a job that finished is never run again.
 
 Here is an example of changing job parameters in Rails:
 

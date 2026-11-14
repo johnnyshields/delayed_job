@@ -63,13 +63,21 @@ module Delayed
           synchronize { all.select { |j| j.locked_by == worker_name } }
         end
 
+        def self.locked_jobs_of(worker_names)
+          synchronize { locked_by_any(worker_names) }
+        end
+
+        def self.clear_locks_of!(worker_names)
+          synchronize { locked_by_any(worker_names).each(&:unlock) }
+        end
+
+        def self.locked_by_any(worker_names)
+          all.select { |j| worker_names.include?(j.locked_by) }
+        end
+        private_class_method :locked_by_any
+
         def self.clear_locks!(worker_name)
-          synchronize do
-            all.select { |j| j.locked_by == worker_name }.each do |j|
-              j.locked_by = nil
-              j.locked_at = nil
-            end
-          end
+          clear_locks_of!([worker_name])
         end
 
         # Find a few candidate jobs to run (in case some immediately get locked by others).

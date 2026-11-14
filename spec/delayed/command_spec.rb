@@ -93,7 +93,7 @@ describe Delayed::Command do
 
     context 'not a number' do
       let(:options) { %w[--min-priority sponge] }
-      it { expect(output_options[:min_priority]).to eq nil }
+      it { expect { output_options }.to raise_error(ArgumentError, '--min-priority must be a whole number') }
     end
   end
 
@@ -110,7 +110,7 @@ describe Delayed::Command do
 
     context 'not a number' do
       let(:options) { %w[--max-priority giraffe] }
-      it { expect(output_options[:max_priority]).to eq nil }
+      it { expect { output_options }.to raise_error(ArgumentError, '--max-priority must be a whole number') }
     end
   end
 
@@ -127,7 +127,7 @@ describe Delayed::Command do
 
     context '-n not a number' do
       let(:options) { %w[-n elephant] }
-      it { expect(output_options[:processes]).to eq 1 }
+      it { expect { output_options }.to raise_error(ArgumentError, '--processes must be 1 or greater') }
     end
 
     context '--processes set' do
@@ -142,7 +142,7 @@ describe Delayed::Command do
 
     context '--processes not a number' do
       let(:options) { %w[--processes zebu] }
-      it { expect(output_options[:processes]).to eq 1 }
+      it { expect { output_options }.to raise_error(ArgumentError, '--processes must be 1 or greater') }
     end
 
     context '--num-workers (deprecated) set' do
@@ -156,8 +156,8 @@ describe Delayed::Command do
     context '--num-workers not a number' do
       let(:options) { %w[--num-workers hippo] }
       it do
-        expect(STDERR).to receive(:puts)
-        expect(output_options[:processes]).to eq 1
+        allow(STDERR).to receive(:puts)
+        expect { output_options }.to raise_error(ArgumentError, '--num-workers must be 1 or greater')
       end
     end
 
@@ -180,8 +180,8 @@ describe Delayed::Command do
     context '--number_of_workers not a number' do
       let(:options) { %w[--number_of_workers rhino] }
       it do
-        expect(STDERR).to receive(:puts)
-        expect(output_options[:processes]).to eq 1
+        allow(STDERR).to receive(:puts)
+        expect { output_options }.to raise_error(ArgumentError, '--number_of_workers must be 1 or greater')
       end
     end
   end
@@ -504,7 +504,7 @@ describe Delayed::Command do
 
     context 'not a number' do
       let(:options) { %w[--read-ahead giraffe] }
-      it { expect(output_options[:read_ahead]).to eq nil }
+      it { expect { output_options }.to raise_error(ArgumentError, '--read-ahead must be 1 or greater') }
     end
   end
 
@@ -725,40 +725,67 @@ describe Delayed::Command do
       expect { Delayed::Command.new(%w[-d -n2 --identifier=foobar]).launch }.to raise_error(ArgumentError)
     end
 
-    it 'warn if processes is 0' do
-      expect_any_instance_of(Delayed::Launcher::Daemonized).to receive(:launch)
-      expect(STDERR).to receive(:puts).with(/--processes must be 1 or greater/)
-      Delayed::Command.new(%w[-d --processes=0]).launch
+    it 'raises if processes is 0' do
+      expect { Delayed::Command.new(%w[-d --processes=0]) }.to raise_error(ArgumentError, '--processes must be 1 or greater')
     end
 
-    it 'not warn if min-priority is less than max-priority' do
-      expect_any_instance_of(Delayed::Launcher::Daemonized).to receive(:launch)
+    it 'accepts min-priority less than or equal to max-priority' do
       expect(STDERR).to_not receive(:puts)
-      Delayed::Command.new(%w[-d --min-priority=-5 --max-priority=0]).launch
+      expect { Delayed::Command.new(%w[-d --min-priority=-5 --max-priority=0]) }.not_to raise_error
+      expect { Delayed::Command.new(%w[-d --min-priority=-5 --max-priority=-5]) }.not_to raise_error
     end
 
-    it 'not warn if min-priority equals max-priority' do
-      expect_any_instance_of(Delayed::Launcher::Daemonized).to receive(:launch)
-      expect(STDERR).to_not receive(:puts)
-      Delayed::Command.new(%w[-d --min-priority=-5 --max-priority=-5]).launch
+    it 'raises if min-priority is greater than max-priority' do
+      expect { Delayed::Command.new(%w[-d --min-priority=-4 --max-priority=-5]) }.
+        to raise_error(ArgumentError, '--min-priority must be less than or equal to --max-priority')
     end
 
-    it 'warn if min-priority is greater than max-priority' do
-      expect_any_instance_of(Delayed::Launcher::Daemonized).to receive(:launch)
-      expect(STDERR).to receive(:puts)
-      Delayed::Command.new(%w[-d --min-priority=-4 --max-priority=-5]).launch
+    it 'raises if both queues and pools are present' do
+      expect { Delayed::Command.new(%w[-d --queues=mailers --pool=mailers:2]) }.
+        to raise_error(ArgumentError, 'Cannot specify both --queues and --pool')
     end
 
-    it 'warn if both queues and pools are present' do
-      expect_any_instance_of(Delayed::Launcher::Daemonized).to receive(:launch)
-      expect(STDERR).to receive(:puts)
-      Delayed::Command.new(%w[-d --queues=mailers --pool=mailers:2]).launch
+    it 'raises if both processes and pools are present' do
+      expect { Delayed::Command.new(%w[-d --processes=2 --pool=mailers:2]) }.
+        to raise_error(ArgumentError, 'Cannot specify both --processes and --pool')
     end
 
-    it 'warn if both processes and pools are present' do
+    it 'raises if both identifier and pools are present (the identifier would be ignored)' do
+      expect { Delayed::Command.new(%w[-d --identifier=7 --pool=mailers:2]) }.
+        to raise_error(ArgumentError, 'Cannot specify both --identifier and --pool')
+    end
+
+    it 'raises for a pool without a valid process count' do
+      expect { Delayed::Command.new(%w[--pool=*:abc]) }.to raise_error(ArgumentError, /process count must be a whole number/)
+    end
+
+    %w[--read-ahead=0 --threads=-1 --sleep-delay=-1 --lock-timeout=0].each do |option|
+      it "raises for #{option}" do
+        expect { Delayed::Command.new([option]) }.to raise_error(ArgumentError, /\A#{option.split('=').first} must be/)
+      end
+    end
+  end
+
+  describe '--fork with a daemon command' do
+    %w[stop restart reload zap status].each do |command|
+      it "refuses #{command}, rather than starting another launcher" do
+        expect_any_instance_of(Delayed::Launcher::Forking).not_to receive(:launch)
+        expect { Delayed::Command.new(['--fork', command]).daemonize }.
+          to raise_error(ArgumentError, "--fork runs in the foreground and does not support #{command}: stop it with a signal (TERM, INT or QUIT)")
+      end
+    end
+
+    it 'still starts with start or run' do
+      launched = 0
+      allow_any_instance_of(Delayed::Launcher::Forking).to receive(:launch) { launched += 1 }
+      Delayed::Command.new(%w[--fork start]).daemonize
+      Delayed::Command.new(%w[--fork run]).daemonize
+      expect(launched).to eq 2
+    end
+
+    it 'leaves daemon commands to the daemon launcher' do
       expect_any_instance_of(Delayed::Launcher::Daemonized).to receive(:launch)
-      expect(STDERR).to receive(:puts)
-      Delayed::Command.new(%w[-d --processes=2 --pool=mailers:2]).launch
+      Delayed::Command.new(%w[stop]).daemonize
     end
   end
 end

@@ -428,6 +428,26 @@ shared_examples_for 'a delayed_job backend' do
     end
   end
 
+  describe 'locked_jobs_of and clear_locks_of!' do
+    it 'returns the jobs locked by any of the named workers, or nil when unsupported' do
+      one = create_job(:locked_by => 'w1 slot:0', :locked_at => described_class.db_time_now)
+      two = create_job(:locked_by => 'w1 slot:1', :locked_at => described_class.db_time_now)
+      create_job(:locked_by => 'w2 slot:0', :locked_at => described_class.db_time_now)
+      create_job
+      jobs = described_class.locked_jobs_of(['w1 slot:0', 'w1 slot:1', 'w1 slot:2'])
+      skip 'this backend does not implement locked_jobs' if jobs.nil?
+      expect(jobs.map(&:id)).to match_array [one.id, two.id]
+    end
+
+    it 'clears the locks of all the named workers, and only theirs' do
+      mine = Array.new(2) { |i| create_job(:locked_by => "w1 slot:#{i}", :locked_at => described_class.db_time_now) }
+      other = create_job(:locked_by => 'w2 slot:0', :locked_at => described_class.db_time_now)
+      described_class.clear_locks_of!(['w1 slot:0', 'w1 slot:1'])
+      expect(mine.map { |job| described_class.find(job.id).locked_by }).to eq [nil, nil]
+      expect(described_class.find(other.id).locked_by).to eq 'w2 slot:0'
+    end
+  end
+
   context 'clear_locks!' do
     before do
       @job = create_job(:locked_by => 'worker1', :locked_at => described_class.db_time_now)

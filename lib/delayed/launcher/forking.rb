@@ -456,7 +456,7 @@ module Delayed
       # any left (a job that ignored its shutdown interrupt) are stale now
       # that it is gone: release them, attempts unchanged, for another worker.
       def release_locks_of_exited(lock_names)
-        lock_names.each { |name| Delayed::Job.clear_locks!(name) }
+        Delayed::Job.clear_locks_of!(lock_names)
       end
 
       # Drops the connections opened by recovery, so the next forked worker

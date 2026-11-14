@@ -72,6 +72,21 @@ module Delayed
           nil
         end
 
+        # The jobs locked by any of the named workers, or nil if the backend
+        # can't list them (see #locked_jobs). Used to recover every thread
+        # and slot of a dead worker process at once; backends may override
+        # it with a single query.
+        def locked_jobs_of(worker_names)
+          jobs = worker_names.map { |name| locked_jobs(name) }
+          jobs.any?(&:nil?) ? nil : jobs.flatten(1)
+        end
+
+        # Clears the locks of all the named workers (see #clear_locks!).
+        # Backends may override it with a single query.
+        def clear_locks_of!(worker_names)
+          worker_names.each { |name| clear_locks!(name) }
+        end
+
         # Whether the backend supports lock heartbeats (see
         # Delayed::Worker.lock_heartbeat_interval): it implements
         # touch_locks, and honours the max_run_time passed to reserve as the
@@ -149,7 +164,9 @@ module Delayed
       def invoke_job
         Delayed::Worker.lifecycle.run_callbacks(:invoke_job, self) do
           hook :before
-          payload_object.perform
+          # Only the job's own code may be interrupted by a stopping
+          # dispatcher, not its hooks (see Delayed::Dispatcher#work).
+          Delayed::Dispatcher.interruptible { payload_object.perform }
           hook :success
         rescue Exception => error # rubocop:disable Lint/RescueException
           hook :error, error

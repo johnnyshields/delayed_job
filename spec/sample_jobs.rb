@@ -303,3 +303,25 @@ class StuckJob
     end
   end
 end
+
+# Its success hook waits until released: a shutdown interrupt arriving
+# then must not rerun the job.
+class SlowHookJob
+  cattr_accessor :performed, :in_hook, :release
+
+  def self.reset
+    self.performed = Concurrent::Array.new
+    self.in_hook = Queue.new
+    self.release = false
+  end
+  reset
+
+  def perform
+    self.class.performed << :done
+  end
+
+  def success(_job)
+    self.class.in_hook << true
+    sleep 0.01 until self.class.release
+  end
+end

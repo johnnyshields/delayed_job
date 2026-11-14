@@ -15,29 +15,32 @@ namespace :jobs do
   end
 
   task :environment_options => :environment do
-    # NUM_WORKERS is an alias of NUM_PROCESSES.
-    num_processes = ENV['NUM_PROCESSES'] || ENV['NUM_WORKERS']
+    names = Delayed::LaunchOptions::ENV_NAMES
+    # The value of a numeric variable, if set (see Delayed::LaunchOptions).
+    number = lambda do |option, variable = names.fetch(option)|
+      Delayed::LaunchOptions.parse(option, ENV[variable], variable) if ENV[variable]
+    end
+    # Whether a boolean variable is set to anything but blank, 0, f(alse), n(o) or off.
+    flag = ->(variable) { !!ENV[variable] && ENV[variable] !~ /\A(?:|0|f|false|n|no|off)\z/i }
 
     @options = {
-      :processes => num_processes ? Integer(num_processes) : 1,
-      :quiet => !!ENV['QUIET'] && ENV['QUIET'] !~ /\A(?:0|f|false)\z/i
+      # NUM_WORKERS is an alias of NUM_PROCESSES.
+      :processes => number.call(:processes) || number.call(:processes, 'NUM_WORKERS') || 1,
+      :quiet => flag.call('QUIET')
     }
-    @options[:min_priority] = Integer(ENV['MIN_PRIORITY']) if ENV['MIN_PRIORITY']
-    @options[:max_priority] = Integer(ENV['MAX_PRIORITY']) if ENV['MAX_PRIORITY']
-    # Numbers of seconds: whole or fractional (see Delayed.parse_seconds).
-    @options[:sleep_delay] = Delayed.parse_seconds(ENV['SLEEP_DELAY']) if ENV['SLEEP_DELAY']
-    @options[:read_ahead] = Integer(ENV['READ_AHEAD']) if ENV['READ_AHEAD']
-    @options[:threads] = Integer(ENV['NUM_THREADS']) if ENV['NUM_THREADS']
-    @options[:prefetch] = Integer(ENV['PREFETCH']) if ENV['PREFETCH']
-    @options[:prefetch_dynamic] = true if ENV['PREFETCH_DYNAMIC'] && ENV['PREFETCH_DYNAMIC'] !~ /\A(?:|0|f|false)\z/i
-    @options[:shutdown_timeout] = Delayed.parse_seconds(ENV['SHUTDOWN_TIMEOUT']) if ENV['SHUTDOWN_TIMEOUT']
-    @options[:lock_heartbeat_interval] = Delayed.parse_seconds(ENV['LOCK_HEARTBEAT']) if ENV['LOCK_HEARTBEAT']
-    @options[:lock_timeout] = Delayed.parse_seconds(ENV['LOCK_TIMEOUT']) if ENV['LOCK_TIMEOUT']
-    @options[:silence_polling] = true if ENV['SILENCE_POLLING'] && ENV['SILENCE_POLLING'] !~ /\A(?:|0|f|false)\z/i
-    @options[:count_shutdown_interrupts] = true if ENV['COUNT_SHUTDOWN_INTERRUPTS'] && ENV['COUNT_SHUTDOWN_INTERRUPTS'] !~ /\A(?:|0|f|false)\z/i
-    # PIDFILE=path, or PIDFILE=1 for tmp/pids/delayed_job.pid.
-    if ENV['PIDFILE'] && ENV['PIDFILE'] !~ /\A(?:|0|f|false)\z/i
-      @options[:pid_file] = ENV['PIDFILE'] =~ /\A(?:1|t|true)\z/i ? true : ENV['PIDFILE']
+    {
+      :min_priority => number.call(:min_priority), :max_priority => number.call(:max_priority),
+      :sleep_delay => number.call(:sleep_delay), :read_ahead => number.call(:read_ahead),
+      :threads => number.call(:threads), :prefetch => number.call(:prefetch),
+      :shutdown_timeout => number.call(:shutdown_timeout),
+      :lock_heartbeat_interval => number.call(:lock_heartbeat_interval), :lock_timeout => number.call(:lock_timeout)
+    }.each { |option, value| @options[option] = value unless value.nil? }
+    @options[:prefetch_dynamic] = true if flag.call('PREFETCH_DYNAMIC')
+    @options[:silence_polling] = true if flag.call('SILENCE_POLLING')
+    @options[:count_shutdown_interrupts] = true if flag.call('COUNT_SHUTDOWN_INTERRUPTS')
+    # PIDFILE=path, or PIDFILE=1 (true, yes, on) for tmp/pids/delayed_job.pid.
+    if flag.call('PIDFILE')
+      @options[:pid_file] = ENV['PIDFILE'] =~ /\A(?:1|t|true|y|yes|on)\z/i ? true : ENV['PIDFILE']
     end
 
     queues = (ENV['QUEUES'] || ENV['QUEUE'] || '').split(',')
@@ -46,27 +49,8 @@ namespace :jobs do
     pools = Delayed::PoolParser.new.add(ENV['POOLS'] || ENV['POOL'] || '').pools
     @options[:pools] = pools unless pools.empty?
 
-    raise ArgumentError, 'NUM_PROCESSES must be 1 or greater' if @options[:processes] < 1
-
-    raise ArgumentError, 'SLEEP_DELAY must be 0 or greater' if @options[:sleep_delay] && @options[:sleep_delay] < 0
-
-    raise ArgumentError, 'NUM_THREADS must be 1 or greater' if @options[:threads] && @options[:threads] < 1
-
-    raise ArgumentError, "PREFETCH must be a whole number from 0 to #{Delayed::Worker::MAX_PREFETCH}" if @options[:prefetch] && !@options[:prefetch].between?(0, Delayed::Worker::MAX_PREFETCH)
-
-    raise ArgumentError, 'SHUTDOWN_TIMEOUT must be 0 or greater' if @options[:shutdown_timeout] && @options[:shutdown_timeout] < 0
-
-    if @options[:lock_heartbeat_interval]
-      timeout = @options.fetch(:lock_timeout, Delayed::Worker::DEFAULT_LOCK_TIMEOUT)
-      raise ArgumentError, 'LOCK_HEARTBEAT must be greater than 0' unless @options[:lock_heartbeat_interval] > 0
-      raise ArgumentError, 'LOCK_TIMEOUT must be at least twice LOCK_HEARTBEAT' if timeout < 2 * @options[:lock_heartbeat_interval]
-    end
-
-    raise ArgumentError, 'MIN_PRIORITY must be less than or equal to MAX_PRIORITY' if @options[:min_priority] && @options[:max_priority] && @options[:min_priority] > @options[:max_priority]
-
-    raise ArgumentError, 'Cannot specify both NUM_PROCESSES and POOLS' if num_processes && @options[:pools]
-
-    raise ArgumentError, 'Cannot specify both QUEUES and POOLS' if @options[:queues] && @options[:pools]
+    # The same rules as script/delayed_job (see Delayed::LaunchOptions).
+    Delayed::LaunchOptions.validate!(@options, names)
   end
 
   desc "Exit with error status if any jobs older than max_age seconds haven't been attempted yet."

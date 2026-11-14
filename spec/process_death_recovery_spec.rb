@@ -179,8 +179,75 @@ describe 'Recovering the jobs of a dead worker process' do
       Delayed::Worker.destroy_failed_jobs = true
     end
 
+    it 'lists and clears the locks of all the names at once (a process may have hundreds)' do
+      names = Delayed::Worker.lock_names('dj.1 ', 77, 16, 20)
+      expect(names.size).to eq 336
+      job = locked_job(names.last)
+      expect(Delayed::Job).to receive(:locked_jobs_of).with(names).once.and_call_original
+      expect(Delayed::Job).to receive(:clear_locks_of!).with(names).once.and_call_original
+      expect(Delayed::Job).not_to receive(:locked_jobs)
+      expect(Delayed::Worker.recover_jobs_of(names, error)).to eq 1
+      expect([job.attempts, job.locked_by]).to eq [1, nil]
+    end
+
+    it 'publishes one locks_released event naming the workers whose jobs it recovered' do
+      events = []
+      subscription = ActiveSupport::Notifications.subscribe('locks_released.delayed_job') { |*, payload| events << payload }
+      locked_job('dj.1 pid:77 thread:0')
+      2.times { locked_job('dj.1 pid:77 thread:1') }
+      names = ['dj.1 pid:77 thread:0', 'dj.1 pid:77 thread:1', 'dj.1 pid:77 thread:2']
+      Delayed::Worker.recover_jobs_of(names, error)
+      expect(events.size).to eq 1
+      expect(events.first).to include(:workers => ['dj.1 pid:77 thread:0', 'dj.1 pid:77 thread:1'], :count => 3, :reason => 'process exit')
+    ensure
+      ActiveSupport::Notifications.unsubscribe(subscription)
+    end
+
+    it 'runs the :error callbacks with a worker named after the thread that held each job' do
+      seen = []
+      Delayed::Worker.lifecycle.before(:error) { |worker, failed_job| seen << [worker.name, failed_job.locked_by] }
+      locked_job('dj.1 pid:77 thread:0')
+      locked_job('dj.1 pid:77 thread:1')
+      Delayed::Worker.recover_jobs_of(['dj.1 pid:77 thread:0', 'dj.1 pid:77 thread:1'], error)
+      expect(seen).to match_array [['dj.1 pid:77 thread:0'] * 2, ['dj.1 pid:77 thread:1'] * 2]
+    ensure
+      Delayed::Worker.setup_lifecycle
+    end
+
+    describe 'the default batch methods (Backend::Base), for backends without their own' do
+      let(:backend) do
+        klass = Class.new do
+          include Delayed::Backend::Base
+          cattr_accessor :jobs, :cleared
+          def self.locked_jobs(name)
+            jobs[name]
+          end
+
+          def self.clear_locks!(name)
+            cleared << name
+          end
+        end
+        klass.jobs = {'a' => [:job1], 'b' => [:job2, :job3], 'c' => []}
+        klass.cleared = []
+        klass
+      end
+
+      it 'lists the jobs of every name with locked_jobs' do
+        expect(backend.locked_jobs_of(%w[a b c])).to eq [:job1, :job2, :job3]
+      end
+
+      it 'is nil when locked_jobs is unsupported for a name' do
+        expect(backend.locked_jobs_of(%w[a unknown])).to be_nil
+      end
+
+      it 'clears each name with clear_locks!' do
+        backend.clear_locks_of!(%w[a b])
+        expect(backend.cleared).to eq %w[a b]
+      end
+    end
+
     context 'when the backend cannot list locked jobs' do
-      before { allow(Delayed::Job).to receive(:locked_jobs).and_return(nil) }
+      before { allow(Delayed::Job).to receive(:locked_jobs_of).and_return(nil) }
 
       it 'only clears the locks' do
         job = locked_job('dj.1 pid:77')
@@ -264,7 +331,7 @@ describe 'Recovering the jobs of a dead worker process' do
 
         it 'releases the locks of every one of its threads' do
           names = Delayed::Worker.lock_names('delayed_job.1 ', 99, 2)
-          names.each { |name| expect(Delayed::Job).to receive(:clear_locks!).with(name) }
+          expect(Delayed::Job).to receive(:clear_locks_of!).with(names)
           launcher.send(:recover_jobs_of_worker, 'delayed_job.1', 99, options, clean)
         end
       end

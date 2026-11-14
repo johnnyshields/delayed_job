@@ -237,23 +237,32 @@ module Delayed
     # Backends that can't list a worker's jobs (Job.locked_jobs returns nil)
     # only have the locks cleared. Returns the number of jobs recovered.
     def self.recover_jobs_of(worker_names, error)
-      worker_names.inject(0) do |count, worker_name|
-        jobs = Delayed::Job.locked_jobs(worker_name)
-        if jobs.nil?
-          Delayed::Job.clear_locks!(worker_name)
-          next count
-        end
-        # A job that had already failed permanently keeps its lock (as when
-        # a live worker fails it, until ClearLocks runs on exit): it wasn't
-        # running, so it only has its lock cleared, below.
-        jobs = jobs.reject(&:failed?)
-        worker = named(worker_name)
-        recovered = jobs.count { |job| recover_job(worker, job, error) }
-        Delayed::Job.clear_locks!(worker_name)
-        Delayed.instrument(:locks_released, :workers => [worker_name], :count => jobs.size, :reason => 'process exit', :error => error) unless jobs.empty?
-        count + recovered
+      # In one query for all the names (see Job.locked_jobs_of): a process
+      # with many threads and prefetch slots has hundreds.
+      jobs = Delayed::Job.locked_jobs_of(worker_names)
+      if jobs.nil?
+        Delayed::Job.clear_locks_of!(worker_names)
+        return 0
       end
+      # A job that had already failed permanently keeps its lock (as when a
+      # live worker fails it, until ClearLocks runs on exit): it wasn't
+      # running, so it only has its lock cleared, below.
+      by_worker = jobs.reject(&:failed?).group_by(&:locked_by) # Before recovery unlocks them.
+      recovered = by_worker.sum do |worker_name, held|
+        worker = named(worker_name)
+        held.count { |job| recover_job(worker, job, error) }
+      end
+      Delayed::Job.clear_locks_of!(worker_names)
+      publish_recovered(by_worker, error)
+      recovered
     end
+
+    def self.publish_recovered(by_worker, error)
+      return if by_worker.empty?
+      Delayed.instrument(:locks_released, :workers => by_worker.keys, :count => by_worker.values.sum(&:size),
+                                          :reason => 'process exit', :error => error)
+    end
+    private_class_method :publish_recovered
 
     # Counts a failed attempt of a job recovered from a dead worker. An
     # error doing so (e.g. a failure hook that raises, or a lost database
@@ -403,16 +412,24 @@ module Delayed
       limit = max_run_time(job).to_i
       limit = limit > 0 ? [limit, time_cap].min : time_cap if time_cap
       dispatcher.job_timed(self, job, limit) if dispatcher
-      # Only the job's own code can be interrupted by shutdown (see
-      # Dispatcher#work): never finishing it, below, so a job that ran
-      # is never released to run again.
-      Timeout.timeout(limit, WorkerTimeout) { Dispatcher.interruptible { job.invoke_job } }
+      # Only the job's own code (its #perform) can be interrupted by
+      # shutdown (see Dispatcher#work and Backend::Base#invoke_job): never
+      # its hooks or finishing it, below, so a job that ran is never
+      # released to run again.
+      Timeout.timeout(limit, WorkerTimeout) { job.invoke_job }
       owned_destroy(job)
       runtime = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
       job_say job, format('COMPLETED after %.4f', runtime)
       true # did work
     rescue ShutdownInterrupt
       raise # the job didn't fail; Delayed::Dispatcher releases it
+    rescue SignalException => error
+      # Raised into the job by a stopping dispatcher (see
+      # Worker.raise_signal_exceptions): the job didn't fail either. Run
+      # inline (e.g. #work_off), it counts as a failed attempt, as before.
+      raise if Dispatcher.worker_thread?
+      fail_attempt(job, error)
+      false # work failed
     rescue DeserializationError => error
       job_say job, "FAILED permanently with #{error.class.name}: #{error.message}", 'error'
 

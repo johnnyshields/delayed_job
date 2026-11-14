@@ -290,7 +290,7 @@ describe 'Rake tasks' do
       let(:env) { {'SLEEP_DELAY' => '-1'} }
       it do
         allow_any_instance_of(Delayed::Launcher::Forking).to receive(:launch) # Never start a real launcher.
-        expect { run_task }.to raise_error(ArgumentError, 'SLEEP_DELAY must be 0 or greater')
+        expect { run_task }.to raise_error(ArgumentError, 'SLEEP_DELAY must be a number of seconds, 0 or greater')
       end
     end
 
@@ -299,7 +299,7 @@ describe 'Rake tasks' do
         let(:env) { {name => value} }
         it do
           allow_any_instance_of(Delayed::Launcher::Forking).to receive(:launch) # Never start a real launcher.
-          expect { run_task }.to raise_error(ArgumentError, "invalid number of seconds: #{value.inspect}")
+          expect { run_task }.to raise_error(ArgumentError, /\A#{name} must be/)
         end
       end
     end
@@ -481,6 +481,45 @@ describe 'Rake tasks' do
     context 'QUEUES and POOLS' do
       let(:env) { {'QUEUES' => 'mailers', 'POOLS' => 'mailers:2'} }
       it { expect { run_task }.to raise_error(ArgumentError) }
+    end
+
+    # The same rules as script/delayed_job (see Delayed::LaunchOptions).
+    {
+      {'POOLS' => '*:abc'} => /process count must be a whole number/,
+      {'POOLS' => 'mailers:0'} => /process count must be a whole number/,
+      {'LOCK_TIMEOUT' => '0'} => 'LOCK_TIMEOUT must be greater than 0',
+      {'READ_AHEAD' => '0'} => 'READ_AHEAD must be 1 or greater',
+      {'MIN_PRIORITY' => 'x'} => 'MIN_PRIORITY must be a whole number',
+      {'NUM_PROCESSES' => 'two'} => 'NUM_PROCESSES must be 1 or greater',
+      {'NUM_WORKERS' => '0'} => 'NUM_WORKERS must be 1 or greater'
+    }.each do |env_vars, message|
+      context env_vars.map { |k, v| "#{k}=#{v}" }.join(' ') do
+        let(:env) { env_vars }
+        it do
+          allow_any_instance_of(Delayed::Launcher::Forking).to receive(:launch) # Never start a real launcher.
+          expect { run_task }.to raise_error(ArgumentError, message)
+        end
+      end
+    end
+
+    context 'QUIET blank' do
+      let(:env) { {'QUIET' => ''} }
+      let(:exp_args) { {:quiet => false, :processes => 1} }
+      it do
+        expect_success
+        run_task
+      end
+    end
+
+    %w[yes on true 1].each do |value|
+      context "PIDFILE=#{value}" do
+        let(:env) { {'PIDFILE' => value} }
+        let(:exp_args) { {:quiet => false, :processes => 1, :pid_file => true} }
+        it do
+          expect_success
+          run_task
+        end
+      end
     end
   end
 

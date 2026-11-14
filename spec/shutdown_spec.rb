@@ -293,6 +293,25 @@ describe 'Stopping a worker' do
       expect(reported).to be_empty
     end
 
+    it 'releases a job a signal was raised into, attempts unchanged, and carries on' do
+      dispatcher.workers.each { |w| allow(w).to receive(:say) }
+      job, = enqueue(GateJob.new(:a))
+      run_at = job.run_at
+      thread = run_until_started(1)
+      busy = dispatcher.instance_variable_get(:@running).keys.first
+      busy.raise(SignalException, 'TERM')
+      Timeout.timeout(5) { sleep 0.01 until GateJob.interrupted == [:a] }
+      Timeout.timeout(5) { sleep 0.01 while job.locked_by && GateJob.started.empty? }
+      # Not failed: the same job, unlocked as it was (or picked up again).
+      expect([job.attempts, job.run_at, job.last_error, job.failed_at]).to eq [0, run_at, nil, nil]
+      expect(busy).to be_alive # The thread carries on.
+      GateJob.release = true
+      Timeout.timeout(5) { sleep 0.01 until Delayed::Job.count.zero? }
+      expect(dispatcher.send(:in_flight)).to eq 0
+      dispatcher.stop
+      Timeout.timeout(5) { thread.join }
+    end
+
     it 'still interrupts a running job with a signal (Worker.raise_signal_exceptions)' do
       dispatcher.workers.each { |w| allow(w).to receive(:say) }
       enqueue(GateJob.new(:a))
@@ -300,6 +319,7 @@ describe 'Stopping a worker' do
       busy = dispatcher.instance_variable_get(:@running).keys.first
       busy.raise(SignalException, 'TERM')
       Timeout.timeout(5) { sleep 0.01 until GateJob.interrupted == [:a] }
+      GateJob.release = true # Released, it is run again.
       dispatcher.stop
       Timeout.timeout(5) { thread.join }
     end
@@ -546,6 +566,39 @@ describe 'Stopping a worker' do
       ActiveSupport::Notifications.unsubscribe(subscription)
     end
 
+    %i(success after).each do |hook|
+      it "lets the job's #{hook} hook run uninterrupted (the job is not run again)" do
+        p = paused
+        allow_any_instance_of(SimpleJob).to receive(hook) do
+          p << true
+          sleep 0.3
+        end
+        job = Delayed::Job.enqueue(SimpleJob.new)
+        quit_while_paused
+        expect(SimpleJob.runs).to eq 1
+        expect(Delayed::Job.all).not_to include(job)
+        expect(log.map(&:last).grep(/interrupted by shutdown/)).to be_empty
+        expect(reported).to be_empty
+      end
+    end
+
+    it "lets a job's slow success hook finish after a shutdown timeout passes" do
+      Delayed::Worker.shutdown_timeout = 0
+      SlowHookJob.reset
+      job = Delayed::Job.enqueue(SlowHookJob.new)
+      thread = Thread.new { dispatcher.run }
+      Timeout.timeout(5) { SlowHookJob.in_hook.pop }
+      dispatcher.stop # The deadline passes at once: running jobs are interrupted.
+      Thread.new do
+        sleep 0.3
+        SlowHookJob.release = true
+      end
+      Timeout.timeout(10) { thread.join }
+      expect(SlowHookJob.performed.size).to eq 1
+      expect(Delayed::Job.all).not_to include(job)
+      expect(reported).to be_empty
+    end
+
     it 'still interrupts the job itself' do
       job, = enqueue(GateJob.new(:a))
       thread = Thread.new { dispatcher.run }
@@ -656,6 +709,56 @@ describe 'Stopping a worker' do
       expect(events).to eq [{:workers => [dispatcher.workers.first.name], :count => 1, :reason => 'shutdown'}]
     ensure
       ActiveSupport::Notifications.unsubscribe(subscription)
+    end
+  end
+
+  describe 'stopping without #stop (exit_on_complete, a crashed thread)' do
+    it 'counts as stopping, so a job handed over past the shutdown deadline is released, not started' do
+      Delayed::Worker.shutdown_timeout = 0
+      d = Delayed::Dispatcher.new(:threads => 1)
+      allow(d).to receive(:say)
+      d.send(:start_threads)
+      allow(d).to receive(:wait_for_threads)
+      expect(d.send(:past_shutdown_deadline?)).to be false
+      d.send(:stop_threads, nil)
+      expect(d).to be_stop
+      expect(d.send(:past_shutdown_deadline?)).to be true
+    end
+
+    it 'shows stopping in the procline' do
+      Delayed::Worker.exit_on_complete = true
+      d = Delayed::Dispatcher.new(:threads => 1, :procline => 'dj')
+      allow(d).to receive(:say)
+      titles = []
+      allow(d).to receive(:update_procline).and_wrap_original do |m|
+        m.call
+        titles << d.procline
+      end
+      Timeout.timeout(5) { d.run }
+      expect(titles.last).to start_with 'dj: stopping, '
+    ensure
+      $0 = 'rspec' if d
+    end
+  end
+
+  describe 'a signal exception that reaches the dispatcher late (JRuby)' do
+    it 'still interrupts and releases the running jobs past the deadline, then raises it' do
+      Delayed::Worker.shutdown_timeout = 0
+      job, = enqueue(GateJob.new(:a))
+      calls = 0
+      allow(dispatcher).to(receive(:wait_for_threads).and_wrap_original do |m|
+        raise SignalException, 'TERM' if (calls += 1) == 1 # Arrives while waiting.
+
+        m.call
+      end)
+      allow(dispatcher).to receive(:raise_in_threads) # As if it missed the job.
+      thread = Thread.new { dispatcher.run }
+      thread.report_on_exception = false
+      Timeout.timeout(5) { GateJob.started.pop }
+      dispatcher.stop
+      expect { Timeout.timeout(10) { thread.join } }.to raise_error(SignalException, 'SIGTERM')
+      expect(GateJob.interrupted).to eq [:a]
+      expect(job.reload.locked_by).to be_nil
     end
   end
 

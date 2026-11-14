@@ -55,12 +55,17 @@ module Delayed
     SUPERVISOR_CHECK_INTERVAL = 1
 
     # Runs the block with shutdown interrupts let in: they are deferred
-    # everywhere else in worker threads (see #work). Worker#run wraps a job's
-    # own code in it. Outside of worker threads (e.g. Worker#work_off), where
+    # everywhere else in worker threads (see #work). Backend::Base#invoke_job
+    # wraps a job's #perform in it. Outside of worker threads (e.g. Worker#work_off), where
     # nothing defers them, it changes nothing.
     def self.interruptible(&block)
       return yield unless interrupt_masking?
       Thread.handle_interrupt(ALLOW_SHUTDOWN_INTERRUPTS, &block)
+    end
+
+    # Whether the current thread is a dispatcher's worker thread (see #work).
+    def self.worker_thread?
+      !!Thread.current[:delayed_job_worker_thread]
     end
 
     # Runs the block with shutdown interrupts deferred (see #work).
@@ -626,6 +631,7 @@ module Delayed
     # job being finished (deleted) - which would then be released and run
     # again.
     def work(worker, inbox)
+      Thread.current[:delayed_job_worker_thread] = true
       self.class.deferring_interrupts do
         Worker.lifecycle.run_callbacks(:execute, worker) do
           work_jobs(worker, inbox)
@@ -657,16 +663,26 @@ module Delayed
         next release_unstarted(worker, slot, job) if past_shutdown_deadline? || (@prefetch > 0 && stop?)
         lock_left = lock_time_left(slot, reserved_at)
         next release_unstarted(worker, slot, job, :lock_expired) if lock_left && lock_left <= 0
-        synchronize do
-          @running[Thread.current] = job
-          @running_slot[worker] = slot
-        end
-        result = with_reloader { untrack_job_after(worker) { worker.perform_job(job, lock_left) } }
-        synchronize { @running.delete(Thread.current) }
-        job_finished(worker, slot, result)
+        run_job(worker, slot, job, lock_left)
       end
-    rescue ShutdownInterrupt => error
-      job, slot = synchronize { [@running.delete(Thread.current), @running_slot.delete(worker)] }
+    end
+
+    # Runs a job handed to the worker. One interrupted by shutdown (see
+    # Worker#run) is released; the thread then carries on with what is
+    # left in its inbox (released too, as the dispatcher is stopping).
+    def run_job(worker, slot, job, lock_left)
+      synchronize do
+        @running[Thread.current] = job
+        @running_slot[worker] = slot
+      end
+      result = with_reloader { untrack_job_after(worker) { worker.perform_job(job, lock_left) } }
+      synchronize { @running.delete(Thread.current) }
+      job_finished(worker, slot, result)
+    rescue *SHUTDOWN_INTERRUPTS => error
+      synchronize do
+        @running.delete(Thread.current)
+        @running_slot.delete(worker)
+      end
       release_interrupted(worker, job, error, slot)
     end
 
@@ -708,7 +724,7 @@ module Delayed
     def clear_slot_locks(worker)
       return if @prefetch.zero?
       names = @slots[worker].map(&:name)
-      with_executor { names.each { |slot_name| Delayed::Job.clear_locks!(slot_name) } }
+      with_executor { Delayed::Job.clear_locks_of!(names) }
     rescue StandardError => error
       say "Could not release the jobs of #{worker.name}: #{error.class}: #{error.message}", 'error'
       thread_error(error, 'Releasing interrupted jobs', worker.name)
@@ -787,8 +803,13 @@ module Delayed
     # signal exception (see Worker.raise_signal_exceptions), it is raised in
     # running jobs as well.
     def stop_threads(error)
+      # Also when the poll loop ended without #stop (exit_on_complete, a
+      # crashed thread): jobs handed over are then released past the
+      # shutdown deadline (see #work_jobs), and the procline says stopping.
       @stop_requested_at ||= monotonic_now
+      @stopped = true
       update_procline
+      late_signal = nil
       begin
         # A late signal exception (see below) is deferred until the threads
         # have all been told to stop: on JRuby, one raised in Queue#push
@@ -804,18 +825,19 @@ module Delayed
         # their own, so the trap's stop can end the poll loop before the
         # signal exception reaches this thread (see #raise_signal). Raise
         # it in the running jobs too, as if it had arrived first; then
-        # finish stopping and let it propagate.
+        # finish stopping (below) and let it propagate.
         raise_in_threads(late_signal)
         wait_for_threads
-        raise
       end
-      return unless shutdown_deadline
-      interrupt_threads(synchronize { @running.keys.select(&:alive?) })
-      # Also wait for the threads that weren't running a job: they may still
-      # be releasing one handed to them too late (see #release_unstarted),
-      # and must run their :execute callbacks (e.g. ClearLocks) before the
-      # process exits - which would kill them.
-      join_threads(monotonic_now + INTERRUPT_GRACE)
+      if shutdown_deadline
+        interrupt_threads(synchronize { @running.keys.select(&:alive?) })
+        # Also wait for the threads that weren't running a job: they may
+        # still be releasing one handed to them too late (see
+        # #release_unstarted), and must run their :execute callbacks (e.g.
+        # ClearLocks) before the process exits - which would kill them.
+        join_threads(monotonic_now + INTERRUPT_GRACE)
+      end
+      raise late_signal if late_signal
     end
 
     # Releases the jobs still queued for workers (with prefetch), unstarted:
@@ -833,7 +855,7 @@ module Delayed
       return if queued.empty?
       message, event_reason = QUEUED_RELEASE_REASONS.fetch(reason)
       names = queued.map { |slot, _job| slot.name }
-      with_executor { names.each { |slot_name| Delayed::Job.clear_locks!(slot_name) } }
+      with_executor { Delayed::Job.clear_locks_of!(names) }
       say "Released #{queued.size} queued job(s) #{message}", reason == :shutdown ? 'info' : 'warn'
       Delayed.instrument(:locks_released, :workers => names, :count => queued.size, :reason => event_reason)
     rescue StandardError => error
@@ -899,19 +921,23 @@ module Delayed
     # lock is cleared, its attempts and run_at are left as they were - or,
     # with Worker.count_shutdown_interrupts, it is recorded as a failed
     # attempt (rescheduled with back-off, or failed after max_attempts).
-    def release_interrupted(worker, job, interrupt = nil, slot = worker)
-      slot ||= worker
-      if job && Worker.count_shutdown_interrupts
+    def release_interrupted(worker, job, interrupt, slot)
+      if Worker.count_shutdown_interrupts
         worker.job_say(job, 'interrupted by shutdown; counted as a failed attempt', 'warn')
-        worker.fail_attempt(job, interrupt || ShutdownInterrupt.new('interrupted by shutdown'))
-      elsif job
+        worker.fail_attempt(job, interrupt)
+      else
         worker.job_say(job, 'interrupted by shutdown; released for another worker', 'warn')
       end
       Delayed::Job.clear_locks!(slot.name)
-      Delayed.instrument(:locks_released, :workers => [slot.name], :count => job ? 1 : 0, :reason => 'shutdown') if job
+      Delayed.instrument(:locks_released, :workers => [slot.name], :count => 1, :reason => 'shutdown')
     rescue StandardError => error
       say "Could not release the jobs of #{slot.name}: #{error.class}: #{error.message}", 'error'
       thread_error(error, 'Releasing interrupted jobs', worker.name)
+    ensure
+      synchronize do
+        free_slot(slot)
+        signal_event
+      end
     end
 
     def dispatch(slot, job, reserved_at = monotonic_now)
