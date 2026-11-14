@@ -306,7 +306,8 @@ describe 'Stopping a worker' do
       expect(busy).to be_alive # The thread carries on.
       GateJob.release = true
       wait_until(5) { Delayed::Job.count.zero? }
-      expect(dispatcher.send(:in_flight)).to eq 0
+      # The job is deleted before its thread frees the slot.
+      wait_until(5) { dispatcher.send(:in_flight).zero? }
       dispatcher.stop
       Timeout.timeout(5) { thread.join }
     end

@@ -309,7 +309,7 @@ describe 'Mold process (Worker.mold)' do
       described_class.retry_delay_unit = 0
       boot(10)
       supervisor.send(:handle_status, 'p', 10, 6, 0, 0)
-      expect(supervisor.child_exited(10, status(false))).to be_nil
+      expect(supervisor.child_exited(10, status(false), {})).to be false
       expect(launcher.logged.join).to include 'promoting a new mold in 0s'
       boot(11)
       supervisor.send(:handle_status, 'p', 11, 6, 0, 0)
@@ -324,11 +324,11 @@ describe 'Mold process (Worker.mold)' do
       supervisor.send(:handle_status, 'p', 10, 6, 0, 0)
       supervisor.send(:handle_status, 'M', 10, 900)
       supervisor.send(:handle_status, 'm', 900, 10)
-      expect(supervisor.child_exited(10, status(true))).to eq :promoted
+      expect(supervisor.child_exited(10, status(true), {})).to be true
       supervisor.send(:advance_refork)
       expect(launcher.started).to include [:add, {}, 11]
       supervisor.child_started(20, :mold_pid => 900, :replaces_pid => 11, :generation => 1)
-      expect(supervisor.child_exited(20, status(false))).to eq :retiring
+      expect(supervisor.child_exited(20, status(false), {})).to be true
       expect(launcher.logged.join).to include 'died before booting; keeping pid 11'
       expect(signals).not_to include ['TERM', 11]
     end
@@ -377,7 +377,7 @@ describe 'Mold process (Worker.mold)' do
       supervisor.send(:handle_status, 'p', 10, 6, 0, 0)
       supervisor.send(:check_promotion)
       expect(launcher.started).to include [:add, {}, 10]
-      expect(supervisor.child_exited(10, status(true))).to eq :retiring
+      expect(supervisor.child_exited(10, status(true), {})).to be true
     ensure
       described_class.drain_deadline = 300
     end
@@ -389,7 +389,7 @@ describe 'Mold process (Worker.mold)' do
       supervisor.send(:handle_status, 'M', 10, 900)
       supervisor.send(:handle_status, 'm', 900, 10)
       3.times { |i| supervisor.child_started(30 + i, :mold_pid => 900, :generation => 1) }
-      3.times { |i| supervisor.child_exited(30 + i, status(false)) }
+      3.times { |i| supervisor.child_exited(30 + i, status(false), {}) }
       expect(signals).to include ['KILL', 900]
       expect(supervisor).not_to be_forking_from_mold
       expect(launcher.logged.join).to include 'Lost mold (pid 900); promoting a new mold in'
@@ -412,6 +412,34 @@ describe 'Mold process (Worker.mold)' do
       supervisor.send(:handle_status, 'b', 50)
       supervisor.send(:handle_status, 'x', 900, 50, 0, nil)
       expect(supervisor.instance_variable_get(:@early_boots)).to be_empty
+    end
+
+    it 'skips a malformed status line' do
+      supervisor.send(:handle_status, 'p', 10)
+      supervisor.send(:handle_status, 'b', 'x')
+      supervisor.send(:handle_status, 'm', 5)
+      expect(launcher.logged.join).to include 'Ignoring malformed mold status line'
+    end
+
+    it "doesn't refill a refilled promoted child's slot again when it exits" do
+      described_class.drain_deadline = 0
+      boot(10)
+      boot(11)
+      supervisor.send(:handle_status, 'p', 10, 6, 0, 0)
+      supervisor.send(:check_promotion)
+      supervisor.send(:check_promotion)
+      expect(launcher.started.count { |kind, _, pid| kind == :add && pid == 10 }).to eq 1
+    ensure
+      described_class.drain_deadline = 300
+    end
+
+    it 'kills molds still running once stopped with no child process left' do
+      stub_const("#{described_class}::MOLD_STOP_TIMEOUT", 0)
+      supervisor.instance_variable_get(:@molds)[900] = :active
+      launcher.stopped = true
+      supervisor.send(:stop_lingering_molds)
+      supervisor.send(:stop_lingering_molds)
+      expect(signals).to include ['KILL', 900]
     end
 
     it 'ignores SIGURG during a promotion' do

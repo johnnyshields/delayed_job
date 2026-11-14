@@ -362,11 +362,21 @@ module Delayed
       # subreaper, molds and their orphans aren't this process's to wait for.
       def run_mold_loop
         loop do
-          reap_children
-          @mold_supervisor.tick
-          replace_due_workers
+          mold_loop_pass
           break if @stopped && workers.empty? && @mold_supervisor.done?
         end
+      end
+
+      # An unexpected error is reported, not raised: the launcher going away
+      # would stop every child process.
+      def mold_loop_pass
+        reap_children
+        @mold_supervisor.tick
+        replace_due_workers
+      rescue StandardError => error
+        logger.error "Mold supervisor error: #{error.class}: #{error.message}"
+        Delayed::Worker.thread_error(error, :context => 'Mold supervisor')
+        sleep 0.1 # No busy loop if it keeps failing.
       end
 
       # Direct children, and orphans reparented here (subreaper or PID 1),
@@ -403,14 +413,13 @@ module Delayed
       def handle_exit(worker_pid, child_status)
         worker_name, options = workers_lock.synchronize { workers.delete(worker_pid) }
         return false unless worker_name
-        # A child replaced by a refork isn't again; a promoted one is, at once.
-        mold_role = @mold_supervisor&.child_exited(worker_pid, child_status)
-        replace = !@stopped && mold_role != :retiring
+        # The supervisor fills the slot of a reforked or promoted child.
+        replace = !@stopped && !@mold_supervisor&.child_exited(worker_pid, child_status, options)
         logger.info "Child process #{worker_name} (pid #{worker_pid}) exited: #{child_status}"
         recover_jobs_of_worker(worker_name, worker_pid, options, child_status)
-        publish_child_exited(worker_name, worker_pid, child_status, respawn_in(worker_pid, replace, mold_role))
+        publish_child_exited(worker_name, worker_pid, child_status, replace)
         warn_if_sigkilled(worker_name, worker_pid, child_status, replace)
-        refill_slot([worker_name, worker_pid, options, child_status], mold_role) if replace
+        replace ? replace_worker(worker_name, worker_pid, options, child_status) : forget_child(worker_pid)
         true
       ensure
         @plans&.delete(worker_pid)
@@ -428,14 +437,6 @@ module Delayed
         nil
       end
 
-      # A promoted child's slot is refilled from its mold, once ready.
-      def refill_slot(exited, mold_role)
-        return replace_worker(*exited) unless mold_role == :promoted
-        _, pid, options, = exited
-        forget_child(pid)
-        @mold_supervisor.defer_slot(options, pid)
-      end
-
       def forget_child(pid)
         @plans&.delete(pid)
         started_at.delete(pid)
@@ -447,15 +448,11 @@ module Delayed
         logger.warn "Child process #{worker_name} (pid #{pid}) was SIGKILLed (e.g. by the OOM killer)#{'; replacing it' if replace}"
       end
 
-      # Seconds until replaced, or nil if not (or not yet known: a child
-      # promoted to mold is replaced once its mold is ready).
-      def respawn_in(pid, replace, mold_role)
-        return unless replace && mold_role != :promoted
-        respawn_plan(pid)[2] || 0
-      end
-
-      def publish_child_exited(worker_name, pid, status, respawn_in)
-        uptime, = respawn_plan(pid)
+      # :respawn_in is nil when not replaced (or replaced by the mold
+      # supervisor, e.g. a child promoted to mold).
+      def publish_child_exited(worker_name, pid, status, replace)
+        uptime, _streak, delay = respawn_plan(pid)
+        respawn_in = replace ? delay || 0 : nil
         Delayed.instrument(:process_exited, :worker => worker_name, :pid => pid, :status => status, :uptime => uptime, :respawn_in => respawn_in)
       end
 
@@ -487,22 +484,24 @@ module Delayed
         respawn_streaks[new_pid] = streak if new_pid
         new_pid
       rescue SystemCallError => error
-        retry_delay = respawn_delay(streak + 1)
-        logger.error "Could not fork a replacement for child process #{worker_name} (pid #{pid}): " \
-                     "#{error.class}: #{error.message}; retrying in #{retry_delay}s"
-        Delayed::Worker.thread_error(error, :context => 'Forking', :worker => worker_name, :pid => pid)
-        pending_replacements << [monotonic_now + retry_delay, [worker_name, pid, options, status, streak + 1, retry_delay]]
-        nil
+        retry_fork(error, [worker_name, pid, options, status], streak + 1)
       end
 
       # A fork outside #respawn failed: retried like a failed respawn.
       def fork_failed(error, options, replaces_pid)
         worker_name, = workers[replaces_pid]
-        worker_name ||= get_name(@worker_index)
-        retry_delay = respawn_delay(1)
-        logger.error "Could not fork a child process: #{error.class}: #{error.message}; retrying in #{retry_delay}s"
-        Delayed::Worker.thread_error(error, :context => 'Forking', :worker => worker_name, :pid => replaces_pid)
-        pending_replacements << [monotonic_now + retry_delay, [worker_name, replaces_pid, options, nil, 1, retry_delay]]
+        retry_fork(error, [worker_name || get_name(@worker_index), replaces_pid, options, nil], 1)
+      end
+
+      # Queues a replacement after a back-off (fork fails on EAGAIN, ENOMEM).
+      # `replacement`: [worker_name, replaced pid, options, exit status].
+      def retry_fork(error, replacement, streak)
+        worker_name, pid, = replacement
+        retry_delay = respawn_delay(streak)
+        logger.error "Could not fork a replacement for child process #{worker_name} (pid #{pid.inspect}): " \
+                     "#{error.class}: #{error.message}; retrying in #{retry_delay}s"
+        Delayed::Worker.thread_error(error, :context => 'Forking', :worker => worker_name, :pid => pid)
+        pending_replacements << [monotonic_now + retry_delay, replacement + [streak, retry_delay]]
         nil
       end
 
