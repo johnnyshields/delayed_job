@@ -188,8 +188,8 @@ module Delayed
     end
 
     def validate_prefetch!
-      return unless @options[:prefetch] && @options[:prefetch] < 0
-      raise ArgumentError, '--prefetch must be a whole number, 0 or greater'
+      return unless @options[:prefetch] && !@options[:prefetch].between?(0, Delayed::Worker::MAX_PREFETCH)
+      raise ArgumentError, "--prefetch must be a whole number from 0 to #{Delayed::Worker::MAX_PREFETCH}"
     end
 
     def validate_shutdown_timeout!

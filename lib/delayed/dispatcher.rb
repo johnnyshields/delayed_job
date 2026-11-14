@@ -26,8 +26,6 @@ module Delayed
   class Dispatcher # rubocop:disable Metrics/ClassLength
     include Logging
 
-    STOP = Object.new.freeze
-
     # Exceptions raised into worker threads to interrupt their jobs on
     # shutdown (see #work).
     SHUTDOWN_INTERRUPTS = [ShutdownInterrupt, SignalException].freeze
@@ -313,12 +311,13 @@ module Delayed
         raise_thread_error
         break if supervisor_gone?
         free, seen = snapshot
+        polled_at = monotonic_now # No later than the jobs' locks were taken.
         reserved = free.empty? ? [] : poll(free)
         # A signal exception (see Worker.raise_signal_exceptions) may stop
         # this part way: jobs not handed over yet stay locked under their
         # worker's names, which are cleared as its thread exits (see
         # Plugins::ClearLocks and #clear_slot_locks).
-        reserved.each { |slot, job| dispatch(slot, job) }
+        reserved.each { |slot, job| dispatch(slot, job, polled_at) }
         deeper = adjust_depth(free.size, reserved.size)
 
         if reserved.empty? && in_flight.zero?
@@ -573,7 +572,7 @@ module Delayed
     def start_threads
       build_slots
       @threads = workers.each_with_index.map do |worker, index|
-        inbox = @inboxes[worker] = Queue.new
+        inbox = @inboxes[worker] = Inbox.new
         Thread.new { work(worker, inbox) }.tap do |thread|
           thread.report_on_exception = false if thread.respond_to?(:report_on_exception=)
           thread.name = "delayed_job worker:#{index}" if thread.respond_to?(:name=)
@@ -631,21 +630,35 @@ module Delayed
 
     # Runs the jobs handed to the worker until told to stop (see #work).
     def work_jobs(worker, inbox)
-      until (item = inbox.pop).equal?(STOP)
-        slot, job = item
+      until (item = inbox.pop).equal?(Inbox::EOQ)
+        slot, job, reserved_at = item
         discard_stale_interrupts
         next release_unstarted(worker, slot, job) if past_shutdown_deadline? || (@prefetch > 0 && stop?)
+        lock_left = lock_time_left(reserved_at)
+        next release_unstarted(worker, slot, job, :lock_expired) if lock_left && lock_left < 1
         synchronize do
           @running[Thread.current] = job
           @running_slot[worker] = slot
         end
-        result = with_reloader { untrack_job_after(worker) { worker.perform_job(job) } }
+        result = with_reloader { untrack_job_after(worker) { worker.perform_job(job, lock_left) } }
         synchronize { @running.delete(Thread.current) }
         job_finished(worker, slot, result)
       end
     rescue ShutdownInterrupt => error
       job, slot = synchronize { [@running.delete(Thread.current), @running_slot.delete(worker)] }
       release_interrupted(worker, job, error, slot)
+    end
+
+    # Whole seconds left before the lock of a job reserved at `reserved_at`
+    # expires, if it waited in a queue for a second or more and its lock is
+    # not refreshed (no lock heartbeats): the lock was taken as it was
+    # reserved, so the job must stop by then, or another worker could take
+    # it over while it still runs (see Worker#run). Else nil.
+    def lock_time_left(reserved_at)
+      return nil if Worker.lock_heartbeats?
+      waited = monotonic_now - reserved_at
+      return nil if waited < 1
+      (Worker.max_run_time - waited).floor
     end
 
     # As the worker's thread exits (also on a crash), with prefetch: clears
@@ -741,10 +754,10 @@ module Delayed
       begin
         # A late signal exception (see below) is deferred until the threads
         # have all been told to stop: on JRuby, one raised in Queue#push
-        # comes out as a ThreadError, and the STOP would be lost.
+        # comes out as a ThreadError, and an inbox would be left open.
         self.class.deferring_interrupts do
           release_queued if @prefetch > 0
-          @inboxes.each_value { |inbox| inbox << STOP }
+          @inboxes.each_value(&:close)
         end
         raise_in_threads(error) if error.is_a?(SignalException)
         wait_for_threads
@@ -771,7 +784,7 @@ module Delayed
     # unlocked, their attempts unchanged, for another worker to run. A job a
     # worker already took is released by the worker itself (see #work).
     def release_queued
-      queued = @inboxes.flat_map { |_worker, inbox| drain(inbox) }
+      queued = @inboxes.flat_map { |_worker, inbox| inbox.drain }
       return if queued.empty?
       names = queued.map { |slot, _job| slot.name }
       with_executor { names.each { |slot_name| Delayed::Job.clear_locks!(slot_name) } }
@@ -787,20 +800,12 @@ module Delayed
       end
     end
 
-    # Takes everything queued in the inbox, without waiting.
-    def drain(inbox)
-      items = []
-      loop { items << inbox.pop(true) }
-    rescue ThreadError # Empty.
-      items
-    end
-
     def join_threads(deadline)
       @threads.each { |thread| thread.join([deadline - monotonic_now, 0].max) }
     end
 
     # Raises the signal exception in the threads running a job, to interrupt
-    # it. Not in the others: they stop when they get STOP, and one that
+    # it. Not in the others: they stop once their inbox is closed, and one that
     # has only just started could be killed before it can run its :execute
     # callbacks (e.g. ClearLocks), leaving its locks behind.
     def raise_in_threads(signal_exception)
@@ -863,21 +868,28 @@ module Delayed
       thread_error(error, 'Releasing interrupted jobs', worker.name)
     end
 
-    def dispatch(slot, job)
+    def dispatch(slot, job, reserved_at = monotonic_now)
       synchronize do
         @slot_jobs[slot] = job
         @in_flight += 1
       end
-      @inboxes[@slot_owner.fetch(slot, slot)] << [slot, job]
+      @inboxes[@slot_owner.fetch(slot, slot)].push(slot, job, reserved_at)
     end
 
-    # Releases a job handed to the worker that it never started, because the
-    # shutdown deadline passed before it could: unlocked, its attempts
-    # unchanged, for another worker to run.
-    def release_unstarted(worker, slot, job)
-      worker.job_say(job, 'not started before shutdown; released for another worker', 'warn')
+    UNSTARTED_REASONS = {
+      :shutdown => ['not started before shutdown', 'shutdown'],
+      :lock_expired => ['waited in its queue until its lock (max_run_time) expired', 'lock expired in queue']
+    }.freeze
+
+    # Releases a job handed to the worker that it never started: unlocked,
+    # its attempts unchanged, for another worker to run. Because the process
+    # is stopping, or (:lock_expired) because it waited queued for as long
+    # as its lock lasts, so it may already have been taken over.
+    def release_unstarted(worker, slot, job, reason = :shutdown)
+      message, event_reason = UNSTARTED_REASONS.fetch(reason)
+      worker.job_say(job, "#{message}; released for another worker", 'warn')
       Delayed::Job.clear_locks!(slot.name)
-      Delayed.instrument(:locks_released, :workers => [slot.name], :count => 1, :reason => 'shutdown')
+      Delayed.instrument(:locks_released, :workers => [slot.name], :count => 1, :reason => event_reason)
     rescue StandardError => error
       say "Could not release the jobs of #{slot.name}: #{error.class}: #{error.message}", 'error'
       thread_error(error, 'Releasing interrupted jobs', worker.name)

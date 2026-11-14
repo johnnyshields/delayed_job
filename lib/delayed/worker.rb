@@ -27,6 +27,7 @@ module Delayed
     DEFAULT_LOCK_HEARTBEAT_INTERVAL = nil
     DEFAULT_LOCK_TIMEOUT = 5.minutes
     DEFAULT_PREFETCH = 0
+    MAX_PREFETCH = 20
 
     cattr_accessor :min_priority, :max_priority, :max_attempts, :max_run_time,
                    :default_priority, :sleep_delay, :logger, :delay_jobs, :queues,
@@ -222,10 +223,11 @@ module Delayed
       "#{worker_name} slot:#{slot}"
     end
 
-    # Raises ArgumentError unless prefetch is a whole number, 0 or greater.
+    # Raises ArgumentError unless prefetch is a whole number from 0 to
+    # MAX_PREFETCH.
     def self.validate_prefetch!
-      return if prefetch.is_a?(Integer) && prefetch >= 0
-      raise ArgumentError, "prefetch must be a whole number, 0 or greater (got #{prefetch.inspect})"
+      return if prefetch.is_a?(Integer) && prefetch.between?(0, MAX_PREFETCH)
+      raise ArgumentError, "prefetch must be a whole number from 0 to #{MAX_PREFETCH} (got #{prefetch.inspect})"
     end
 
     # Recovers the jobs left locked by workers whose process died while
@@ -366,10 +368,14 @@ module Delayed
       (dispatcher || Dispatcher.new(:workers => [self], :quiet => @quiet)).work_off(num, self)
     end
 
-    def run(job)
+    # `time_cap`: at most this many seconds, if given (by the dispatcher,
+    # for a job whose lock expires sooner than its max_run_time, see
+    # Dispatcher#lock_time_left).
+    def run(job, time_cap = nil)
       job_say job, 'RUNNING'
       started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
       limit = max_run_time(job).to_i
+      limit = limit > 0 ? [limit, time_cap].min : time_cap if time_cap
       dispatcher.job_timed(self, job, limit) if dispatcher
       # Only the job's own code can be interrupted by shutdown (see
       # Dispatcher#work): never finishing it, below, so a job that ran
@@ -441,11 +447,11 @@ module Delayed
 
     # Runs an already reserved job, including its :perform callbacks.
     # Returns true if the job succeeded, false if it failed.
-    def perform_job(job)
+    def perform_job(job, time_cap = nil)
       running = Thread.current[:delayed_job_running]
       Thread.current[:delayed_job_running] = true # See #initialize.
       Delayed.instrument(:perform, :job => job, :worker => name) do |payload|
-        payload[:success] = self.class.lifecycle.run_callbacks(:perform, self, job) { run(job) }
+        payload[:success] = self.class.lifecycle.run_callbacks(:perform, self, job) { run(job, time_cap) }
       end
     ensure
       Thread.current[:delayed_job_running] = running

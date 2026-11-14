@@ -232,12 +232,12 @@ describe Delayed::Command do
 
     context 'negative' do
       let(:options) { %w[--prefetch -1] }
-      it { expect { output_options }.to raise_error(ArgumentError, '--prefetch must be a whole number, 0 or greater') }
+      it { expect { output_options }.to raise_error(ArgumentError, '--prefetch must be a whole number from 0 to 20') }
     end
 
     context 'not a number' do
       let(:options) { %w[--prefetch zebra] }
-      it { expect { output_options }.to raise_error(ArgumentError, '--prefetch must be a whole number, 0 or greater') }
+      it { expect { output_options }.to raise_error(ArgumentError, '--prefetch must be a whole number from 0 to 20') }
     end
 
     context 'with --prefetch-dynamic' do

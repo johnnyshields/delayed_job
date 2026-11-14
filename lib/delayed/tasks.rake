@@ -52,7 +52,7 @@ namespace :jobs do
 
     raise ArgumentError, 'NUM_THREADS must be 1 or greater' if @options[:threads] && @options[:threads] < 1
 
-    raise ArgumentError, 'PREFETCH must be a whole number, 0 or greater' if @options[:prefetch] && @options[:prefetch] < 0
+    raise ArgumentError, "PREFETCH must be a whole number from 0 to #{Delayed::Worker::MAX_PREFETCH}" if @options[:prefetch] && !@options[:prefetch].between?(0, Delayed::Worker::MAX_PREFETCH)
 
     raise ArgumentError, 'SHUTDOWN_TIMEOUT must be 0 or greater' if @options[:shutdown_timeout] && @options[:shutdown_timeout] < 0
 

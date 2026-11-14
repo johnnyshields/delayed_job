@@ -77,12 +77,16 @@ expiry = Delayed::Worker.lock_heartbeat_interval ? Delayed::Worker.lock_timeout 
 
 METRICS.gauge('dj.backlog', waiting.count)
 METRICS.gauge('dj.oldest_waiting_seconds', (now - (waiting.minimum(:run_at) || now)).to_i)
-METRICS.gauge('dj.running', Delayed::Job.where(failed_at: nil).where.not(locked_at: nil).count)
+METRICS.gauge('dj.held', Delayed::Job.where(failed_at: nil).where.not(locked_at: nil).count)
 METRICS.gauge('dj.failed', Delayed::Job.where.not(failed_at: nil).count)
 METRICS.gauge('dj.stale_locks', Delayed::Job.where(failed_at: nil).where('locked_at < ?', now - expiry).count)
 ```
 
 Group by `queue` if you use pools. With Mongoid, use the equivalent criteria.
+
+`held` counts locked jobs: those running and, with `--prefetch`, those queued
+behind them. The database can't tell the two apart; the number running is the
+`busy` count in each process's title (see below), and the rest are queued.
 
 ## Alerts
 

@@ -53,7 +53,7 @@ describe 'Prefetching jobs (Worker.prefetch)' do
   # Builds the dispatcher's slots and inboxes, without starting threads.
   def prepare(dispatcher)
     dispatcher.send(:build_slots)
-    dispatcher.workers.each { |w| dispatcher.instance_variable_get(:@inboxes)[w] = Queue.new }
+    dispatcher.workers.each { |w| dispatcher.instance_variable_get(:@inboxes)[w] = Delayed::Inbox.new }
     dispatcher
   end
 
@@ -85,9 +85,9 @@ describe 'Prefetching jobs (Worker.prefetch)' do
     end
 
     it 'rejects a negative or fractional prefetch' do
-      [-1, 1.5, '2', nil].each do |value|
+      [-1, 21, 1.5, '2', nil].each do |value|
         Delayed::Worker.prefetch = value
-        expect { Delayed::Worker.validate_prefetch! }.to raise_error(ArgumentError, /prefetch must be a whole number/)
+        expect { Delayed::Worker.validate_prefetch! }.to raise_error(ArgumentError, /prefetch must be a whole number from 0 to 20/)
       end
     end
 
@@ -232,6 +232,102 @@ describe 'Prefetching jobs (Worker.prefetch)' do
       d.instance_variable_get(:@running_slot)[worker] = running
       d.instance_variable_get(:@jobs_started)[worker] = [job, Process.clock_gettime(Process::CLOCK_MONOTONIC) - 11, 10, 'Job']
       expect(d.send(:heartbeat_names)).to eq [queued.name]
+    end
+  end
+
+  describe 'queued job order' do
+    before { Delayed::Worker.prefetch = 2 }
+
+    it 'runs a more urgent job reserved later before those already queued' do
+      Delayed::Job.enqueue(GateJob.new(:running), :priority => 0)
+      d = dispatcher(1)
+      thread = run_in_thread(d)
+      wait_until { GateJob.started.size == 1 }
+      Delayed::Job.enqueue(GateJob.new(:normal), :priority => 5)
+      wait_until { locked_jobs.size == 2 }
+      Delayed::Job.enqueue(GateJob.new(:urgent), :priority => -5)
+      wait_until { locked_jobs.size == 3 }
+      GateJob.release = true
+      wait_until { Delayed::Job.count.zero? }
+      expect(GateJob.finished).to eq %i(running urgent normal)
+      stop_and_join(d, thread)
+    end
+  end
+
+  describe 'a queued job whose lock expires (no lock heartbeats)' do
+    before { Delayed::Worker.prefetch = 1 }
+
+    it 'runs with what is left of max_run_time as its time limit' do
+      Delayed::Worker.max_run_time = 60
+      d = prepare(dispatcher(1))
+      expect(d.send(:lock_time_left, Process.clock_gettime(Process::CLOCK_MONOTONIC) - 15.5)).to eq 44
+    end
+
+    it 'has no extra limit after a short wait, or with lock heartbeats' do
+      d = prepare(dispatcher(1))
+      now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      expect(d.send(:lock_time_left, now - 0.5)).to be_nil
+      allow(Delayed::Worker).to receive(:lock_heartbeats?).and_return(true)
+      expect(d.send(:lock_time_left, now - 3600)).to be_nil
+    end
+
+    it 'passes the time left to the worker running a job that waited' do
+      Delayed::Worker.max_run_time = 60
+      Delayed::Job.enqueue(SimpleJob.new)
+      d = dispatcher(1)
+      caps = Concurrent::Array.new
+      allow(d.workers.first).to receive(:perform_job) { |_job, cap| caps << cap }
+      allow(d).to receive(:dispatch).and_wrap_original do |m, slot, reserved, reserved_at|
+        m.call(slot, reserved, reserved_at - 20.5) # As if it had waited 20.5s.
+      end
+      thread = run_in_thread(d)
+      wait_until { caps.any? }
+      expect(caps.first).to eq 39
+      d.stop
+      Timeout.timeout(10) { thread.join }
+    end
+
+    it 'times the job out at the lock expiry rather than its max_run_time' do
+      worker = Delayed::Worker.new
+      allow(worker).to receive(:say)
+      job = Delayed::Job.enqueue(LongRunningJob.new)
+      expect(Timeout).to receive(:timeout).with(7, Delayed::WorkerTimeout)
+      worker.run(job, 7)
+    end
+
+    it "keeps a job's own shorter max_run_time" do
+      worker = Delayed::Worker.new
+      allow(worker).to receive(:say)
+      job = Delayed::Job.enqueue(LongRunningJob.new)
+      allow(job).to receive(:max_run_time).and_return(3)
+      expect(Timeout).to receive(:timeout).with(3, Delayed::WorkerTimeout)
+      worker.run(job, 7)
+    end
+
+    it 'releases the job unstarted once its lock expired in the queue' do
+      released = Concurrent::Array.new
+      subscriber = ActiveSupport::Notifications.subscribe('locks_released.delayed_job') { |*, p| released << p }
+      jobs = gate_jobs(2)
+      d = dispatcher(1)
+      aged = Concurrent::AtomicBoolean.new(false)
+      allow(d).to receive(:dispatch).and_wrap_original do |m, slot, job, reserved_at|
+        # The first time it is handed over, as if it had waited max_run_time
+        # since its lock was taken; reserved again, it gets a fresh lock.
+        age = job.id == jobs[1].id && aged.make_true ? Delayed::Worker.max_run_time : 0
+        m.call(slot, job, reserved_at - age)
+      end
+      thread = run_in_thread(d)
+      wait_until { GateJob.started.size == 1 && locked_jobs.size == 2 }
+      expect(released).to be_empty
+      GateJob.release = true # The queued job is taken next: its lock expired.
+      wait_until { Delayed::Job.count.zero? } # Reserved again, and run.
+      expect(released.size).to eq 1
+      expect(released.first).to include(:reason => 'lock expired in queue', :count => 1)
+      expect(log.map(&:last).grep(/waited in its queue until its lock \(max_run_time\) expired/).size).to eq 1
+      expect(GateJob.finished).to eq [0, 1]
+      stop_and_join(d, thread)
+    ensure
+      ActiveSupport::Notifications.unsubscribe(subscriber)
     end
   end
 
