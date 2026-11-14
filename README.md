@@ -761,21 +761,21 @@ class ParanoidNewsletterJob < NewsletterJob
 end
 ```
 
-### Silencing polling queries
+### Silencing polling logs
 
 An idle worker polls for jobs every `sleep_delay` seconds (and, with lock
 heartbeats, refreshes its locks), which fills a debug-level SQL log. To keep
 those queries out of the log:
 
 ```ruby
-Delayed::Worker.silence_polling = true
+Delayed::Worker.silence_logging = true
 ```
 
-or `--silence-polling` / `SILENCE_POLLING=1`. Only the polling thread is
+or `--silence-logging` / `SILENCE_LOGGING=1`. Only the polling thread is
 silenced, below `WARN`, while it polls: queries made by jobs, and by workers
 finishing them, are logged as usual. The default backend hook silences
 `ActiveRecord::Base.logger` (it needs an `ActiveSupport::Logger`); backends
-logging elsewhere override `Delayed::Job.silence_polling(&block)`.
+logging elsewhere override `Delayed::Job.silence_logging(&block)`.
 
 ### Reporting errors outside of jobs
 

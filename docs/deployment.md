@@ -57,7 +57,7 @@ or stops them if they're orphaned.
 | Lock heartbeat (s) | `--lock-heartbeat` | `LOCK_HEARTBEAT` | off |
 | Lock timeout (s) | `--lock-timeout` | `LOCK_TIMEOUT` | 300 |
 | Pidfile | `--pid-file[=PATH]` | `PIDFILE=1` or a path | off |
-| Quiet polling queries | `--silence-polling` | `SILENCE_POLLING=1` | off |
+| Quiet polling queries | `--silence-logging` | `SILENCE_LOGGING=1` | off |
 
 All but processes, threads, pools and the pidfile are also
 `Delayed::Worker` settings (e.g. `Delayed::Worker.shutdown_timeout = 20`) for an

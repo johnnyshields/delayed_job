@@ -30,7 +30,7 @@ namespace :jobs do
       value = number.call(option)
       @options[option] = value unless value.nil?
     end
-    %w[PREFETCH_DYNAMIC BATCH_RESERVE SILENCE_POLLING COUNT_SHUTDOWN_INTERRUPTS].each do |variable|
+    %w[PREFETCH_DYNAMIC BATCH_RESERVE SILENCE_LOGGING COUNT_SHUTDOWN_INTERRUPTS].each do |variable|
       @options[variable.downcase.to_sym] = true if flag.call(variable)
     end
     # PIDFILE=path, or PIDFILE=1 for tmp/pids/delayed_job.pid.

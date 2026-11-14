@@ -32,12 +32,12 @@ describe 'Delayed::Worker.reset' do
     Delayed::Worker.sleep_delay = 1
     Delayed::Worker.queues = %w[mail]
     Delayed::Worker.shutdown_timeout = 3
-    Delayed::Worker.silence_polling = true
+    Delayed::Worker.silence_logging = true
     Delayed::Worker.reset
     expect(Delayed::Worker.sleep_delay).to eq Delayed::Worker::DEFAULT_SLEEP_DELAY
     expect(Delayed::Worker.queues).to eq []
     expect(Delayed::Worker.shutdown_timeout).to be_nil
-    expect(Delayed::Worker.silence_polling).to be false
+    expect(Delayed::Worker.silence_logging).to be false
   end
 
   it 'leaves settings it never had a default for alone' do

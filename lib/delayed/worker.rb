@@ -56,7 +56,7 @@ module Delayed
 
     # Silences the backend's query log while polling and refreshing locks, so
     # idle workers don't log a query every sleep_delay. Job queries still log.
-    cattr_accessor :silence_polling
+    cattr_accessor :silence_logging
 
     # Seconds to wait for running jobs on shutdown before raising
     # ShutdownInterrupt in them. nil (default) waits indefinitely.
@@ -102,7 +102,7 @@ module Delayed
       self.lock_heartbeat_interval = DEFAULT_LOCK_HEARTBEAT_INTERVAL
       self.lock_timeout      = DEFAULT_LOCK_TIMEOUT
       self.on_thread_error   = nil
-      self.silence_polling   = false
+      self.silence_logging   = false
       self.count_shutdown_interrupts = false
       self.prefetch          = DEFAULT_PREFETCH
       self.prefetch_dynamic  = false
@@ -320,7 +320,7 @@ module Delayed
       @quiet = options.key?(:quiet) ? options[:quiet] : true
 
       [:min_priority, :max_priority, :sleep_delay, :read_ahead, :queues, :exit_on_complete, :shutdown_timeout,
-       :lock_heartbeat_interval, :lock_timeout, :silence_polling, :count_shutdown_interrupts,
+       :lock_heartbeat_interval, :lock_timeout, :silence_logging, :count_shutdown_interrupts,
        :prefetch, :prefetch_dynamic, :batch_reserve].each do |option|
         self.class.send("#{option}=", options[option]) if options.key?(option)
       end

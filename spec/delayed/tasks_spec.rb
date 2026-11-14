@@ -205,9 +205,9 @@ describe 'Rake tasks' do
     end
 
     %w[1 true].each do |value|
-      context "SILENCE_POLLING=#{value}" do
-        let(:env) { {'SILENCE_POLLING' => value} }
-        let(:exp_args) { {:quiet => false, :processes => 1, :silence_polling => true} }
+      context "SILENCE_LOGGING=#{value}" do
+        let(:env) { {'SILENCE_LOGGING' => value} }
+        let(:exp_args) { {:quiet => false, :processes => 1, :silence_logging => true} }
         it do
           expect_success
           run_task
@@ -236,8 +236,8 @@ describe 'Rake tasks' do
     end
 
     %w[0 false].each do |value|
-      context "SILENCE_POLLING=#{value}" do
-        let(:env) { {'SILENCE_POLLING' => value} }
+      context "SILENCE_LOGGING=#{value}" do
+        let(:env) { {'SILENCE_LOGGING' => value} }
         let(:exp_args) { {:quiet => false, :processes => 1} }
         it do
           expect_success

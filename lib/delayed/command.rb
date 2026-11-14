@@ -111,8 +111,8 @@ module Delayed
         opt.on('--count-shutdown-interrupts', 'Count a job interrupted by shutdown as a failed attempt (default: release it, attempts unchanged)') do
           @options[:count_shutdown_interrupts] = true
         end
-        opt.on('--silence-polling', "Don't log the database queries of polling for jobs and refreshing their locks") do
-          @options[:silence_polling] = true
+        opt.on('--silence-logging', "Don't log the database queries of polling for jobs and refreshing their locks") do
+          @options[:silence_logging] = true
         end
         opt.on('--sleep-delay N', 'Seconds to sleep when no jobs are found (default: 1)') do |n|
           @options[:sleep_delay] = parse(:sleep_delay, n)

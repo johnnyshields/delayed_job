@@ -320,15 +320,15 @@ describe Delayed::Command do
     end
   end
 
-  describe '--silence-polling arg' do
+  describe '--silence-logging arg' do
     context 'not set' do
       let(:options) { [] }
-      it { expect(output_options).not_to have_key(:silence_polling) }
+      it { expect(output_options).not_to have_key(:silence_logging) }
     end
 
     context 'set' do
-      let(:options) { %w[--silence-polling] }
-      it { expect(output_options[:silence_polling]).to be true }
+      let(:options) { %w[--silence-logging] }
+      it { expect(output_options[:silence_logging]).to be true }
     end
   end
 

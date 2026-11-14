@@ -691,10 +691,10 @@ module Delayed
       Worker.thread_error(error, :context => context, :dispatcher => name, :worker => worker_name)
     end
 
-    # Runs a polling query in the executor, silenced if Worker.silence_polling.
+    # Runs a polling query in the executor, silenced if Worker.silence_logging.
     def polling(&block)
-      return with_executor(&block) unless Worker.silence_polling
-      with_executor { Delayed::Job.silence_polling(&block) }
+      return with_executor(&block) unless Worker.silence_logging
+      with_executor { Delayed::Job.silence_logging(&block) }
     end
 
     # Signals, exits, and a re-raised worker thread crash: not failures.

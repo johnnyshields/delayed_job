@@ -80,7 +80,7 @@ module Delayed
         # Silences query logging for the block, on the calling thread only.
         # The default handles ActiveRecord::Base.logger; backends using
         # another logger (e.g. Mongo's) override it.
-        def silence_polling(&block)
+        def silence_logging(&block)
           logger = defined?(::ActiveRecord::Base) && ::ActiveRecord::Base.logger
           return yield unless logger.respond_to?(:silence)
           logger.silence(::Logger::WARN, &block)

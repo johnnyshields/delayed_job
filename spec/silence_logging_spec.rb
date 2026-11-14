@@ -1,9 +1,9 @@
 require 'helper'
 require_relative 'processes/helpers'
 
-# Delayed::Worker.silence_polling, on a real Active Record backend (an SQLite
+# Delayed::Worker.silence_logging, on a real Active Record backend (an SQLite
 # file) logging its SQL.
-describe 'Delayed::Worker.silence_polling' do
+describe 'Delayed::Worker.silence_logging' do
   include ProcessHelpers
 
   let(:job_class) { Delayed::Backend::SqliteFile::Job }
@@ -48,15 +48,15 @@ describe 'Delayed::Worker.silence_polling' do
   end
 
   it 'is off by default, and reset by Worker.reset' do
-    expect(Delayed::Worker.silence_polling).to be false
-    Delayed::Worker.silence_polling = true
+    expect(Delayed::Worker.silence_logging).to be false
+    Delayed::Worker.silence_logging = true
     Delayed::Worker.reset
-    expect(Delayed::Worker.silence_polling).to be false
+    expect(Delayed::Worker.silence_logging).to be false
   end
 
   it 'is set by Worker.new options' do
-    Delayed::Worker.new(:silence_polling => true)
-    expect(Delayed::Worker.silence_polling).to be true
+    Delayed::Worker.new(:silence_logging => true)
+    expect(Delayed::Worker.silence_logging).to be true
   end
 
   context 'when off' do
@@ -78,7 +78,7 @@ describe 'Delayed::Worker.silence_polling' do
   end
 
   context 'when on' do
-    before { Delayed::Worker.silence_polling = true }
+    before { Delayed::Worker.silence_logging = true }
 
     it 'does not log the queries of an idle poll' do
       run_to_completion(Delayed::Dispatcher.new(:threads => 2))
@@ -139,9 +139,9 @@ describe 'Delayed::Worker.silence_polling' do
     end
   end
 
-  describe 'Delayed::Job.silence_polling (the default backend hook)' do
+  describe 'Delayed::Job.silence_logging (the default backend hook)' do
     it 'silences ActiveRecord::Base.logger below WARN in the block' do
-      job_class.silence_polling do
+      job_class.silence_logging do
         ActiveRecord::Base.logger.info('quiet')
         ActiveRecord::Base.logger.warn('loud')
       end
@@ -150,12 +150,12 @@ describe 'Delayed::Worker.silence_polling' do
     end
 
     it 'returns the result of the block' do
-      expect(job_class.silence_polling { 42 }).to eq 42
+      expect(job_class.silence_logging { 42 }).to eq 42
     end
 
     it 'leaves other threads logging' do
       other = nil
-      job_class.silence_polling do
+      job_class.silence_logging do
         other = Thread.new { ActiveRecord::Base.logger.info('other thread') }
         other.join
       end
@@ -164,26 +164,26 @@ describe 'Delayed::Worker.silence_polling' do
 
     it 'just yields without an Active Record logger' do
       ActiveRecord::Base.logger = nil
-      expect(job_class.silence_polling { :ran }).to eq :ran
+      expect(job_class.silence_logging { :ran }).to eq :ran
     end
 
     it 'just yields with a logger that cannot silence' do
       ActiveRecord::Base.logger = Logger.new(sql_log)
-      expect(job_class.silence_polling { :ran }).to eq :ran
+      expect(job_class.silence_logging { :ran }).to eq :ran
     end
 
     it 'just yields without Active Record' do
       hide_const('ActiveRecord::Base')
-      expect(Delayed::Backend::Test::Job.silence_polling { :ran }).to eq :ran
+      expect(Delayed::Backend::Test::Job.silence_logging { :ran }).to eq :ran
     end
 
     it 'can be overridden by backends' do
       calls = []
-      allow(job_class).to receive(:silence_polling) { |&block|
+      allow(job_class).to receive(:silence_logging) { |&block|
         calls << :silenced
         block.call
       }
-      Delayed::Worker.silence_polling = true
+      Delayed::Worker.silence_logging = true
       run_to_completion(Delayed::Dispatcher.new(:threads => 1))
       expect(calls).not_to be_empty
     end
