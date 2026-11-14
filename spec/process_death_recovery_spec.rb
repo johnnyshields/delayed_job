@@ -331,14 +331,14 @@ describe 'Recovering the jobs of a dead worker process' do
 
       it 'recovers the jobs of a crashed worker, then replaces it' do
         reap(crashed)
-        expect(launcher).to receive(:recover_jobs_of_worker).with('delayed_job.1', 99, options, crashed).ordered
+        expect(launcher).to receive(:recover_jobs_of_worker).with('delayed_job.1', 99, options, crashed, :promoted => false).ordered
         expect(launcher).to receive(:add_worker).with(options, :replaces_pid => 99, :delay => 0).ordered
         launcher.send(:run_loop)
       end
 
       it 'recovers the jobs of a SIGKILLed worker, then replaces it' do
         reap(killed)
-        expect(launcher).to receive(:recover_jobs_of_worker).with('delayed_job.1', 99, options, killed).ordered
+        expect(launcher).to receive(:recover_jobs_of_worker).with('delayed_job.1', 99, options, killed, :promoted => false).ordered
         expect(launcher).to receive(:add_worker).with(options, :replaces_pid => 99, :delay => 0).ordered
         expect(launcher).not_to receive(:shutdown)
         launcher.send(:run_loop)

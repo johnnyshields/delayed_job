@@ -40,9 +40,12 @@ describe 'A worker process dying while running jobs', :processes do
       job = enqueue_process_job(ProcessJobs::ExitJob.new('exit', 3))
       pid, reader = spawn_launcher(:processes => 1, :pools => [[[], 1]], :worker => worker_settings)
       wait_for { reload_job(job).attempts == 1 }
-      sleep 1 # let the replacement worker start
+      # The replacement comes after a 1s back-off (it died at once).
+      output = +''
+      wait_for { (output << read_available(reader)) =~ /Child process delayed_job\.1 \(pid \d+\) started/ }
       Process.kill('TERM', -pid) # the process group, as a terminal or init system does
-      status, output = wait_for_launcher(pid, reader)
+      status, rest = wait_for_launcher(pid, reader)
+      output << rest
 
       expect(status).to be_success
       expect(output).to match(/Child process delayed_job\.0 \(pid \d+\) exited: pid \d+ exit 3/)

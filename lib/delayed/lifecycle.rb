@@ -6,6 +6,7 @@ module Delayed
       :enqueue => [:job],
       :execute => [:worker],
       :loop => [:dispatcher],
+      :mold => [:pid, :generation],
       :perform => [:worker, :job],
       :error => [:worker, :job],
       :failure => [:worker, :job],

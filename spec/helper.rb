@@ -38,6 +38,10 @@ ENV['RAILS_ENV'] = 'test'
 
 # Trigger AR to initialize
 ActiveRecord::Base # rubocop:disable Lint/Void
+# Load Active Record up front, as Rails does in production: specs use it from
+# several threads, and TruffleRuby can let one thread see a class another is
+# still autoloading (e.g. ActiveRecord::PredicateBuilder, without #initialize).
+ActiveRecord.eager_load!
 
 module Rails
   def self.root

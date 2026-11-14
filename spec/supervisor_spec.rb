@@ -99,9 +99,10 @@ describe 'Worker processes whose parent goes away' do
         expect(took).to be >= 0.19 # Never polls early.
         expect(took).to be < 2
         expect(timeouts.first).to be_within(0.05).of(0.2) # The whole delay at once,
-        # though a wait can wake a little early (JRuby), and waits out the rest.
-        expect(timeouts.size).to be <= 3
-        expect(timeouts.drop(1)).to all(be < 0.05)
+        # though a wait can wake early (JRuby, several times): each later wait
+        # is only for what remains.
+        expect(timeouts.each_cons(2)).to all(satisfy { |earlier, later| later < earlier })
+        expect(timeouts.drop(1)).to all(be < 0.2)
       end
 
       it 'waits for an event (no timeout) while workers are busy, when not supervised' do
@@ -247,9 +248,9 @@ describe 'Worker processes whose parent goes away' do
       end
 
       it 'polls every sleep_delay when supervised, not every SUPERVISOR_CHECK_INTERVAL' do
-        # At 0, 0.4 and 0.8s: at most 3, however slow the machine (one poll
-        # per check interval would be about 20).
-        expect(polls_in(1.0, :supervisor_pid => Process.ppid)).to be_between(1, 3)
+        # At 0, 0.4 and 0.8s, plus one as it stops on a slow machine
+        # (TruffleRuby): one poll per check interval would be about 20.
+        expect(polls_in(1.0, :supervisor_pid => Process.ppid)).to be_between(1, 4)
       end
 
       it 'polls no more often when supervised than when not' do

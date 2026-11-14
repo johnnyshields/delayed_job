@@ -27,6 +27,7 @@ module Delayed
     DEFAULT_LOCK_TIMEOUT = 5.minutes
     DEFAULT_PREFETCH = 0
     MAX_PREFETCH = 20
+    DEFAULT_MOLD_THRESHOLD = 1000
 
     cattr_accessor :min_priority, :max_priority, :max_attempts, :max_run_time,
                    :default_priority, :sleep_delay, :logger, :delay_jobs, :queues,
@@ -43,6 +44,13 @@ module Delayed
     # that implement one (Job.reserve_batch; e.g. delayed_job_mongoid).
     # Default false: one reservation per thread.
     cattr_accessor :batch_reserve
+
+    # Mold process (experimental; forking launcher only): once a child process
+    # has performed this many jobs, it becomes a mold that every child process
+    # is then reforked from, sharing its warmed memory copy-on-write. An array
+    # gives successive thresholds; true means [DEFAULT_MOLD_THRESHOLD]. After
+    # the last one, SIGURG to the parent promotes a new mold. nil: off.
+    cattr_accessor :mold
 
     # Called with errors outside job execution (reservation, heartbeats,
     # thread crashes, failure hooks, job recovery); job errors go to the
@@ -107,6 +115,7 @@ module Delayed
       self.prefetch          = DEFAULT_PREFETCH
       self.prefetch_dynamic  = false
       self.batch_reserve     = false
+      self.mold              = nil
       self.exit_on_complete  = nil
       self.min_priority      = nil
       self.max_priority      = nil
@@ -214,6 +223,30 @@ module Delayed
       raise ArgumentError, "prefetch must be a whole number from 0 to #{MAX_PREFETCH} (got #{value.inspect})"
     end
 
+    # Call from a job (or library code) that leaves this process unsafe to
+    # fork, e.g. a background thread holding a lock in native code: with
+    # Worker.mold, this child process is then never promoted to mold.
+    def self.no_longer_fork_safe!
+      @fork_unsafe = true
+    end
+
+    def self.fork_safe?
+      !@fork_unsafe
+    end
+
+    # The mold thresholds (job counts), or nil when off.
+    def self.mold_thresholds(value = mold)
+      return if value.nil? || value == false
+      return [DEFAULT_MOLD_THRESHOLD] if value == true
+      Array(value)
+    end
+
+    def self.validate_mold!(value = mold)
+      thresholds = mold_thresholds(value)
+      return if thresholds.nil? || (thresholds.any? && thresholds.all? { |n| n.is_a?(Integer) && n > 0 })
+      raise ArgumentError, "mold must be true or job counts greater than 0 (got #{value.inspect})"
+    end
+
     # Counts a failed attempt (raising `error`) for each job a dead process
     # held, so a job that keeps killing its worker eventually fails. Backends
     # without Job.locked_jobs only get locks cleared. Returns the count.
@@ -293,6 +326,7 @@ module Delayed
     def self.validate_settings!(options = {})
       setting = ->(name) { options.key?(name) ? options[name] : send(name) }
       validate_prefetch!(setting.call(:prefetch))
+      validate_mold!(setting.call(:mold))
       validate_lock_heartbeats!(setting.call(:lock_heartbeat_interval), setting.call(:lock_timeout))
     end
 
@@ -321,7 +355,7 @@ module Delayed
 
       [:min_priority, :max_priority, :sleep_delay, :read_ahead, :queues, :exit_on_complete, :shutdown_timeout,
        :lock_heartbeat_interval, :lock_timeout, :silence_logging, :count_shutdown_interrupts,
-       :prefetch, :prefetch_dynamic, :batch_reserve].each do |option|
+       :prefetch, :prefetch_dynamic, :batch_reserve, :mold].each do |option|
         self.class.send("#{option}=", options[option]) if options.key?(option)
       end
 

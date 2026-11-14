@@ -11,6 +11,20 @@ supervisor (systemd / Kubernetes / ...)
          └─ heartbeat thread   with --lock-heartbeat
 ```
 
+With `--mold` (experimental), a child process is promoted to a mold that forks
+the child processes from then on (see the README, Mold process). On Linux the
+launcher is a child subreaper, so the mold, and children it leaves behind,
+are reparented to it:
+
+```
+launcher (parent)
+ ├─ mold                       runs no jobs; forks children, reports their exits
+ └─ child process × N          forked by the mold
+```
+
+Leave headroom for a refork: up to N + 10% children plus two molds run at
+once. Read the README's Fork safety section before enabling it.
+
 Concurrency is processes × threads. Nothing restarts the launcher itself:
 run it under a supervisor.
 
@@ -37,7 +51,9 @@ or stops them if they're orphaned.
   with lock heartbeats. A warning is logged if it is too small.
 - **Memory**: each process holds its own copy of the app; the parent eager
   loads and compacts the heap before forking, so much of it is shared
-  copy-on-write.
+  copy-on-write. Children diverge as they warm up; `--mold` reforks them from
+  a warmed child to share memory again. Measure it: sum `Pss` from
+  `/proc/<pid>/smaps_rollup` across the children before and after a refork.
 - **Queues**: all threads of a process work the same queues. Use pools to give
   queues their own processes: `--pool=mailers:2 --pool=*:4` or
   `POOLS='mailers:2|*:4'`.
@@ -50,6 +66,7 @@ or stops them if they're orphaned.
 | Threads per process | `-t`, `--threads` | `NUM_THREADS` | 1 |
 | Jobs queued per thread (prefetch) | `--prefetch`, `--prefetch-dynamic` | `PREFETCH`, `PREFETCH_DYNAMIC=1` | 0, off |
 | Batch reservation (backend support) | `--batch-reserve` | `BATCH_RESERVE=1` | off |
+| Mold process (experimental) | `--mold[=JOBS,...]` | `MOLD=1000,...` or `MOLD=true` | off |
 | Queues / pools | `--queues`, `--pool` | `QUEUES`, `POOLS` | all |
 | Idle poll interval (s) | `--sleep-delay` | `SLEEP_DELAY` | 1 |
 | Shutdown timeout (s) | `--shutdown-timeout` | `SHUTDOWN_TIMEOUT` | none (wait) |

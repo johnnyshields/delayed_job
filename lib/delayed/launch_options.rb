@@ -39,6 +39,15 @@ module Delayed
       raise ArgumentError, "#{name} #{requirement}"
     end
 
+    # One threshold of --mold / MOLD.
+    def self.parse_mold(text, name)
+      value = Integer(text.to_s.strip, 10)
+      raise ArgumentError unless value > 0
+      value
+    rescue ArgumentError, TypeError
+      raise ArgumentError, "#{name} must be job counts greater than 0"
+    end
+
     # Re-checks RULES (for options not set via .parse) and cross-option
     # constraints. `names` is CLI_NAMES or ENV_NAMES.
     def self.validate!(options, names)

@@ -999,7 +999,8 @@ shared_examples_for 'a delayed_job backend running a dispatcher' do
     dj_wait_until { dj_locked.size == 1 }
     queued = jobs.map { |job| dj_reloaded(job) }.reject(&:locked_by)
     expect(queued.map { |job| [job.attempts, job.locked_at] }).to eq [[0, nil], [0, nil]]
-    expect(dj_events.map { |payload| payload[:reason] }).to include 'shutdown'
+    # Published once the locks are cleared.
+    dj_wait_until { dj_events.map { |payload| payload[:reason] }.include?('shutdown') }
     GateJob.release = true
     Timeout.timeout(10) { thread.join }
     expect(described_class.count).to eq 2
