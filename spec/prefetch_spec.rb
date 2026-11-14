@@ -599,7 +599,7 @@ describe 'Prefetching jobs (Worker.prefetch)' do
   end
 
   describe 'a queued job whose lock expires, with lock heartbeats' do
-    let(:heartbeat_thread) { Thread.new { sleep } }
+    let(:heartbeat_thread) { Thread.new { sleep }.tap { |t| t.report_on_exception = false } } # Killed after.
 
     before do
       Delayed::Worker.prefetch = 1

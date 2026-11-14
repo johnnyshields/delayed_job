@@ -138,6 +138,7 @@ module Delayed
       # QUIT can't be trapped everywhere: the JVM (JRuby) reserves it for
       # thread dumps. Without it, TERM and INT still stop the workers.
       def trap_quit_signal
+        Delayed.check_trappable!('QUIT')
         Signal.trap('QUIT') do
           next child_signal('QUIT') if forked_child?
           Thread.new { logger.info('Received SIGQUIT. Interrupting running jobs...') }
@@ -255,6 +256,7 @@ module Delayed
           # A signal can arrive twice: sent to the process group, and
           # forwarded by the parent.
           begin
+            Delayed.check_trappable!(signal)
             Signal.trap(signal) { pending << signal unless pending.include?(signal) }
           rescue ArgumentError
             nil # Can't be trapped here (QUIT on the JVM); the dispatcher warns.

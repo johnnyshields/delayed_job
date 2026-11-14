@@ -1,5 +1,5 @@
 # Stubs Delayed Job's logging (#say) on dispatchers and workers, in specs.
-module LogHelpers
+module LogHelper
   # Collects what each speaker (a dispatcher or worker) says into `into`,
   # as [level, text]. `into` should be a Concurrent::Array: worker threads
   # append to it.

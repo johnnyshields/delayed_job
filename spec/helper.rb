@@ -100,9 +100,9 @@ require 'concurrent/array'
 Dir[File.join(__dir__, 'helpers', '*.rb')].sort.each { |file| require file }
 
 RSpec.configure do |config|
-  config.include LogHelpers
-  config.include ThreadHelpers
-  config.include EventHelpers
+  config.include LogHelper
+  config.include ThreadHelper
+  config.include EventHelper
 
   # Each example starts with no job in the test backend: one left behind by
   # an earlier example (e.g. a job that never got to run) would otherwise be

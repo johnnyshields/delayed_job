@@ -128,21 +128,29 @@ describe Delayed::Pidfile do
     end
 
     it 'lets only one of several processes starting at once run' do
+      done = "#{path}.done"
       started = Array.new(4) do
         spawn_ruby(<<-RUBY)
           begin
             pidfile = Delayed::Pidfile.new(ARGV[0]).setup
             stat = pidfile.instance_variable_get(:@file).stat
-            print "ok pid=\#{Process.pid} ino=\#{stat.ino} at=\#{Process.clock_gettime(Process::CLOCK_REALTIME)}"
+            puts "ok pid=\#{Process.pid} ino=\#{stat.ino} at=\#{Process.clock_gettime(Process::CLOCK_REALTIME)}"
             STDOUT.flush
-            sleep 2 # Keep running while the others start.
+            # Holds it until every process has tried: they may start seconds
+            # apart (JRuby).
+            deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 60
+            sleep 0.05 until File.exist?(#{done.inspect}) || Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
           rescue Delayed::AlreadyRunningError => e
-            print "running (\#{e.pid.inspect})"
+            puts "running (\#{e.pid.inspect})"
           end
         RUBY
       end
-      results = started.map { |_, reader| reader.read.tap { reader.close } }
-      started.each { |pid, _| Process.wait(pid) }
+      results = started.map { |_, reader| Timeout.timeout(60) { reader.gets.to_s.chomp } }
+      FileUtils.touch(done)
+      started.each do |pid, reader|
+        Process.wait(pid)
+        reader.close
+      end
       expect(results.map { |r| r.split.first }.sort).to eq(%w[ok running running running]), results.join("\n")
     end
   end

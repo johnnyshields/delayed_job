@@ -296,6 +296,7 @@ module Delayed
     # thread dumps. Without it, TERM and INT still stop the dispatcher.
     def trap_quit
       return unless Signal.list.key?('QUIT')
+      Delayed.check_trappable!('QUIT')
       trap('QUIT') do
         Thread.new { say 'Received SIGQUIT: interrupting running jobs and exiting...' }
         quit

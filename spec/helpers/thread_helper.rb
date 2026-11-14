@@ -1,5 +1,5 @@
 # Runs dispatchers in specs, and waits for conditions.
-module ThreadHelpers
+module ThreadHelper
   # Waits until the block returns true; raises Timeout::Error after
   # `timeout` seconds.
   def wait_until(timeout = 5)

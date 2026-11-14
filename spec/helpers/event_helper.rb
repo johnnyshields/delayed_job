@@ -1,5 +1,5 @@
 # Subscribes to Delayed Job's events in specs, unsubscribing after the example.
-module EventHelpers
+module EventHelper
   # Subscribes the block to `<name>.delayed_job` (or a Regexp of full names).
   def subscribe(name, &block)
     pattern = name.is_a?(Regexp) ? name : "#{name}.delayed_job"
