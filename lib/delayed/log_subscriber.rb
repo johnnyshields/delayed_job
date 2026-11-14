@@ -92,6 +92,16 @@ module Delayed
       log(:info) { "Mold (pid #{p[:pid]}) refork completed, generation #{p[:generation]}" }
     end
 
+    def mold_lost(event)
+      p = event.payload
+      log(:warn) { "Mold (pid #{p[:pid]}) lost (#{p[:reason]}), generation #{p[:generation]}; promoting a new mold in #{p[:retry_in]}s" }
+    end
+
+    def mold_promotion_failed(event)
+      p = event.payload
+      log(:warn) { "Promotion of child process (pid #{p[:pid]}) to mold failed (#{p[:reason]}); retrying in #{p[:retry_in]}s" }
+    end
+
     def mold_retired(event)
       log(:info) { "Mold (pid #{event.payload[:pid]}) retired" }
     end

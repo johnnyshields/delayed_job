@@ -19,7 +19,9 @@ below to find out why.
 | Job ran twice (lock taken over) | The later run's outcome is kept | `job_lock_lost` |
 | Job fails | Retried with back-off; fails permanently after `max_attempts` | `job_attempt_failed`, `job_failed` |
 | Shutdown overran | Running jobs interrupted and released | `jobs_interrupted`, `jobs_released` |
-| Fork fails | Retried with back-off | `thread_error` (`Forking`) |
+| Fork fails | Retried with back-off | `thread_error` (`Forking`; `Mold forking` when a mold failed and the parent forked it instead) |
+| Mold lost (died, e.g. OOM-killed; broken; hung) | Its child processes carry on (with a subreaper); the parent forks new ones itself, and a new mold is promoted with back-off | `mold_lost` |
+| Mold promotion failing | Retried with back-off doubling per failure in a row | `mold_promotion_failed` |
 
 ## Errors outside jobs
 
@@ -32,7 +34,7 @@ end
 
 `info[:context]` is one of `Reservation`, `Lock heartbeat`, `Worker thread`,
 `Dispatcher`, `Failure hook`, `Recovering jobs`, `Releasing interrupted jobs`,
-`Forking`. Report job errors through an `:error` lifecycle callback or the
+`Forking`, and with `--mold`, `Mold forking` and `Mold supervisor`. Report job errors through an `:error` lifecycle callback or the
 `job_attempt_failed` event.
 
 ## Events
@@ -50,9 +52,11 @@ they describe and carry `:exception` when it raised.
 | `process_spawned` | The forking parent (or its mold) forked a worker process | Launcher (parent) | `:worker`, `:pid`, `:replaces_pid` (pid of the process it replaces, or nil), `:delay` (seconds waited before forking it), `:mold_pid` (when a mold forked it), `:generation` (with a mold) |
 | `process_exited` | A forked worker process exited | Launcher (parent) | `:worker`, `:pid`, `:status` (`Process::Status`, or `Delayed::ReportedStatus` as reported by a mold; both unknown if the mold died first), `:uptime` (seconds), `:respawn_in` (seconds until it is replaced: 0 at once, more after quick deaths; nil when not replaced, or when promoted to mold: replaced once its mold is ready) |
 | `mold_promoted` | A worker process is promoted to mold (see README, Mold process) | Launcher (parent) | `:worker`, `:pid`, `:jobs` (performed), `:trigger` (`:threshold`, `:signal`, or `:mold_lost` when replacing a mold that died) |
-| `mold_activated` | A mold is ready; worker processes are reforked from it | Launcher (parent) | `:pid`, `:generation` (1 for the first mold), `:pss_mb` (total PSS of the processes, Linux) |
+| `mold_activated` | A mold is ready; worker processes are reforked from it | Launcher (parent) | `:pid`, `:generation` (1 for the first mold), `:pss_mb` (total PSS of the processes, Linux), `:subreaper` (false: a mold's child processes stop if it dies) |
 | `mold_refork_completed` | Every worker process is reforked from the active mold | Launcher (parent) | `:pid`, `:generation`, `:pss_mb`, `:pss_mb_before` (at activation) |
 | `mold_retired` | The previous mold stops forking (and exits) | Launcher (parent) | `:pid` |
+| `mold_lost` | The active mold died, was broken (child processes it forked kept failing to start) or hung | Launcher (parent) | `:pid`, `:generation`, `:reason` (`:exited`, `:broken`, `:hung`), `:retry_in` (seconds until a new mold is promoted) |
+| `mold_promotion_failed` | A promotion produced no mold | Launcher (parent) | `:pid` (promoted child), `:mold_pid` (if one was forked), `:trigger`, `:reason` (`:child_exited`, `:mold_exited`, `:timeout`), `:retry_in` |
 | `jobs_reserved` ⏱ | A poll for jobs (one query, or one per free slot) | Dispatcher thread | `:dispatcher`, `:requested` (free slots: idle threads, plus queue slots with prefetch), `:depth` (prefetch queue depth), `:reserved` |
 | `job_performed` ⏱ | A job ran (successfully or not) | Worker thread | `:job`, `:worker`, `:success` (absent when interrupted: see `:exception`) |
 | `job_attempt_failed` | A job raised; it is rescheduled or, after `max_attempts`, failed | Worker thread (launcher for a dead process' jobs) | `:job`, `:worker`, `:error`, `:attempts` (including this one) |
@@ -132,7 +136,8 @@ behind them. The database can't tell the two apart; the number running is the
 | Queue stalled | `oldest_waiting_seconds` above your latency target, per queue |
 | No workers | No launcher process, or no `job_performed`/`jobs_reserved` events for 5 minutes while the backlog is > 0 |
 | Crash loop | `process_exited` with `respawn_in > 0` for 10 minutes |
-| Infrastructure | Any `thread_error` with context `Reservation`, `Lock heartbeat`, `Forking` or `Recovering jobs` |
+| Infrastructure | Any `thread_error` with context `Reservation`, `Lock heartbeat`, `Forking`, `Mold forking`, `Mold supervisor` or `Recovering jobs` |
+| Mold unhealthy | `mold_lost` or `mold_promotion_failed` more than 3 times an hour (check fork safety and memory limits; see the README) |
 | Stuck jobs | Any `job_stuck`, or `stale_locks > 0` |
 | Duplicate runs | Any `job_lock_lost` (raise `LOCK_TIMEOUT`) |
 | Failures | Rise in the `job_failed` rate or the `failed` count |

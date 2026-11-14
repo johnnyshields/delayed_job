@@ -120,6 +120,7 @@ describe 'Mold process', :processes do
 
     expect(status).to be_success
     expect(output).to match(/promoted to mold after \d+ job\(s\) \(mold_lost\)/)
+    expect(output).to match(/Mold \(pid #{mold_pid}\) lost \(exited\), generation 1; promoting a new mold in [\d.]+s/)
     expect(ProcessHelpers::Job.where.not(:locked_by => nil).count).to eq 0
     expect(ProcessHelpers::Run.group(:key).count.values).to all(eq 1)
   end

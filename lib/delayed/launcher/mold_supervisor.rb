@@ -266,7 +266,7 @@ module Delayed
       def promoted_exited(pid, status, options)
         current = @promotion && @promotion[:pid] == pid
         unless status.success?
-          promotion_failed("Child process (pid #{pid}) promoted to mold exited with #{status}, forking no mold") if current
+          promotion_failed(:child_exited, "Child process (pid #{pid}) promoted to mold exited with #{status}, forking no mold") if current
           return false
         end
         @promotion[:exited_at] = monotonic_now if current
@@ -314,7 +314,8 @@ module Delayed
         @generation += 1
         @pss_before = total_pss_mb
         logger.info "Mold (pid #{mold_pid}) ready; reforking child processes from it (generation #{@generation}#{pss_note(@pss_before)})"
-        Delayed.instrument(:mold_activated, :pid => mold_pid, :generation => @generation, :pss_mb => @pss_before)
+        Delayed.instrument(:mold_activated, :pid => mold_pid, :generation => @generation, :pss_mb => @pss_before,
+                                            :subreaper => @reaps_orphans)
       end
 
       def retire(mold_pid)
@@ -324,23 +325,29 @@ module Delayed
         signal(mold_pid, 'URG')
       end
 
-      def promotion_failed(reason)
-        trigger = @promotion[:trigger]
-        mold = @promotion[:mold_pid]
+      # `reason`: :child_exited (the promoted child forked no mold), :mold_exited
+      # (before it was ready) or :timeout.
+      def promotion_failed(reason, message)
+        promotion = @promotion
         @promotion = nil
+        mold = promotion[:mold_pid]
         abandon(mold) if mold && @molds[mold] == :promoted
-        retry_promotion(trigger, reason)
+        delay = retry_promotion(promotion[:trigger], message)
+        Delayed.instrument(:mold_promotion_failed, :pid => promotion[:pid], :mold_pid => mold, :trigger => promotion[:trigger],
+                                                   :reason => reason, :retry_in => delay)
         refill_deferred_slots
       end
 
       # Back-off doubling per failure in a row. A threshold promotion is
       # retried by the next ping past it; others are retried as such.
-      def retry_promotion(trigger, reason)
+      # Returns the delay in seconds.
+      def retry_promotion(trigger, message)
         @failures += 1
         delay = [retry_delay_unit * 2**(@failures - 1), MAX_RETRY_DELAY].min
         @hold_until = monotonic_now + delay
         @retry_trigger = trigger unless trigger == :threshold
-        logger.warn "#{reason}; promoting a new mold in #{delay}s"
+        logger.warn "#{message}; promoting a new mold in #{delay}s"
+        delay
       end
 
       def mold_forked_child(mold_pid, pid, index)
@@ -357,6 +364,8 @@ module Delayed
         entry = @pending_forks.delete(index)
         return unless entry
         logger.warn "Mold (pid #{mold_pid}) could not fork child process #{index} (errno #{errno}); forking it from the parent"
+        error = SystemCallError.new("mold (pid #{mold_pid}) could not fork child process #{index}", errno.to_i)
+        Delayed::Worker.thread_error(error, :context => 'Mold forking', :worker => @launcher.child_name(index), :pid => mold_pid)
         count_boot_failure(nil)
         @launcher.start_child_safely(index, entry[:options], entry[:spawn])
       end
@@ -377,24 +386,26 @@ module Delayed
         role = @molds.delete(pid)
         @children.each_value { |info| info.orphaned = true if info.mold_pid == pid } unless @reaps_orphans
         case role
-        when :active then lose_active_mold(pid, 'exited')
+        when :active then lose_active_mold(pid, :exited, 'exited')
         when :promoted then promoted_mold_exited(pid)
         when :retired then logger.info "Retired mold (pid #{pid}) exited"
         end
       end
 
       def promoted_mold_exited(pid)
-        promotion_failed("Mold (pid #{pid}) exited before it was ready") if @promotion && @promotion[:mold_pid] == pid
+        promotion_failed(:mold_exited, "Mold (pid #{pid}) exited before it was ready") if @promotion && @promotion[:mold_pid] == pid
       end
 
       # Pending forks are forked here, and another promotion replaces it.
-      def lose_active_mold(pid, reason)
+      # `reason`: :exited (died, e.g. OOM-killed), :broken or :hung.
+      def lose_active_mold(pid, reason, message)
         @active_mold = nil
         abort_refork
         return fork_pending_from_parent if @launcher.stopped?
-        logger.warn "Mold (pid #{pid}) #{reason}; forking child processes from the parent until a new mold is ready"
+        logger.warn "Mold (pid #{pid}) #{message}; forking child processes from the parent until a new mold is ready"
         fork_pending_from_parent
-        retry_promotion(:mold_lost, "Lost mold (pid #{pid})")
+        delay = retry_promotion(:mold_lost, "Lost mold (pid #{pid})")
+        Delayed.instrument(:mold_lost, :pid => pid, :generation => @generation, :reason => reason, :retry_in => delay)
       end
 
       def fork_pending_from_parent
@@ -433,7 +444,7 @@ module Delayed
                      "#{" (last: pid #{pid})" if pid}; stopping it"
         @boot_failures = 0
         abandon(mold)
-        lose_active_mold(mold, 'is broken')
+        lose_active_mold(mold, :broken, 'is broken')
       end
 
       # Without a subreaper, children of a dead mold stop by themselves
@@ -459,7 +470,7 @@ module Delayed
         return if monotonic_now - oldest < MOLD_FORK_TIMEOUT
         mold = @active_mold
         abandon(mold)
-        lose_active_mold(mold, "did not fork a child process within #{MOLD_FORK_TIMEOUT}s; killed it")
+        lose_active_mold(mold, :hung, "did not fork a child process within #{MOLD_FORK_TIMEOUT}s; killed it")
       end
 
       def check_boot_timeouts
@@ -475,7 +486,7 @@ module Delayed
         return unless @promotion
         return refill_draining_slot if draining_too_long?
         return unless promotion_overdue?
-        promotion_failed("Child process (pid #{@promotion[:pid]}) promoted to mold, but no mold became ready")
+        promotion_failed(:timeout, "Child process (pid #{@promotion[:pid]}) promoted to mold, but no mold became ready")
       end
 
       def draining_too_long?

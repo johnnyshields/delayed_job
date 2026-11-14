@@ -442,6 +442,130 @@ describe 'Mold process (Worker.mold)' do
       expect(signals).to include ['KILL', 900]
     end
 
+    describe 'failure events' do
+      let(:events) { [] }
+
+      around do |example|
+        subscriber = ActiveSupport::Notifications.subscribe(/\Amold_|\Athread_error/) { |name, *, payload| events << [name.split('.').first, payload] }
+        example.run
+      ensure
+        ActiveSupport::Notifications.unsubscribe(subscriber)
+      end
+
+      def payloads(name)
+        events.select { |event, _| event == name }.map(&:last)
+      end
+
+      def activate_mold(pid = 900)
+        boot(10)
+        boot(11)
+        supervisor.send(:handle_status, 'p', 10, 6, 0, 0)
+        supervisor.send(:handle_status, 'M', 10, pid)
+        supervisor.send(:handle_status, 'm', pid, 10)
+      end
+
+      it 'publishes mold_activated with whether the parent is a subreaper' do
+        activate_mold
+        expect(payloads('mold_activated').first).to include(:pid => 900, :generation => 1, :subreaper => true)
+      end
+
+      it 'publishes mold_lost when the active mold exits' do
+        activate_mold
+        supervisor.reaped(900)
+        expect(payloads('mold_lost')).to eq [{:pid => 900, :generation => 1, :reason => :exited, :retry_in => 10}]
+      end
+
+      it 'publishes mold_lost when the mold is broken' do
+        activate_mold
+        3.times { |i| supervisor.child_started(30 + i, :mold_pid => 900, :generation => 1) }
+        3.times { |i| supervisor.child_exited(30 + i, status(false), {}) }
+        expect(payloads('mold_lost').map { |p| p[:reason] }).to eq [:broken]
+      end
+
+      it 'publishes mold_lost when the mold hangs on a fork' do
+        stub_const("#{described_class}::MOLD_FORK_TIMEOUT", 0)
+        activate_mold
+        supervisor.request_fork(7, {}, {:generation => 1})
+        supervisor.send(:check_pending_forks)
+        expect(payloads('mold_lost').map { |p| p[:reason] }).to eq [:hung]
+        expect(signals).to include ['KILL', 900]
+      end
+
+      it "doesn't publish mold_lost for a mold exiting during shutdown" do
+        activate_mold
+        launcher.stopped = true
+        supervisor.reaped(900)
+        expect(payloads('mold_lost')).to be_empty
+      end
+
+      it 'publishes mold_promotion_failed when the promoted child forks no mold, with a growing retry delay' do
+        described_class.retry_delay_unit = 1
+        boot(10)
+        boot(11)
+        supervisor.send(:handle_status, 'p', 10, 6, 0, 0)
+        supervisor.child_exited(10, status(false), {})
+        supervisor.instance_variable_set(:@hold_until, nil)
+        supervisor.send(:handle_status, 'p', 11, 6, 0, 0)
+        supervisor.child_exited(11, status(false), {})
+        expect(payloads('mold_promotion_failed')).to eq [
+          {:pid => 10, :mold_pid => nil, :trigger => :threshold, :reason => :child_exited, :retry_in => 1},
+          {:pid => 11, :mold_pid => nil, :trigger => :threshold, :reason => :child_exited, :retry_in => 2}
+        ]
+      ensure
+        described_class.retry_delay_unit = 10
+      end
+
+      it 'publishes mold_promotion_failed when the mold exits before it is ready' do
+        boot(10)
+        boot(11)
+        supervisor.send(:handle_status, 'p', 10, 6, 0, 0)
+        supervisor.send(:handle_status, 'M', 10, 900)
+        supervisor.reaped(900)
+        expect(payloads('mold_promotion_failed').first).to include(:pid => 10, :mold_pid => 900, :reason => :mold_exited)
+      end
+
+      it 'publishes mold_promotion_failed when no mold becomes ready in time' do
+        stub_const("#{described_class}::PROMOTION_FORK_TIMEOUT", 0)
+        boot(10)
+        boot(11)
+        supervisor.send(:handle_status, 'p', 10, 6, 0, 0)
+        supervisor.child_exited(10, status(true), {})
+        supervisor.send(:check_promotion)
+        expect(payloads('mold_promotion_failed').first).to include(:pid => 10, :reason => :timeout)
+      end
+
+      it 'publishes thread_error (Mold forking) when the mold fails to fork a child' do
+        supervisor.instance_variable_get(:@pending_forks)[4] = {:options => {}, :spawn => {}, :at => 0}
+        supervisor.send(:handle_status, 'e', 900, 4, Errno::EAGAIN::Errno)
+        error = payloads('thread_error').first
+        expect(error).to include(:context => 'Mold forking', :worker => 'delayed_job.4', :pid => 900)
+        expect(error[:error]).to be_a(Errno::EAGAIN)
+      end
+    end
+
+    describe Delayed::LogSubscriber do
+      let(:lines) { [] }
+
+      before do
+        log = lines
+        logger = Object.new
+        %i(info warn error debug).each { |m| logger.define_singleton_method(m) { |*, &block| log << block.call } }
+        allow_any_instance_of(described_class).to receive(:logger).and_return(logger)
+      end
+
+      def event(payload)
+        instance_double(ActiveSupport::Notifications::Event, :payload => payload)
+      end
+
+      it 'logs mold failures' do
+        subscriber = described_class.new
+        subscriber.mold_lost(event(:pid => 900, :reason => :exited, :generation => 2, :retry_in => 10))
+        subscriber.mold_promotion_failed(event(:pid => 10, :reason => :timeout, :retry_in => 20))
+        expect(lines).to eq ['Mold (pid 900) lost (exited), generation 2; promoting a new mold in 10s',
+                             'Promotion of child process (pid 10) to mold failed (timeout); retrying in 20s']
+      end
+    end
+
     it 'ignores SIGURG during a promotion' do
       boot(10)
       boot(11)
