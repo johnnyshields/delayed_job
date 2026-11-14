@@ -29,15 +29,10 @@ module Delayed
           end
         end
 
-        # Reserve up to one job for each of the given workers, used by
-        # Delayed::Dispatcher to fill its idle threads. Returns an array
-        # of [worker, job] pairs, in the order of the given workers.
-        #
-        # Each job must be locked under the name of the worker it is paired
-        # with. The default implementation calls #reserve once per worker
-        # (so backend-specific reserve optimizations are kept) and stops at
-        # the first worker for which no job is available. Backends may
-        # override this with a single-query batch reservation.
+        # Reserves up to one job per worker; returns [worker, job] pairs in
+        # workers' order, each job locked under its paired worker's name.
+        # The default calls #reserve per worker and stops at the first miss;
+        # backends may override with a single query.
         def reserve_batch(workers, max_run_time = Worker.max_run_time)
           reserved = []
           workers.each do |worker|
@@ -47,67 +42,52 @@ module Delayed
           end
           reserved
         rescue StandardError => error
-          # Don't strand jobs that were already locked: return them, and
-          # report the error (it is raised again by the next reservation if
-          # it persists).
+          # Return the jobs already locked rather than strand them; a
+          # persistent error recurs on the next reservation.
           raise if reserved.empty?
           Delayed::Worker.thread_error(error, :context => 'Reservation')
           reserved
         end
 
-        # Whether reserve_batch may reserve fewer jobs than it was asked for
-        # while jobs are still available - e.g. because candidates it picked
-        # were reserved by other processes meanwhile. If so, Delayed::Dispatcher
-        # polls again at once after such a partial batch; otherwise a
-        # partial batch means the queue ran dry, and it waits sleep_delay.
-        # The default reserve_batch stops only when reserve finds no job.
+        # True if reserve_batch can return a partial batch while jobs remain
+        # (e.g. lost races to other processes); the Dispatcher then polls
+        # again at once instead of sleeping sleep_delay.
         def partial_batch_may_leave_jobs?
           false
         end
 
-        # Returns the jobs locked by the named worker, or nil if the backend
-        # can't list them. Backends implement this so that Delayed Job can
-        # recover the jobs of a worker process that died (see
-        # Delayed::Worker.recover_jobs_of); without it, those jobs' locks are
-        # only cleared.
+        # Jobs locked by the named worker, or nil if unsupported. Needed to
+        # recover a dead process's jobs (Worker.recover_jobs_of); without it
+        # their locks are only cleared.
         def locked_jobs(_worker_name)
           nil
         end
 
-        # The jobs locked by any of the named workers, or nil if the backend
-        # can't list them (see #locked_jobs). Used to recover every thread
-        # and slot of a dead worker process at once; backends may override
-        # it with a single query.
+        # Like #locked_jobs for several names; may be overridden with one query.
         def locked_jobs_of(worker_names)
           jobs = worker_names.map { |name| locked_jobs(name) }
           jobs.any?(&:nil?) ? nil : jobs.flatten(1)
         end
 
-        # Clears the locks of all the named workers (see #clear_locks!).
-        # Backends may override it with a single query.
+        # Like #clear_locks! for several names; may be overridden with one query.
         def clear_locks_of!(worker_names)
           worker_names.each { |name| clear_locks!(name) }
         end
 
-        # Whether the backend supports lock heartbeats (see
-        # Delayed::Worker.lock_heartbeat_interval): it implements
-        # touch_locks, and honours the max_run_time passed to reserve as the
-        # age after which a lock counts as abandoned.
+        # True if the backend implements #touch_locks and treats locks older
+        # than reserve's max_run_time as abandoned (Worker.lock_heartbeat_interval).
         def lock_heartbeats?
           false
         end
 
-        # Refreshes (sets locked_at to now) the locks held by the named
-        # workers. Returns the number of jobs touched.
+        # Sets locked_at to now on the named workers' jobs; returns the count.
         def touch_locks(_worker_names)
           raise NotImplementedError, "#{name} does not support lock heartbeats"
         end
 
-        # Runs the block with the backend's query logging silenced on the
-        # calling thread only (see Delayed::Worker.silence_polling).
-        # The default silences ActiveRecord::Base.logger below WARN, if it
-        # supports ActiveSupport's thread-local #silence. Backends logging
-        # through another logger (e.g. the Mongo driver's) override this.
+        # Silences query logging for the block, on the calling thread only.
+        # The default handles ActiveRecord::Base.logger; backends using
+        # another logger (e.g. Mongo's) override it.
         def silence_polling(&block)
           logger = defined?(::ActiveRecord::Base) && ::ActiveRecord::Base.logger
           return yield unless logger.respond_to?(:silence)
@@ -143,8 +123,7 @@ module Delayed
 
       ParseObjectFromYaml = %r{!ruby/\w+:([^\s]+)} # rubocop:disable Naming/ConstantName
 
-      # The payload's display_name or class name; for a payload that can't be
-      # loaded, the class named in the handler, if any.
+      # Falls back to the class named in the handler if the payload can't load.
       def name
         @name ||= payload_object.respond_to?(:display_name) ? payload_object.display_name : payload_object.class.name
       rescue DeserializationError
@@ -166,8 +145,7 @@ module Delayed
       def invoke_job
         Delayed::Worker.lifecycle.run_callbacks(:invoke_job, self) do
           hook :before
-          # Only the job's own code may be interrupted by a stopping
-          # dispatcher, not its hooks (see Delayed::Dispatcher#work).
+          # Hooks must not be interrupted, only perform.
           Delayed::Dispatcher.interruptible { payload_object.perform }
           hook :success
         rescue Exception => error # rubocop:disable Lint/RescueException
@@ -192,8 +170,7 @@ module Delayed
       rescue DeserializationError # rubocop:disable Lint/SuppressedException
       end
 
-      # A payload that can't be loaded gets the default back-off and
-      # max_attempts (e.g. when a dead worker's jobs are recovered).
+      # Unloadable payloads (e.g. recovered from a dead worker) get the default.
       def reschedule_at
         if payload_object.respond_to?(:reschedule_at)
           payload_object.reschedule_at(self.class.db_time_now, attempts)

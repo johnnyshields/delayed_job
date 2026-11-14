@@ -1,5 +1,4 @@
 module Delayed
-  # Log formatting shared by Delayed::Worker and Delayed::Dispatcher.
   # Includers must respond to #name and may set @quiet.
   module Logging
     def say(text, level = Delayed::Worker.default_log_level)

@@ -1,13 +1,9 @@
 require 'active_support/notifications'
 
 module Delayed
-  # Publishes `<event>.delayed_job` events with ActiveSupport::Notifications.
-  # See README ("Instrumentation") for the events and their payloads.
-  #
-  # Subscribers are user code that runs on worker threads: an exception
-  # raised by one is logged and otherwise ignored, so it can't fail a job,
-  # skip a job, or crash a worker. Exceptions raised by the instrumented
-  # block itself propagate as usual (and are in the payload's :exception).
+  # Publishes `<event>.delayed_job` events (see README, "Instrumentation").
+  # Subscriber exceptions are logged and swallowed so they can't fail a job
+  # or crash a worker; the instrumented block's own exceptions propagate.
   module Instrumentation
     NAMESPACE = 'delayed_job'.freeze
 
@@ -31,17 +27,12 @@ module Delayed
           end
         end
       rescue Exception => error # rubocop:disable Lint/RescueException
-        # Raised by the block; or not a subscriber's bug (a signal, a
-        # Delayed::ShutdownInterrupt raised into this thread).
+        # The block's error, or a non-StandardError (signal, ShutdownInterrupt).
         raise if error.equal?(block_error) || !error.is_a?(StandardError)
         subscriber_failed(name, error)
-        # A subscriber failed as the event finished, while the block's own
-        # exception propagated: ActiveSupport raises the subscriber's
-        # instead. Raise the block's, so that e.g. a
-        # Delayed::ShutdownInterrupt still reaches the worker thread, which
-        # releases its job, instead of turning into a RuntimeError. Without
-        # a cause: the subscriber's error (whose cause is the block's) would
-        # become its cause, a loop JRuby rejects ("circular causes").
+        # ActiveSupport raised a finishing subscriber's error in place of the
+        # block's; re-raise the block's so e.g. ShutdownInterrupt still reaches
+        # the worker. :cause => nil avoids a cause loop JRuby rejects.
         raise block_error, :cause => nil if block_error
         result = yield(payload) unless started # A subscriber failed before the block ran.
       end

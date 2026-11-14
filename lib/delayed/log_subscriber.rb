@@ -1,14 +1,9 @@
 require 'active_support/log_subscriber'
 
 module Delayed
-  # Logs `*.delayed_job` events (see Delayed::Instrumentation) to
-  # Delayed::Worker.logger, with their durations. Not attached by default,
-  # since workers already log their activity; attach it for the extra
-  # detail (reservation round trips, per-event timings):
+  # Logs `*.delayed_job` events with durations. Not attached by default:
   #
   #   Delayed::LogSubscriber.attach_to :delayed_job
-  #
-  # jobs_reserved and job_performed events are logged at debug level.
   class LogSubscriber < ActiveSupport::LogSubscriber
     def logger
       Delayed::Worker.logger
@@ -83,7 +78,7 @@ module Delayed
 
     def job_stuck(event)
       p = event.payload
-      # p[:job_name], not p[:job]: published on another thread than the job's.
+      # Published from another thread, so only the job's name is passed.
       log(:error) { "#{p[:job_name]} is stuck on #{p[:worker]}: running past its max_run_time (#{p[:max_run_time]}s)" }
     end
 
@@ -94,8 +89,7 @@ module Delayed
 
   private
 
-    # Logs through the logger directly: ActiveSupport's level helpers
-    # (info, error, ...) differ between its versions.
+    # ActiveSupport's level helpers (info, error, ...) vary across versions.
     def log(level, &block)
       logger.public_send(level, &block) if logger
     end
@@ -105,7 +99,6 @@ module Delayed
       respawn_in.zero? ? 'replacing it' : "replacing it in #{respawn_in}s"
     end
 
-    # The exception raised in an instrumented block, if any.
     def raised(event)
       exception = event.payload[:exception]
       exception ? " - #{exception.first}: #{exception.last}" : ''

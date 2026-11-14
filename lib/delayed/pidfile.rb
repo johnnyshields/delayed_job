@@ -1,22 +1,14 @@
 require 'fileutils'
 
 module Delayed
-  # The pidfile of a forking launcher (Delayed::Launcher::Forking with the
-  # :pid_file option). Holds the pid of the supervising process, and keeps a
-  # second launcher from starting while the first one runs.
-  #
-  # Whether a launcher runs is decided by an exclusive lock (flock) on the
-  # file, not by the pid in it: the lock is released by the OS however the
-  # process ends (even SIGKILL), so a stale file never blocks a start, and a
-  # recycled pid never fakes a running launcher. Forked worker processes
-  # inherit the lock (see .lock_file?), so it is only released once the
-  # launcher and all of its workers have exited.
+  # Forking launcher pidfile. Liveness is an flock, not the pid: the OS
+  # releases it however the process dies (even SIGKILL), so stale files and
+  # recycled pids are harmless. Workers inherit the lock, so it's held until
+  # all of them exit too.
   class Pidfile
     attr_reader :path
 
-    # Whether `file` is the locked file of a Pidfile. Worker.after_fork
-    # reopens the files open in the parent; reopening this one would drop
-    # the lock in the worker.
+    # Worker.after_fork must not reopen this file: that would drop the lock.
     def self.lock_file?(file)
       file.instance_variable_defined?(:@delayed_pidfile)
     end
@@ -25,8 +17,7 @@ module Delayed
       @path = path.to_s
     end
 
-    # Locks the file and writes this process' pid in it. Raises
-    # Delayed::AlreadyRunningError if another process holds the lock.
+    # Raises Delayed::AlreadyRunningError if another process holds the lock.
     def setup
       FileUtils.mkdir_p(File.dirname(path))
       @file = lock_file
@@ -36,8 +27,7 @@ module Delayed
       self
     end
 
-    # Removes the file and releases the lock. Only in the process that set
-    # it up: not from forked children, and never a newer launcher's file.
+    # No-op in forked children; never deletes a newer launcher's file.
     def delete
       return unless @file && @owner == Process.pid
       File.delete(path) if same_file?(@file)
@@ -47,7 +37,7 @@ module Delayed
       nil
     end
 
-    # The pid in the file, or nil if there is no file or it holds no pid.
+    # nil if missing or not a pid.
     def read_pid
       pid = File.read(path).strip
       Integer(pid, 10) if pid =~ /\A\d+\z/
@@ -64,8 +54,8 @@ module Delayed
           file.close
           raise AlreadyRunningError.new(path, read_pid)
         end
-        # The previous holder may have deleted the file between our open
-        # and our lock: then we locked a file nobody else will open.
+        # The previous holder may have deleted the file between our open and
+        # lock, leaving us an orphan: retry.
         if same_file?(file)
           file.instance_variable_set(:@delayed_pidfile, true)
           @owner = Process.pid
@@ -75,8 +65,7 @@ module Delayed
       end
     end
 
-    # Whether `path` still names the file open as `file`. Compares device and
-    # inode: File.identical?(path, io) compares paths on JRuby.
+    # By dev/inode: File.identical?(path, io) compares paths on JRuby.
     def same_file?(file)
       on_disk = File.stat(path)
       open = file.stat

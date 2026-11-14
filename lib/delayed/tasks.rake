@@ -16,15 +16,13 @@ namespace :jobs do
 
   task :environment_options => :environment do
     names = Delayed::LaunchOptions::ENV_NAMES
-    # The value of a numeric variable, if set (see Delayed::LaunchOptions).
     number = lambda do |option, variable = names.fetch(option)|
       Delayed::LaunchOptions.parse(option, ENV[variable], variable) if ENV[variable]
     end
-    # Whether a boolean variable is set to anything but blank, 0, f(alse), n(o) or off.
     flag = ->(variable) { !!ENV[variable] && ENV[variable] !~ /\A(?:|0|f|false|n|no|off)\z/i }
 
     @options = {
-      # NUM_WORKERS is an alias of NUM_PROCESSES.
+      # NUM_WORKERS: deprecated alias.
       :processes => number.call(:processes) || number.call(:processes, 'NUM_WORKERS') || 1,
       :quiet => flag.call('QUIET')
     }
@@ -35,7 +33,7 @@ namespace :jobs do
     %w[PREFETCH_DYNAMIC SILENCE_POLLING COUNT_SHUTDOWN_INTERRUPTS].each do |variable|
       @options[variable.downcase.to_sym] = true if flag.call(variable)
     end
-    # PIDFILE=path, or PIDFILE=1 (true, yes, on) for tmp/pids/delayed_job.pid.
+    # PIDFILE=path, or PIDFILE=1 for tmp/pids/delayed_job.pid.
     if flag.call('PIDFILE')
       @options[:pid_file] = ENV['PIDFILE'] =~ /\A(?:1|t|true|y|yes|on)\z/i ? true : ENV['PIDFILE']
     end
@@ -46,7 +44,7 @@ namespace :jobs do
     pools = Delayed::PoolParser.new.add(ENV['POOLS'] || ENV['POOL'] || '').pools
     @options[:pools] = pools unless pools.empty?
 
-    # The same rules as script/delayed_job (see Delayed::LaunchOptions).
+    # Same rules as script/delayed_job.
     Delayed::LaunchOptions.validate!(@options, names)
   end
 

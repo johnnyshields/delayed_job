@@ -1,9 +1,7 @@
 module Delayed
   class PoolParser
-    # Adds pools given as "queue1,queue2:processes", several separated by
-    # "|"; "*" or a blank list of queues is any queue, and the process count
-    # defaults to 1. Raises ArgumentError for a count that isn't a whole
-    # number of 1 or more (e.g. "mailers:0" or "*:abc").
+    # Adds pools as "q1,q2:count|q3:count"; "*" or blank means any queue,
+    # count defaults to 1.
     def add(string)
       string.split('|').each do |segment|
         queues, process_count = segment.split(':', 2)

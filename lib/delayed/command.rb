@@ -151,12 +151,11 @@ module Delayed
       @pool_parser ||= PoolParser.new
     end
 
-    # Parses the value of a numeric option (see Delayed::LaunchOptions).
     def parse(option, value, name = LaunchOptions::CLI_NAMES.fetch(option))
       LaunchOptions.parse(option, value, name)
     end
 
-    # The same rules as rake jobs:work (see Delayed::LaunchOptions).
+    # Same rules as rake jobs:work.
     def validate_options!
       LaunchOptions.validate!(@options, LaunchOptions::CLI_NAMES)
       validate_daemon_command!
@@ -164,8 +163,8 @@ module Delayed
 
     DAEMON_COMMANDS = %w[stop restart reload zap status].freeze
 
-    # --fork runs the launcher in the foreground: it can't stop, restart or
-    # report on one already running (which a daemon's pidfiles allow).
+    # --fork runs in the foreground, with no daemon pidfiles to stop or
+    # query a running launcher by.
     def validate_daemon_command!
       return unless @launch_strategy == :fork
       command = (@options[:args] & DAEMON_COMMANDS).first

@@ -372,7 +372,7 @@ shared_examples_for 'a delayed_job backend' do
 
     it 'fetches jobs ordered by priority' do
       10.times { described_class.enqueue SimpleJob.new, :priority => rand(10) }
-      # A fresh worker name each time: a worker gets its own locked job back.
+      # Distinct names: reserve would return a worker's own locked job again.
       jobs = Array.new(10) { |i| described_class.reserve(Delayed::Worker.named("w#{i}")) }
       expect(jobs.compact.map(&:id).uniq.size).to eq(10)
       jobs.each_cons(2) do |a, b|
@@ -852,9 +852,8 @@ shared_examples_for 'a delayed_job backend' do
   end
 end
 
-# Examples for backends that support lock heartbeats and owner-guarded writes
-# (lock_heartbeats?, touch_locks, destroy_if_locked_by, save_if_locked_by).
-# Include alongside 'a delayed_job backend'.
+# For backends implementing lock_heartbeats?, touch_locks,
+# destroy_if_locked_by and save_if_locked_by. Use with 'a delayed_job backend'.
 shared_examples_for 'a delayed_job backend supporting lock heartbeats' do
   let(:now) { described_class.db_time_now }
 
@@ -868,7 +867,7 @@ shared_examples_for 'a delayed_job backend supporting lock heartbeats' do
     described_class.where(:id => job.id).first
   end
 
-  # Another worker takes the job over, as reserve would after the lock expired.
+  # As reserve would after the lock expired.
   def take_over(job, name = 'w2')
     described_class.where(:id => job.id).update_all(:locked_by => name, :locked_at => described_class.db_time_now)
   end

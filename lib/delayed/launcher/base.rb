@@ -6,12 +6,10 @@ module Delayed
                     :process_prefix,
                     :process_identifier
 
-      # Deprecated alias of #processes.
+      # Deprecated.
       alias_method :worker_count, :processes
       alias_method :worker_count=, :processes=
 
-      # options[:processes] is the number of worker processes to run;
-      # options[:worker_count] is accepted as an alias.
       def initialize(options)
         @worker_index = 0
         processes = options.delete(:processes)
@@ -39,19 +37,14 @@ module Delayed
         Delayed::Worker.logger ||= Logger.new(File.join(@options[:log_dir], 'delayed_job.log'))
       end
 
-      # Readies the booted parent process to be forked, so that as much memory
-      # as possible is shared copy-on-write with the worker processes: loads
-      # all application code up front, then runs a full GC and compacts the
-      # heap so long-lived objects sit on pages the children won't write to.
+      # Maximizes copy-on-write sharing with forked workers.
       def prepare_for_fork
         eager_load_application
         warmup_heap
       end
 
-      # Rails does not eager load in rake tasks (config.rake_eager_load is
-      # false by default), so without this each worker would autoload, and
-      # hold a private copy of, the application code. Skipped when code
-      # reloading is enabled, since reloaded code is not shared anyway.
+      # Rake tasks don't eager load by default, so each worker would autoload
+      # its own copy. Skipped with code reloading, which isn't shared anyway.
       def eager_load_application
         return unless defined?(::Rails.application) && ::Rails.application
         return unless ::Rails.application.config.cache_classes
@@ -119,19 +112,16 @@ module Delayed
         exit_with_error_status
       end
 
-      # The pid of the process supervising worker processes started by
-      # #run_worker: the forking launcher, which is their parent. Daemonized
-      # workers are detached from their parent, so nobody supervises them.
+      # Overridden by the forking launcher; daemonized workers are detached
+      # and unsupervised.
       def supervisor_pid
         nil
       end
 
-      # Number of threads each worker process runs.
       def threads(options)
         (options[:threads] || 1).to_i
       end
 
-      # Jobs each thread may hold queued (see Delayed::Worker.prefetch).
       def prefetch(options)
         (options[:prefetch] || Delayed::Worker.prefetch).to_i
       end

@@ -1,23 +1,20 @@
 module Delayed
-  # A worker thread's jobs, handed over by its Delayed::Dispatcher: the job
-  # it is about to run and, with prefetch, those queued behind it. #pop
-  # takes the most urgent job (lowest priority, then earliest run_at, then
-  # first handed over), so a job reserved after the queue filled up doesn't
-  # wait behind less urgent ones. Once #close is called, #pop returns EOQ
-  # when no job is left.
+  # Jobs the Dispatcher hands to one worker thread (the next job plus any
+  # prefetched). #pop returns the most urgent (priority, run_at, arrival),
+  # so a late-reserved urgent job doesn't wait behind prefetched ones.
   class Inbox
-    # Returned by #pop once the inbox is closed and empty: end of queue.
+    # Returned by #pop once closed and empty.
     EOQ = Object.new.freeze
 
     def initialize
       @mutex = Mutex.new
       @cond = ConditionVariable.new
-      @items = [] # [key, [slot, job]]
+      @items = [] # [sort_key, [slot, job, reserved_at]]
       @sequence = 0
       @closed = false
     end
 
-    # Hands over [slot, job], reserved at `reserved_at` (monotonic seconds).
+    # reserved_at: monotonic seconds.
     def push(slot, job, reserved_at)
       @mutex.synchronize do
         @items << [[job.priority.to_i, run_at_of(job), @sequence += 1], [slot, job, reserved_at]]
@@ -26,8 +23,7 @@ module Delayed
       self
     end
 
-    # The most urgent [slot, job, reserved_at]; waits for one, or returns
-    # EOQ once closed and empty.
+    # Blocks until a job is available; EOQ once closed and empty.
     def pop
       @mutex.synchronize do
         loop do
@@ -41,7 +37,7 @@ module Delayed
       end
     end
 
-    # Takes every job left, without waiting.
+    # Non-blocking.
     def drain
       @mutex.synchronize do
         items = @items.map(&:last)
@@ -63,8 +59,7 @@ module Delayed
 
   private
 
-    # run_at as a number (Float seconds), so jobs compare whatever the time
-    # class the backend uses; jobs without one come first.
+    # Float, so any backend's time class compares; nil sorts first.
     def run_at_of(job)
       run_at = job.run_at
       run_at ? run_at.to_f : 0.0

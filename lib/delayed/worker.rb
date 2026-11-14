@@ -8,9 +8,8 @@ require 'active_support/core_ext/hash/indifferent_access'
 require 'logger'
 
 module Delayed
-  # Runs jobs. In a worker process, Delayed::Dispatcher runs each Worker on its
-  # own thread and hands it jobs. Worker#work_off runs jobs inline on the
-  # calling thread instead (e.g. in tests or a console).
+  # Runs jobs, each Worker on its own Dispatcher thread; #work_off runs them
+  # inline on the calling thread.
   class Worker # rubocop:disable Metrics/ClassLength
     include Logging
 
@@ -34,56 +33,41 @@ module Delayed
                    :read_ahead, :plugins, :destroy_failed_jobs, :exit_on_complete,
                    :default_log_level
 
-    # Jobs each worker thread may hold queued behind the one it runs, so
-    # that it starts its next job without waiting for a poll (see
-    # Delayed::Dispatcher). 0 (the default) reserves only for idle threads.
-    # With prefetch_dynamic, the queue depth starts at 0, grows by one after
-    # each poll that got every job it asked for (up to prefetch), and drops
-    # back to 0 after one that got fewer.
+    # prefetch: jobs each thread may hold queued behind its running one
+    # (default 0: reserve only for idle threads).
+    # prefetch_dynamic: start the depth at 0, grow by one after each full
+    # poll (up to prefetch), and reset to 0 after a partial one.
     cattr_accessor :prefetch, :prefetch_dynamic
 
-    # Called with errors raised outside of a job's own handling, which would
-    # otherwise only be logged: failed reservations, failed lock heartbeats,
-    # a worker thread or dispatcher crashing, failing failure hooks, failed
-    # recovery of a dead worker process' jobs. E.g. to report them to an
-    # error tracker:
+    # Called with errors outside job execution (reservation, heartbeats,
+    # thread crashes, failure hooks, job recovery); job errors go to the
+    # :error lifecycle callback instead. Handler errors are logged and ignored.
     #
     #   Delayed::Worker.on_thread_error = ->(error, info) { Sentry.capture_exception(error, extra: info) }
     #
-    # `info` holds :context (what failed) and, where known, :dispatcher,
-    # :worker and :job. A handler taking one argument gets only the error,
-    # and one taking none is just called.
-    # Job errors are not reported here: see the :error lifecycle callback.
-    # Errors raised by the handler are logged and ignored.
+    # `info` has :context and, where known, :dispatcher, :worker and :job.
+    # The handler may take 0, 1 or 2 arguments.
     cattr_accessor :on_thread_error
 
-    # Silences the backend's query log while polling for jobs and refreshing
-    # job locks (see Delayed::Job.silence_polling), so an idle worker
-    # doesn't log a reservation query every sleep_delay seconds. Queries made
-    # by jobs, and by workers finishing jobs, are logged as usual.
+    # Silences the backend's query log while polling and refreshing locks, so
+    # idle workers don't log a query every sleep_delay. Job queries still log.
     cattr_accessor :silence_polling
 
-    # Seconds a stopping worker waits for running jobs to finish before
-    # interrupting them (see Delayed::ShutdownInterrupt). nil, the default,
-    # waits for as long as they take.
+    # Seconds to wait for running jobs on shutdown before raising
+    # ShutdownInterrupt in them. nil (default) waits indefinitely.
     cattr_accessor :shutdown_timeout
 
-    # Whether a job interrupted by shutdown (see Delayed::ShutdownInterrupt)
-    # counts as a failed attempt: it is rescheduled with back-off, or fails
-    # permanently after max_attempts. Off by default: an interrupted job is
-    # released with its attempts unchanged, as a shutdown isn't the job's
-    # fault - but then a job that always outlasts shutdown_timeout comes
-    # back on every deploy.
+    # Count a shutdown-interrupted job as a failed attempt. Off by default
+    # (released, attempts unchanged), but then a job that always outlasts
+    # shutdown_timeout returns on every deploy.
     cattr_accessor :count_shutdown_interrupts
 
-    # Lock heartbeats (off by default). While a job runs, its worker process
-    # refreshes the job's lock every lock_heartbeat_interval seconds, and a
-    # lock not refreshed for lock_timeout seconds counts as abandoned: its
-    # job can be reserved by another worker. So the job of a worker that
-    # died or hung is picked up after lock_timeout instead of max_run_time.
-    # Needs a backend that supports it (Delayed::Job.lock_heartbeats?), and
-    # every worker on the same jobs must enable it: a worker without
-    # heartbeats would have its long-running jobs taken over.
+    # Lock heartbeats (off by default): running jobs' locks are refreshed
+    # every lock_heartbeat_interval seconds, and a lock older than
+    # lock_timeout is abandoned, so a dead worker's jobs are picked up after
+    # lock_timeout rather than max_run_time. Needs backend support
+    # (Job.lock_heartbeats?). Enable on every worker sharing the jobs, or
+    # workers without it will have their long jobs taken over.
     cattr_accessor :lock_heartbeat_interval, :lock_timeout
 
     # Named queue into which jobs are enqueued by default
@@ -94,12 +78,9 @@ module Delayed
     # name_prefix is ignored if name is set directly
     attr_accessor :name_prefix
 
-    # Index of the thread this worker runs on when a Delayed::Dispatcher runs
-    # several workers. When set, it is appended to the default name so that
-    # every thread locks jobs under a unique name.
+    # Appended to the default name so each thread has a unique lock name.
     attr_accessor :thread_index
 
-    # The Delayed::Dispatcher running this worker, if any.
     attr_accessor :dispatcher
 
     def self.reset
@@ -165,7 +146,7 @@ module Delayed
       unless @files_to_reopen
         @files_to_reopen = []
         ObjectSpace.each_object(File) do |file|
-          # A pidfile's lock must be inherited, not dropped by reopening it.
+          # Reopening would drop the pidfile's lock.
           @files_to_reopen << file unless file.closed? || Delayed::Pidfile.lock_file?(file)
         end
       end
@@ -185,11 +166,11 @@ module Delayed
 
     LIFECYCLE_LOCK = Mutex.new
 
-    # In case a worker has not been set up, job enqueueing needs a lifecycle:
-    # set up once, though several threads (e.g. web requests) enqueue at once.
+    # In case a worker has not been set up, job enqueueing needs a lifecycle.
+    # Locked, as several threads may enqueue at once.
     def self.lifecycle
       @lifecycle || LIFECYCLE_LOCK.synchronize do
-        setup_lifecycle unless @lifecycle # Plugins set up here read @lifecycle, without the lock.
+        setup_lifecycle unless @lifecycle # Plugins read @lifecycle here, unlocked.
         @lifecycle
       end
     end
@@ -199,59 +180,47 @@ module Delayed
       plugins.each { |klass| klass.new }
     end
 
-    # Default worker/dispatcher name: identifies the process.
     def self.default_name(prefix = nil, pid = Process.pid)
       "#{prefix}host:#{Socket.gethostname} pid:#{pid}"
     rescue StandardError
       "#{prefix}pid:#{pid}"
     end
 
-    # The name a worker locks jobs under, by default.
     def self.lock_name(prefix = nil, pid = Process.pid, thread_index = nil)
       "#{default_name(prefix, pid)}#{" thread:#{thread_index}" if thread_index}"
     end
 
-    # The lock names of every worker in a worker process with the given name
-    # prefix, pid, thread count and prefetch (see Delayed::Dispatcher): with
-    # prefetch, each thread's jobs are locked under its slot names.
+    # All lock names of a worker process (slot names when prefetching).
     def self.lock_names(prefix, pid, threads, prefetch = 0)
       names = threads <= 1 ? [lock_name(prefix, pid)] : Array.new(threads) { |index| lock_name(prefix, pid, index) }
       return names unless prefetch.to_i > 0
       names.flat_map { |name| Array.new(prefetch.to_i + 1) { |slot| slot_name(name, slot) } }
     end
 
-    # The name a worker locks the job in one of its slots under, with
-    # prefetch: each job it holds (running or queued) has a slot of its own,
-    # as reserving for a name also returns the jobs already locked under it.
+    # Each held job needs its own lock name: reserving for a name also
+    # returns the jobs already locked under it.
     def self.slot_name(worker_name, slot)
       "#{worker_name} slot:#{slot}"
     end
 
-    # Raises ArgumentError unless prefetch is a whole number from 0 to
-    # MAX_PREFETCH.
     def self.validate_prefetch!(value = prefetch)
       return if value.is_a?(Integer) && value.between?(0, MAX_PREFETCH)
       raise ArgumentError, "prefetch must be a whole number from 0 to #{MAX_PREFETCH} (got #{value.inspect})"
     end
 
-    # Recovers the jobs left locked by workers whose process died while
-    # running them: each counts as a failed attempt, as if the job had raised
-    # `error` - it is rescheduled with back-off, or fails permanently after
-    # max_attempts, so a job that keeps killing its worker eventually stops.
-    # Backends that can't list a worker's jobs (Job.locked_jobs returns nil)
-    # only have the locks cleared. Returns the number of jobs recovered.
+    # Counts a failed attempt (raising `error`) for each job a dead process
+    # held, so a job that keeps killing its worker eventually fails. Backends
+    # without Job.locked_jobs only get locks cleared. Returns the count.
     def self.recover_jobs_of(worker_names, error)
-      # In one query for all the names (see Job.locked_jobs_of): a process
-      # with many threads and prefetch slots has hundreds.
+      # One query: threads x slots can be hundreds of names.
       jobs = Delayed::Job.locked_jobs_of(worker_names)
       if jobs.nil?
         Delayed::Job.clear_locks_of!(worker_names)
         return 0
       end
-      # A job that had already failed permanently keeps its lock (as when a
-      # live worker fails it, until ClearLocks runs on exit): it wasn't
-      # running, so it only has its lock cleared, below.
-      by_worker = jobs.reject(&:failed?).group_by(&:locked_by) # Before recovery unlocks them.
+      # Permanently failed jobs keep their lock but weren't running: only
+      # clear it. Group before recovery unlocks them.
+      by_worker = jobs.reject(&:failed?).group_by(&:locked_by)
       recovered = by_worker.sum do |worker_name, held|
         worker = named(worker_name)
         held.count { |job| recover_job(worker, job, error) }
@@ -268,11 +237,7 @@ module Delayed
     end
     private_class_method :publish_recovered
 
-    # Counts a failed attempt of a job recovered from a dead worker. An
-    # error doing so (e.g. a failure hook that raises, or a lost database
-    # connection) is reported, and leaves this job's lock to be cleared (see
-    # #recover_jobs_of): the dead worker's other jobs are still recovered.
-    # Returns whether it was recovered.
+    # Reports errors rather than raising, so the other jobs still recover.
     def self.recover_job(worker, job, exit_error)
       worker.fail_attempt(job, exit_error)
       true
@@ -282,8 +247,7 @@ module Delayed
     end
     private_class_method :recover_job
 
-    # Reports an error raised outside of a job's own handling: publishes a
-    # thread_error event and calls Worker.on_thread_error. Never raises.
+    # Publishes thread_error and calls on_thread_error. Never raises.
     def self.thread_error(error, info = {})
       Delayed.instrument(:thread_error, info.merge(:error => error))
       handler = on_thread_error
@@ -297,26 +261,20 @@ module Delayed
       logger.error("Error in Delayed::Worker.on_thread_error: #{error.class}: #{error.message}") if logger
     end
 
-    # The arity of an on_thread_error handler: of the handler itself (a
-    # Proc, Method), else of its #call method (any object responding to it).
     def self.handler_arity(handler)
       handler.respond_to?(:arity) ? handler.arity : handler.method(:call).arity
     end
     private_class_method :handler_arity
 
-    # Whether lock heartbeats are enabled and supported by the backend.
     def self.lock_heartbeats?
       !lock_heartbeat_interval.nil? && Delayed::Job.lock_heartbeats?
     end
 
-    # How long a job's lock is honoured: lock_timeout with lock heartbeats,
-    # else max_run_time (after which the job must have been interrupted).
     def self.lock_expiry
       lock_heartbeats? ? lock_timeout : max_run_time
     end
 
-    # Raises ArgumentError for lock heartbeat settings that would let a live
-    # worker's locks expire between two heartbeats.
+    # A live worker's locks must not expire between two heartbeats.
     def self.validate_lock_heartbeats!(interval = lock_heartbeat_interval, timeout = lock_timeout)
       return if interval.nil?
       raise ArgumentError, 'lock_heartbeat_interval must be greater than 0' unless interval > 0
@@ -325,18 +283,14 @@ module Delayed
                            "lock_heartbeat_interval (#{interval})"
     end
 
-    # Raises ArgumentError for settings a worker process would refuse to
-    # start with: the Worker settings (e.g. from an initializer) overridden
-    # by `options` (as Worker.new does). Lets the launcher fail at once,
-    # rather than every worker process it forks.
+    # Lets the launcher fail at once rather than in every forked process.
     def self.validate_settings!(options = {})
       setting = ->(name) { options.key?(name) ? options[name] : send(name) }
       validate_prefetch!(setting.call(:prefetch))
       validate_lock_heartbeats!(setting.call(:lock_heartbeat_interval), setting.call(:lock_timeout))
     end
 
-    # A worker that only records job outcomes under the given name. Unlike
-    # Worker.new, it doesn't reset the lifecycle or process-wide settings.
+    # For recording job outcomes; unlike Worker.new, resets no global state.
     def self.named(name)
       allocate.tap do |worker|
         worker.instance_variable_set(:@quiet, true)
@@ -383,13 +337,10 @@ module Delayed
     # Setting the name to nil will reset the default worker name
     attr_writer :name
 
-    # Runs this worker in the foreground until stopped, via a Delayed::Dispatcher,
-    # as every worker process does.
     def start
       Dispatcher.new(:workers => [self], :quiet => @quiet).tap { |dispatcher| dispatcher.name_prefix = name_prefix }.start
     end
 
-    # Stops this worker, and the dispatcher running it (if any).
     def stop
       @exit = true
       dispatcher.stop if dispatcher
@@ -399,27 +350,21 @@ module Delayed
       !!@exit
     end
 
-    # Do num jobs inline on the calling thread and return stats on
-    # success/failure. Exit early if interrupted or no job is available.
-    # Reservation goes through this worker's Delayed::Dispatcher, as in a
-    # worker process.
+    # Do num jobs inline and return stats on success/failure.
+    # Exit early if interrupted or no job is available.
     def work_off(num = 100)
       (dispatcher || Dispatcher.new(:workers => [self], :quiet => @quiet)).work_off(num, self)
     end
 
-    # `time_cap`: at most this many seconds, if given (by the dispatcher,
-    # for a job whose lock expires sooner than its max_run_time, see
-    # Dispatcher#lock_time_left).
+    # time_cap: seconds left on the job's lock, if less than max_run_time.
     def run(job, time_cap = nil)
       job_say job, 'RUNNING'
       started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
       limit = max_run_time(job).to_i
       limit = limit > 0 ? [limit, time_cap].min : time_cap if time_cap
       dispatcher.job_timed(self, job, limit) if dispatcher
-      # Only the job's own code (its #perform) can be interrupted by
-      # shutdown (see Dispatcher#work and Backend::Base#invoke_job): never
-      # its hooks or finishing it, below, so a job that ran is never
-      # released to run again.
+      # Shutdown can interrupt only #perform, never hooks or finishing, so a
+      # job that ran is never released to run again.
       Timeout.timeout(limit, WorkerTimeout) { job.invoke_job }
       owned_destroy(job)
       runtime = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
@@ -428,9 +373,8 @@ module Delayed
     rescue ShutdownInterrupt
       raise # the job didn't fail; Delayed::Dispatcher releases it
     rescue SignalException => error
-      # Raised into the job by a stopping dispatcher (see
-      # Worker.raise_signal_exceptions): the job didn't fail either. Run
-      # inline (e.g. #work_off), it counts as a failed attempt, as before.
+      # From raise_signal_exceptions: on a worker thread the dispatcher
+      # releases the job; inline it counts as a failed attempt.
       raise if Dispatcher.worker_thread?
       fail_attempt(job, error)
       false # work failed
@@ -445,8 +389,6 @@ module Delayed
       false # work failed
     end
 
-    # Records a failed attempt of the job: runs the :error callbacks, then
-    # reschedules the job, or fails it permanently after max_attempts.
     def fail_attempt(job, error)
       self.class.lifecycle.run_callbacks(:error, self, job) { handle_failed_job(job, error) }
     end
@@ -492,8 +434,7 @@ module Delayed
       job.max_run_time || self.class.max_run_time
     end
 
-    # Runs an already reserved job, including its :perform callbacks.
-    # Returns true if the job succeeded, false if it failed.
+    # Runs a reserved job with :perform callbacks; returns success.
     def perform_job(job, time_cap = nil)
       running = Thread.current[:delayed_job_running]
       Thread.current[:delayed_job_running] = true # See #initialize.
@@ -506,12 +447,9 @@ module Delayed
 
   protected
 
-    # Owner-guarded writes. A job is finished, rescheduled or failed only if
-    # this worker still holds its lock: if the lock expired and another
-    # worker reserved the job meanwhile (see Worker.lock_timeout), the other
-    # worker's run decides the job's fate, and this outcome is discarded.
-    # Applies to backends that implement destroy_if_locked_by and
-    # save_if_locked_by, and to locked jobs; others are written as before.
+    # Write only if this worker still holds the lock; if it expired and
+    # another worker took the job, that worker's outcome wins. Unguarded for
+    # unlocked jobs and backends without destroy/save_if_locked_by.
     def owned_destroy(job)
       owner = job.locked_by
       return job.destroy unless owner && job.respond_to?(:destroy_if_locked_by)

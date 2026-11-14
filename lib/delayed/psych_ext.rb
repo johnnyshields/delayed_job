@@ -30,8 +30,7 @@ module Delayed
       def visit_Psych_Nodes_Mapping(object) # rubocop:disable Metrics/CyclomaticComplexity, Naming/MethodName, Metrics/PerceivedComplexity
         klass = Psych.load_tags[object.tag]
         if klass
-          # Implementation changed here https://github.com/ruby/psych/commit/2c644e184192975b261a81f486a04defa3172b3f
-          # load_tags used to have class values, now the values are strings
+          # load_tags values became strings in https://github.com/ruby/psych/commit/2c644e184192975b261a81f486a04defa3172b3f
           klass = resolve_class(klass) if klass.is_a?(String)
           return revive(klass, object)
         end
@@ -84,9 +83,7 @@ module Delayed
         end
       end
 
-      # defined? is triggering something really messed up in
-      # jruby causing both the if AND else clauses to execute,
-      # however if the check is run here, everything is fine
+      # Inline, `defined?` made JRuby execute both the if and else branches.
       def jruby_is_seriously_borked
         defined?(ActiveRecord::Base)
       end

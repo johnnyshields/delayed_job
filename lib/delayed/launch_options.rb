@@ -1,8 +1,6 @@
 module Delayed
-  # Parses and checks the options a worker launcher is started with, given
-  # on the command line (Delayed::Command) or in environment variables
-  # (rake jobs:work): one set of rules for both. Errors are ArgumentErrors
-  # naming the option as it was given (see CLI_NAMES and ENV_NAMES).
+  # Shared option rules for the command line (Delayed::Command) and env
+  # vars (rake jobs:work). Errors name the option as given.
   module LaunchOptions
     POSITIVE = [:integer, ->(n) { n >= 1 }, 'must be 1 or greater'].freeze
     WHOLE = [:integer, ->(_) { true }, 'must be a whole number'].freeze
@@ -10,8 +8,7 @@ module Delayed
     POSITIVE_SECONDS = [:seconds, ->(s) { s > 0 }, 'must be greater than 0'].freeze
     PREFETCH = [:integer, ->(n) { n.between?(0, Worker::MAX_PREFETCH) }, "must be a whole number from 0 to #{Worker::MAX_PREFETCH}"].freeze
 
-    # option => [command-line name, environment variable, rule]; a rule is
-    # [kind, valid?, what a valid value is], for options parsed as numbers.
+    # option => [CLI name, env var, rule]; rule is [kind, valid?, message].
     OPTIONS = {
       :processes => ['--processes', 'NUM_PROCESSES', POSITIVE],
       :threads => ['--threads', 'NUM_THREADS', POSITIVE],
@@ -23,7 +20,7 @@ module Delayed
       :shutdown_timeout => ['--shutdown-timeout', 'SHUTDOWN_TIMEOUT', SECONDS],
       :lock_heartbeat_interval => ['--lock-heartbeat', 'LOCK_HEARTBEAT', POSITIVE_SECONDS],
       :lock_timeout => ['--lock-timeout', 'LOCK_TIMEOUT', POSITIVE_SECONDS],
-      :identifier => ['--identifier', nil, nil], # No environment variable.
+      :identifier => ['--identifier', nil, nil],
       :queues => ['--queues', 'QUEUES', nil],
       :pools => ['--pool', 'POOLS', nil]
     }.freeze
@@ -32,9 +29,7 @@ module Delayed
     ENV_NAMES = OPTIONS.transform_values { |(_, env)| env }.compact.freeze
     RULES = OPTIONS.transform_values(&:last).compact.freeze
 
-    # Parses the text given for `option` (a key of RULES): a whole number,
-    # or a number of seconds (see Delayed.parse_seconds). Raises an
-    # ArgumentError, naming the option `name`, unless it is valid.
+    # Raises ArgumentError naming `name` if invalid.
     def self.parse(option, text, name)
       kind, valid, requirement = RULES.fetch(option)
       value = kind == :integer ? Integer(text.to_s.strip, 10) : Delayed.parse_seconds(text)
@@ -44,9 +39,8 @@ module Delayed
       raise ArgumentError, "#{name} #{requirement}"
     end
 
-    # Checks parsed options (see #parse) against each other, and those set
-    # some other way against RULES. `names` maps options to how they were
-    # given (CLI_NAMES or ENV_NAMES).
+    # Re-checks RULES (for options not set via .parse) and cross-option
+    # constraints. `names` is CLI_NAMES or ENV_NAMES.
     def self.validate!(options, names)
       RULES.each do |option, (_, valid, requirement)|
         value = options[option]
@@ -57,8 +51,7 @@ module Delayed
       validate_exclusive!(options, names)
     end
 
-    # The lock timeout (from the options, else the Worker setting, e.g. from
-    # an initializer) must outlast two heartbeats.
+    # The lock timeout must outlast two heartbeats.
     def self.validate_lock_heartbeat!(options, names)
       interval = options[:lock_heartbeat_interval]
       return unless interval
@@ -76,7 +69,7 @@ module Delayed
     end
     private_class_method :validate_priorities!
 
-    # Options that can't be given together: [first, second, given?].
+    # [first, second, both_given?]
     EXCLUSIVE = [
       [:processes, :identifier, ->(o) { o[:processes].to_i > 1 && o[:identifier] }],
       [:identifier, :pools, ->(o) { o[:identifier] && o[:pools] }],
