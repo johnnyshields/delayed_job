@@ -198,7 +198,6 @@ describe 'Mold process races' do
       end
 
       it 'returns false, not nil, from child_exited for a child process it does not take care of' do
-        pending('BUG (contract): child_exited returns nil, not false, for a child that was never promoted (Child#promoted defaults to nil)')
         boot(10)
         expect(supervisor.child_exited(10, reported(10, 1), {})).to be false
       end
@@ -216,7 +215,6 @@ describe 'Mold process races' do
       end
 
       it 'does not record a mold for an "M" whose mold pid is "-"' do
-        pending('BUG: "M <pid> -" records a nil mold pid, so done? never turns true and signal_molds calls Process.kill(sig, nil)')
         boot(10)
         boot(11)
         ping(10, 6)
@@ -284,7 +282,6 @@ describe 'Mold process races' do
       end
 
       it 'does not plan another promotion while stopping' do
-        pending('BUG (log only): a promotion overdue while stopping logs "promoting a new mold in Ns" during shutdown')
         launcher.stopped = true
         line('M', 10, 901)
         supervisor.child_exited(10, ok(10), {})
@@ -399,7 +396,6 @@ describe 'Mold process races' do
       end
 
       it 'forgets a mold reaped before its "M" is read' do
-        pending('BUG: a mold reaped before its "M" is read is recorded afterwards and never forgotten: done? stays false, shutdown hangs')
         supervisor.child_exited(10, ok(10), {})
         expect(supervisor.reaped(901)).to be false # Unknown yet.
         line('M', 10, 901)
@@ -417,7 +413,6 @@ describe 'Mold process races' do
 
     describe 'an "m" read after its mold was reaped' do
       it 'leaves nothing to wait for at shutdown' do
-        pending('BUG: an "m" from a mold already reaped (status lines are read after reaping) re-records it as abandoned forever')
         boot(10)
         boot(11)
         ping(10, 6)
@@ -425,7 +420,7 @@ describe 'Mold process races' do
         supervisor.child_exited(10, ok(10), {})
         supervisor.reaped(901) # Wrote "m", then died.
         line('m', 901, 10)
-        expect(sent('KILL')).to eq [901] # Too late: it is gone.
+        expect(sent('KILL')).to be_empty # Gone: its pid may be reused.
         expect(supervisor).to be_done
       end
     end
@@ -447,7 +442,6 @@ describe 'Mold process races' do
       end
 
       it 'lets a later promotion happen when it exits with 75' do
-        pending('BUG: a refilled promoted child exiting with 75 never fails its promotion: @promotion stays set, no promotion or refork again')
         supervisor.child_exited(10, reported(10, Delayed::Launcher::Mold::PROMOTION_FAILED), {})
         travel(described_class::MOLD_READY_TIMEOUT + described_class::MAX_RETRY_DELAY)
         supervisor.tick
@@ -456,7 +450,6 @@ describe 'Mold process races' do
       end
 
       it 'lets a later promotion happen when it exits cleanly without forking a mold' do
-        pending('BUG: a refilled promoted child exiting cleanly (its mold lost) never ends its promotion: no promotion or refork again')
         supervisor.child_exited(10, ok(10), {})
         travel(described_class::MOLD_READY_TIMEOUT + 1)
         supervisor.tick
@@ -663,7 +656,6 @@ describe 'Mold process races' do
       end
 
       it 'counts only the children of the active mold' do
-        pending('BUG: a retired mold\'s child failing to boot counts against the active mold (BOOT_FAILURE_LIMIT is per mold)')
         supervisor.child_exited(11, reported(11, 0), {}) # Leaves generation 1 only.
         boot(20, :mold_pid => 900, :generation => 1)
         supervisor.child_started(30, :mold_pid => 900, :generation => 1) # Still booting.

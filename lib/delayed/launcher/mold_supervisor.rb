@@ -73,6 +73,7 @@ module Delayed
         @deferred_slots = [] # [options, replaces_pid] of promoted children
         @steps = {} # old pid => replacement pid (nil until forked)
         @failures = 0 # promotions failed (or molds lost) in a row
+        @reaped = {} # pid => when: exited molds, and children reaped unknown
       end
 
       # Signal-trap safe.
@@ -94,7 +95,8 @@ module Delayed
 
       def child_started(pid, spawn)
         info = Child.new(:mold_pid => spawn[:mold_pid], :generation => spawn.fetch(:generation, @generation),
-                         :started_at => monotonic_now, :jobs => 0, :busy => 0)
+                         :started_at => monotonic_now, :jobs => 0, :busy => 0, :booted => false, :retiring => false,
+                         :promoted => false, :unsafe => false, :orphaned => false)
         replaced = spawn[:replaces_pid]
         if replaced && @steps.key?(replaced)
           info.replaces = replaced
@@ -114,13 +116,18 @@ module Delayed
         step_failed = refork_step_failed(info)
         @steps.delete(pid) # An old child exiting mid-step: its replacement takes over.
         count_boot_failure(pid) if failed_to_boot?(info, status)
-        return true if info.retiring || step_failed
-        info.promoted && promoted_exited(pid, status, options)
+        return promoted_exited(pid, status, options, info.retiring) if info.promoted
+        info.retiring || step_failed
       end
 
       # Returns whether `pid` was a mold (reaped as this process's child).
+      # Status lines are read after reaping, so a mold may be reaped before
+      # its "M" or "m" is read: remembered, it isn't tracked then.
       def reaped(pid)
-        return false unless @molds.key?(pid)
+        unless @molds.key?(pid)
+          @reaped[pid] = monotonic_now
+          return false
+        end
         mold_exited(pid)
         true
       end
@@ -160,8 +167,9 @@ module Delayed
 
     private
 
+      # Counted per mold: only the active mold's children.
       def failed_to_boot?(info, status)
-        info.mold_pid && !info.booted && !status.success?
+        info.mold_pid && info.mold_pid == @active_mold && !info.booted && !status.success?
       end
 
       def logger
@@ -196,7 +204,7 @@ module Delayed
       def mark_booted(info)
         return if info.booted
         info.booted = true
-        @boot_failures = 0 if info.mold_pid
+        @boot_failures = 0 if info.mold_pid && info.mold_pid == @active_mold
         old = info.replaces
         return unless old && @steps.delete(old)
         info.replaces = nil
@@ -262,21 +270,30 @@ module Delayed
 
       # Exited cleanly: it forked its mold (which may be ready already), and
       # its slot is refilled from the mold. Otherwise the promotion failed,
-      # and the launcher replaces it as usual.
-      def promoted_exited(pid, status, options)
+      # and the launcher replaces it as usual. `refilled`: its slot was
+      # already refilled (see #refill_draining_slot). Returns whether the
+      # slot is taken care of.
+      def promoted_exited(pid, status, options, refilled)
         current = @promotion && @promotion[:pid] == pid
         unless status.success?
           promotion_failed(:child_exited, "Child process (pid #{pid}) promoted to mold exited with #{status}, forking no mold") if current
-          return false
+          return refilled
         end
         @promotion[:exited_at] = monotonic_now if current
-        @deferred_slots << [options, pid] unless @launcher.stopped?
-        refill_deferred_slots unless @promotion
+        defer_slot(options, pid) unless refilled
         true
       end
 
+      # Refilled from the new mold once ready.
+      def defer_slot(options, pid)
+        @deferred_slots << [options, pid] unless @launcher.stopped?
+        refill_deferred_slots unless @promotion
+      end
+
       def mold_forked(child_pid, mold_pid)
+        return unless mold_pid
         return if @molds[mold_pid] == :active # Its "m" came first.
+        return reaped_mold_reported(child_pid, mold_pid) if @reaped.key?(mold_pid)
         if promoting?(child_pid)
           @promotion[:mold_pid] = mold_pid
           @molds[mold_pid] ||= :promoted
@@ -286,9 +303,19 @@ module Delayed
       end
 
       def mold_ready(mold_pid, child_pid)
+        return unless mold_pid
         return if @molds[mold_pid] == :active
+        return reaped_mold_reported(child_pid, mold_pid) if @reaped.key?(mold_pid)
         return abandon(mold_pid) unless promoting?(child_pid) && [nil, :promoted].include?(@molds[mold_pid])
         activate(mold_pid)
+      end
+
+      # A mold that exited before its line was read: not tracked, and the
+      # promotion it was for (if still current) failed.
+      def reaped_mold_reported(child_pid, mold_pid)
+        return unless promoting?(child_pid)
+        @promotion[:mold_pid] = mold_pid
+        promotion_failed(:mold_exited, "Mold (pid #{mold_pid}) exited before it was ready")
       end
 
       def promoting?(child_pid)
@@ -332,6 +359,7 @@ module Delayed
         @promotion = nil
         mold = promotion[:mold_pid]
         abandon(mold) if mold && @molds[mold] == :promoted
+        return if @launcher.stopped? # Nothing more to promote.
         delay = retry_promotion(promotion[:trigger], message)
         Delayed.instrument(:mold_promotion_failed, :pid => promotion[:pid], :mold_pid => mold, :trigger => promotion[:trigger],
                                                    :reason => reason, :retry_in => delay)
@@ -383,6 +411,7 @@ module Delayed
       end
 
       def mold_exited(pid)
+        @reaped[pid] = monotonic_now
         role = @molds.delete(pid)
         @children.each_value { |info| info.orphaned = true if info.mold_pid == pid } unless @reaps_orphans
         case role
@@ -460,6 +489,7 @@ module Delayed
         check_promotion
         stop_lingering_molds if @launcher.stopped?
         @early_boots.delete_if { |_, at| monotonic_now - at > boot_timeout }
+        @reaped.delete_if { |_, at| monotonic_now - at > MOLD_READY_TIMEOUT }
         @failures = 0 if @failures > 0 && @active_mold && monotonic_now - @active_since >= MOLD_STABLE_UPTIME
       end
 
