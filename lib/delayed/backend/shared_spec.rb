@@ -448,6 +448,50 @@ shared_examples_for 'a delayed_job backend' do
     end
   end
 
+  describe 'Delayed::Worker.recover_jobs_of (a dead worker process)' do
+    let(:exit_error) { Delayed::ProcessExitError.new('dj.1', 77, double('Process::Status', :signaled? => true, :termsig => 9, :exitstatus => nil)) }
+
+    def dead_job(locked_by, attrs = {})
+      described_class.create!({:payload_object => SimpleJob.new, :locked_by => locked_by, :locked_at => described_class.db_time_now}.merge(attrs))
+    end
+
+    def reloaded(job)
+      described_class.find(job.id)
+    end
+
+    before { skip 'this backend does not implement locked_jobs' if described_class.locked_jobs('nobody').nil? }
+
+    it "counts each of the dead process' jobs as a failed attempt and unlocks it, leaving others alone" do
+      names = Delayed::Worker.lock_names('dj.1 ', 77, 2, 1) # Two threads, two slots each.
+      mine = [dead_job(names[0]), dead_job(names[3])]
+      other = dead_job('dj.2 pid:88 thread:0 slot:0')
+      expect(Delayed::Worker.recover_jobs_of(names, exit_error)).to eq 2
+      mine.map { |job| reloaded(job) }.each do |job|
+        expect([job.attempts, job.locked_by, job.locked_at]).to eq [1, nil, nil]
+        expect(job.last_error).to match(/was killed by signal 9/)
+        expect(job.run_at).to be > described_class.db_time_now
+      end
+      expect(reloaded(other).locked_by).to eq 'dj.2 pid:88 thread:0 slot:0'
+    end
+
+    it 'only unlocks a job that had already failed permanently' do
+      failed_at = described_class.db_time_now - 60
+      job = dead_job('dj.1 pid:77', :attempts => 3, :failed_at => failed_at, :last_error => 'original')
+      expect(Delayed::Worker.recover_jobs_of(['dj.1 pid:77'], exit_error)).to eq 0
+      job = reloaded(job)
+      expect([job.attempts, job.last_error, job.locked_by]).to eq [3, 'original', nil]
+      expect(job.failed_at).to be_within(1).of(failed_at)
+    end
+
+    it 'reschedules a job whose payload can no longer be loaded, with the default back-off' do
+      job = dead_job('dj.1 pid:77', :handler => "--- !ruby/object:NoSuchJobClassAnyMore\nx: 1\n")
+      expect(Delayed::Worker.recover_jobs_of(['dj.1 pid:77'], exit_error)).to eq 1
+      job = reloaded(job)
+      expect([job.attempts, job.locked_by, job.failed_at]).to eq [1, nil, nil]
+      expect(job.run_at).to be_within(3).of(described_class.db_time_now + 6)
+    end
+  end
+
   context 'clear_locks!' do
     before do
       @job = create_job(:locked_by => 'worker1', :locked_at => described_class.db_time_now)
@@ -854,6 +898,226 @@ end
 
 # For backends implementing lock_heartbeats?, touch_locks,
 # destroy_if_locked_by and save_if_locked_by. Use with 'a delayed_job backend'.
+# Examples running a real Delayed::Dispatcher (threads, prefetch, shutdown,
+# and lock heartbeats with prefetch where supported) against the backend.
+# Set Delayed::Worker.backend to the described class around them.
+shared_examples_for 'a delayed_job backend running a dispatcher' do
+  let(:dj_log) { Concurrent::Array.new }
+  let(:dj_errors) { Concurrent::Array.new }
+  let(:dj_events) { Concurrent::Array.new }
+
+  before do
+    described_class.delete_all
+    GateJob.reset
+    FuzzJob.completed.clear
+    Delayed::Worker.sleep_delay = 0.05
+    Delayed::Worker.on_thread_error = ->(error, info) { dj_errors << [error, info] }
+    @dj_running = []
+    @dj_subscription = ActiveSupport::Notifications.subscribe('jobs_released.delayed_job') { |*args| dj_events << args.last }
+  end
+
+  after do
+    GateJob.release = true
+    @dj_running.each do |dispatcher, thread|
+      dispatcher.stop
+      thread.join(10)
+    end
+    ActiveSupport::Notifications.unsubscribe(@dj_subscription)
+    Delayed::Worker.reset
+  end
+
+  def dj_dispatcher(threads, prefix = nil)
+    Delayed::Dispatcher.new(:threads => threads).tap do |dispatcher|
+      dispatcher.name_prefix = prefix if prefix
+      [dispatcher, *dispatcher.workers].each do |speaker|
+        allow(speaker).to receive(:say) { |text, level = 'info'| dj_log << [level, text] }
+      end
+    end
+  end
+
+  def dj_run_in_thread(dispatcher)
+    Thread.new { dispatcher.run }.tap do |thread|
+      thread.report_on_exception = false
+      @dj_running << [dispatcher, thread]
+    end
+  end
+
+  def dj_wait_until(timeout = 10)
+    Timeout.timeout(timeout) { sleep 0.02 until yield }
+  end
+
+  def dj_enqueue(payload, priority = 0)
+    described_class.create!(:payload_object => payload, :priority => priority)
+  end
+
+  def dj_locked
+    described_class.all.to_a.select(&:locked_by)
+  end
+
+  def dj_reloaded(job)
+    described_class.find(job.id)
+  end
+
+  def dj_lost_locks
+    dj_log.map(&:last).grep(/lock expired and another worker reserved it/)
+  end
+
+  [0, 2].each do |prefetch|
+    it "runs every job exactly once with two dispatchers competing (prefetch #{prefetch})" do
+      Delayed::Worker.prefetch = prefetch
+      Delayed::Worker.exit_on_complete = true
+      40.times { |i| dj_enqueue(FuzzJob.new(i, rand * 0.02)) }
+      runs = [dj_dispatcher(3, 'a '), dj_dispatcher(3, 'b ')].map { |dispatcher| Thread.new { dispatcher.run } }
+      Timeout.timeout(60) { runs.each(&:join) }
+      expect(FuzzJob.completed.size).to eq 40
+      expect(FuzzJob.completed.values).to all(eq 1)
+      expect(described_class.count).to eq 0
+      expect(dj_errors).to be_empty
+    end
+  end
+
+  it 'holds jobs queued behind running ones, each locked under a slot name of its own' do
+    Delayed::Worker.prefetch = 1
+    4.times { |i| dj_enqueue(GateJob.new(i)) }
+    dj_run_in_thread(dj_dispatcher(2))
+    dj_wait_until { GateJob.started.size == 2 && dj_locked.size == 4 }
+    names = dj_locked.map(&:locked_by)
+    expect(names.uniq.size).to eq 4
+    expect(names).to all(match(/ slot:[01]\z/))
+    GateJob.release = true
+    dj_wait_until { described_class.count.zero? }
+    expect(GateJob.finished.sort).to eq [0, 1, 2, 3]
+  end
+
+  it 'releases queued jobs at once on shutdown, attempts unchanged, while running ones finish' do
+    Delayed::Worker.prefetch = 2
+    jobs = Array.new(3) { |i| dj_enqueue(GateJob.new(i)) }
+    dispatcher = dj_dispatcher(1)
+    thread = dj_run_in_thread(dispatcher)
+    dj_wait_until { GateJob.started.size == 1 && dj_locked.size == 3 }
+    dispatcher.stop
+    dj_wait_until { dj_locked.size == 1 }
+    queued = jobs.map { |job| dj_reloaded(job) }.reject(&:locked_by)
+    expect(queued.map { |job| [job.attempts, job.locked_at] }).to eq [[0, nil], [0, nil]]
+    expect(dj_events.map { |payload| payload[:reason] }).to include 'shutdown'
+    GateJob.release = true
+    Timeout.timeout(10) { thread.join }
+    expect(described_class.count).to eq 2
+    expect(dj_locked).to be_empty
+  end
+
+  it 'releases a running job interrupted by quit, attempts unchanged' do
+    job = dj_enqueue(GateJob.new(:a))
+    dispatcher = dj_dispatcher(1)
+    thread = dj_run_in_thread(dispatcher)
+    dj_wait_until { GateJob.started.size == 1 }
+    dispatcher.quit
+    Timeout.timeout(10) { thread.join }
+    expect(GateJob.interrupted).to eq [:a]
+    job = dj_reloaded(job)
+    expect([job.attempts, job.locked_by, job.locked_at]).to eq [0, nil, nil]
+  end
+
+  context 'with lock heartbeats' do
+    before do
+      skip 'this backend does not support lock heartbeats' unless described_class.lock_heartbeats?
+      Delayed::Worker.lock_heartbeat_interval = 0.1
+      Delayed::Worker.lock_timeout = 0.5
+    end
+
+    it 'keeps the locks of queued jobs fresh while they wait, so no other worker takes them' do
+      Delayed::Worker.prefetch = 2
+      3.times { |i| dj_enqueue(GateJob.new(i)) }
+      dj_run_in_thread(dj_dispatcher(1))
+      dj_wait_until { GateJob.started.size == 1 && dj_locked.size == 3 }
+      sleep 3 * Delayed::Worker.lock_timeout # Unrefreshed, they would have expired twice over.
+      expect(dj_locked.map(&:locked_at)).to all(be > described_class.db_time_now - Delayed::Worker.lock_timeout)
+      expect(described_class.reserve(Delayed::Worker.named('intruder'), Delayed::Worker.lock_expiry)).to be_nil
+      GateJob.release = true
+      dj_wait_until { described_class.count.zero? }
+      expect(GateJob.finished.sort).to eq [0, 1, 2]
+      expect(dj_lost_locks).to be_empty
+      expect(dj_errors).to be_empty
+    end
+
+    [false, true].each do |dynamic|
+      it "runs every job exactly once with two dispatchers competing (prefetch_dynamic #{dynamic})" do
+        Delayed::Worker.prefetch = 2
+        Delayed::Worker.prefetch_dynamic = dynamic
+        Delayed::Worker.exit_on_complete = true
+        40.times { |i| dj_enqueue(FuzzJob.new(i, rand * 0.2)) } # Queued for about lock_timeout.
+        runs = [dj_dispatcher(2, 'a '), dj_dispatcher(2, 'b ')].map { |dispatcher| Thread.new { dispatcher.run } }
+        Timeout.timeout(60) { runs.each(&:join) }
+        expect(FuzzJob.completed.size).to eq 40
+        expect(FuzzJob.completed.values).to all(eq 1)
+        expect(described_class.count).to eq 0
+        expect(dj_lost_locks).to be_empty
+        expect(dj_errors).to be_empty
+      end
+    end
+
+    it 'releases the jobs queued behind a stuck job, so another thread runs them meanwhile' do
+      Delayed::Worker.prefetch = 1
+      # One poll fills the slots in rounds, in priority order: the stuck job
+      # runs on one thread, `behind` is queued behind it.
+      stuck = dj_enqueue(StuckJob.new(4, 1), 0) # Ignores its 1s timeout for 4s.
+      dj_enqueue(FuzzJob.new(:quick, 0), 1)
+      dj_enqueue(FuzzJob.new(:behind, 0), 2)
+      dj_enqueue(FuzzJob.new(:other, 0), 3)
+      dj_run_in_thread(dj_dispatcher(2))
+      dj_wait_until(3) { FuzzJob.completed.key?(:behind) }
+      expect(dj_reloaded(stuck)).not_to be_nil # Still stuck.
+      expect(dj_events.map { |payload| payload[:reason] }).to include 'stuck job'
+      expect(FuzzJob.completed.values).to all(eq 1)
+    end
+
+    it 'times a job started while the heartbeat keeps failing out at its lock expiry' do
+      Delayed::Worker.prefetch = 1
+      allow(described_class).to receive(:touch_locks).and_raise(IOError, 'database gone')
+      dj_run_in_thread(dj_dispatcher(1))
+      sleep 2 * Delayed::Worker.lock_timeout # No refresh gets through.
+      job = dj_enqueue(LongRunningJob.new)
+      dj_wait_until { dj_reloaded(job).attempts == 1 }
+      expect(dj_reloaded(job).last_error).to match(/execution expired/)
+      expect(dj_errors.map { |_, info| info[:context] }.uniq).to eq ['Lock heartbeat']
+    end
+
+    it 'releases a queued job whose lock expired while the heartbeat was failing, then runs it once' do
+      Delayed::Worker.prefetch = 1
+      dj_enqueue(GateJob.new(:first))
+      dj_enqueue(GateJob.new(:queued))
+      allow(described_class).to receive(:touch_locks).and_raise(IOError, 'database gone')
+      dj_run_in_thread(dj_dispatcher(1))
+      dj_wait_until { GateJob.started.size == 1 && dj_locked.size == 2 }
+      sleep 2 * Delayed::Worker.lock_timeout
+      GateJob.release = true
+      dj_wait_until { described_class.count.zero? }
+      expect(dj_events.map { |payload| payload[:reason] }).to include 'lock expired in queue'
+      expect(GateJob.finished.sort).to eq %i(first queued)
+    end
+
+    it 'stops the heartbeat with the dispatcher' do
+      Delayed::Worker.prefetch = 1
+      dj_enqueue(GateJob.new(:a))
+      touches = Concurrent::AtomicFixnum.new
+      allow(described_class).to(receive(:touch_locks).and_wrap_original do |original, names|
+        touches.increment
+        original.call(names)
+      end)
+      dispatcher = dj_dispatcher(1)
+      thread = dj_run_in_thread(dispatcher)
+      dj_wait_until { touches.value > 0 }
+      GateJob.release = true
+      dispatcher.stop
+      Timeout.timeout(10) { thread.join }
+      expect(dispatcher.instance_variable_get(:@heartbeat)).not_to be_alive
+      beats = touches.value
+      sleep 3 * Delayed::Worker.lock_heartbeat_interval
+      expect(touches.value).to eq beats
+    end
+  end
+end
+
 shared_examples_for 'a delayed_job backend supporting lock heartbeats' do
   let(:now) { described_class.db_time_now }
 
