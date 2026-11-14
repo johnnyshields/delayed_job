@@ -31,6 +31,11 @@ jobs:
             rails_version: '7.2.0'
           - ruby: jruby-head
             rails_version: '7.2.0'
+          # TruffleRuby (parallel threads, as on JRuby; native sqlite3)
+          - ruby: truffleruby
+            rails_version: '8.1.0'
+          - ruby: truffleruby-head
+            rails_version: '8.1.0'
 
     continue-on-error: ${{ matrix.rails_version == 'edge' || endsWith(matrix.ruby, 'head') }}
 

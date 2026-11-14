@@ -64,6 +64,14 @@ module Delayed
       Thread.respond_to?(:handle_interrupt) && Thread.respond_to?(:pending_interrupt?)
     end
 
+    # TruffleRuby's Thread.pending_interrupt? takes no class: any pending
+    # interrupt counts then (#discard_stale_interrupts only lets in shutdown
+    # ones).
+    def self.pending_interrupt_by_class?
+      return @pending_interrupt_by_class if defined?(@pending_interrupt_by_class)
+      @pending_interrupt_by_class = Thread.method(:pending_interrupt?).arity != 0
+    end
+
     attr_reader :workers, :name_prefix
 
     # Parent (launcher) pid. If it goes away (e.g. SIGKILL), the dispatcher
@@ -659,6 +667,7 @@ module Delayed
 
     def stale_interrupt_pending?
       return false unless self.class.interrupt_masking? # Nothing is deferred.
+      return Thread.pending_interrupt? unless self.class.pending_interrupt_by_class?
       SHUTDOWN_INTERRUPTS.any? { |klass| Thread.pending_interrupt?(klass) }
     end
 

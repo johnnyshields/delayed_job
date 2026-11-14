@@ -464,6 +464,7 @@ describe 'Stopping a worker' do
     end
 
     it 'leaves other deferred interrupts pending' do
+      skip "TruffleRuby's Thread.pending_interrupt? takes no class" unless Delayed::Dispatcher.pending_interrupt_by_class?
       ready = Queue.new
       go = Queue.new
       thread = Thread.new do

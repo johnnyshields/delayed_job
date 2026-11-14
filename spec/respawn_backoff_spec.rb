@@ -171,7 +171,7 @@ describe Delayed::Launcher::Forking, 'replacing child processes that keep dying'
       fail_forks(1)
       expect(launcher.send(:replace_worker, 'delayed_job.x', 999, {}, crashed)).to be_nil
       expect(logged).to eq ['Could not fork a replacement for child process delayed_job.x (pid 999): ' \
-                            'Errno::EAGAIN: Resource temporarily unavailable; retrying in 1s']
+                            "Errno::EAGAIN: #{Errno::EAGAIN.new.message}; retrying in 1s"] # Its text varies by platform.
       expect(reported.map { |e, i| [e.class, i] }).to eq [[Errno::EAGAIN, {:context => 'Forking', :worker => 'delayed_job.x', :pid => 999}]]
       now[0] += 1
       launcher.send(:replace_due_workers)
