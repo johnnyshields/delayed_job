@@ -4,13 +4,18 @@ module Delayed
     # MoldSupervisor for the parent side.
     #
     # A promoted child process stops like on TERM, forks a mold and exits.
-    # The mold (an orphan, so no mold is ever another mold's child) runs no
-    # jobs: it forks the child processes the parent asks for, which share its
-    # warmed memory copy-on-write, and reports their exits.
+    # The mold runs no jobs: it forks the child processes the parent asks
+    # for, which share its warmed memory copy-on-write, and reports their
+    # exits. When the parent is a child subreaper (Linux), the mold is
+    # reparented to it at once, and so are its children if it exits.
     class Mold
-      FORK_RECORD = 'NN'.freeze # worker index, pool index
-      FORK_RECORD_BYTES = 8
+      FORK_RECORD = 'NNN'.freeze # worker index, pool index, generation
+      FORK_RECORD_BYTES = 12
       NO_POOL = 0xFFFF_FFFF
+
+      # Exit status of a promoted child process that forks no mold (its
+      # promotion was cancelled by a signal, or its threads didn't stop).
+      PROMOTION_FAILED = 75
 
       # Index of the pool with these options' queues, or NO_POOL.
       def self.pool_index(pools, options)
@@ -23,12 +28,13 @@ module Delayed
       # * fork: the parent writes FORK_RECORDs; only the active mold reads.
       # * status: one line per message, shorter than PIPE_BUF so writes from
       #   several processes don't interleave:
-      #     b <pid>                   child booted
-      #     p <pid> <jobs> <busy>     child ping (jobs performed, busy threads)
-      #     M <child pid> <mold pid>  promoted child forked its mold
-      #     m <mold pid>              mold ready
-      #     f <mold pid> <pid> <idx>  mold forked a child
-      #     x <pid> <exit> <signal>   mold reaped a child ("-" when nil)
+      #     b <pid>                             child booted
+      #     p <pid> <jobs> <busy> <unsafe>      child ping
+      #     M <child pid> <mold pid>            promoted child forked its mold
+      #     m <mold pid> <child pid>            mold ready
+      #     f <mold pid> <pid> <idx>            mold forked a child
+      #     e <mold pid> <idx> <errno>          mold failed to fork a child
+      #     x <mold pid> <pid> <exit> <signal>  mold reaped a child ("-": nil)
       # * life: never written; EOF tells a mold the parent is gone.
       class Pipes
         attr_reader :fork_read, :life_read
@@ -56,11 +62,11 @@ module Delayed
           nil # The parent is gone.
         end
 
-        def request_fork(worker_index, pool_index)
-          @fork_write.write([worker_index, pool_index].pack(FORK_RECORD))
+        def request_fork(worker_index, pool_index, generation)
+          @fork_write.write([worker_index, pool_index, generation].pack(FORK_RECORD))
         end
 
-        # [worker index, pool index], or nil.
+        # [worker index, pool index, generation], or nil.
         def read_fork_request
           record = @fork_read.read_nonblock(FORK_RECORD_BYTES, :exception => false)
           record.unpack(FORK_RECORD) if record.is_a?(String) && record.bytesize == FORK_RECORD_BYTES
@@ -84,22 +90,30 @@ module Delayed
         end
       end
 
-      def initialize(launcher, pipes)
+      # `info`: :promoted_pid (the child that forked it), :generation, and
+      # :exit_when_retired (true when the parent adopts its children).
+      def initialize(launcher, pipes, info)
         @launcher = launcher
         @pipes = pipes
+        @info = info
         @children = {}
-        @done = false # Retired or stopping: forks nothing more.
+        @retired = false
+        @stopping = false
       end
 
-      # Yields once the signal traps are in place (to prepare the process).
-      # Returns once retired or stopping with no children left, or once the
-      # parent is gone (its children then stop by themselves).
+      # Yields once the signal traps are in place (to name the process).
+      # Returns when retired (at once if the parent adopts its children, else
+      # once they have exited), when stopping and its children have exited,
+      # or when the parent is gone (its children then stop by themselves).
       def run
         @wake_read, @wake_write = IO.pipe
         trap_signals
+        return if @launcher.child_signals.any? # Signalled before the traps.
         yield if block_given?
-        Delayed::Worker.lifecycle.run_callbacks(:mold, Process.pid) do
-          @pipes.report("m #{Process.pid}")
+        Delayed::Worker.lifecycle.run_callbacks(:mold, Process.pid, @info[:generation]) do
+          @launcher.warmup_heap # After the hooks, which may free memory.
+          warn_about_threads
+          @pipes.report("m #{Process.pid} #{@info[:promoted_pid]}")
           fork_loop
         end
       end
@@ -124,43 +138,80 @@ module Delayed
         Signal.trap('HUP', 'IGNORE')
       end
 
+      # Threads don't survive fork: whatever they were doing is frozen,
+      # mid-way, in every child forked from here.
+      def warn_about_threads
+        others = Thread.list.reject { |thread| thread == Thread.current || !thread.alive? }
+        return if others.empty?
+        names = others.map { |thread| thread.name || thread.inspect }.join(', ')
+        @launcher.logger.warn "Mold (pid #{Process.pid}) has #{others.size} other thread(s) running, which child processes " \
+                              "won't have: #{names}. See Fork safety in the README."
+      end
+
       def fork_loop
         loop do
           ready = wait_for_work
           reap_children
           return if ready.include?(@pipes.life_read)
-          fork_requested_child if ready.include?(@pipes.fork_read) && !@done
-          return if @done && @children.empty?
+          fork_requested_child if ready.include?(@pipes.fork_read) && !done?
+          return if finished?
         end
+      end
+
+      # Adopted by the parent, its children don't need it once retired.
+      def finished?
+        (@retired && @info[:exit_when_retired]) || (done? && @children.empty?)
+      end
+
+      def done?
+        @retired || @stopping
       end
 
       # Returns the readable pipes; wakes at least every second.
       def wait_for_work
         readers = [@wake_read, @pipes.life_read]
-        readers << @pipes.fork_read unless @done
+        readers << @pipes.fork_read unless done?
         ready = IO.select(readers, nil, nil, 1)&.first || []
         codes = @wake_read.read_nonblock(64, :exception => false)
-        @done = true if codes.is_a?(String) && codes.match?(/[US]/)
+        if codes.is_a?(String)
+          @retired ||= codes.include?('U')
+          @stopping ||= codes.include?('S')
+        end
         ready
       end
 
+      # A failed fork (EAGAIN, ENOMEM) is reported; the parent forks the
+      # child itself.
       def fork_requested_child
-        worker_index, pool_index = @pipes.read_fork_request
+        worker_index, pool_index, generation = @pipes.read_fork_request
         return unless worker_index
-        pid = @launcher.fork_mold_child(worker_index, pool_index, [@wake_read, @wake_write])
+        disconnect_backend
+        pid = @launcher.fork_mold_child(worker_index, pool_index, generation, [@wake_read, @wake_write])
         @children[pid] = true
         @pipes.report("f #{Process.pid} #{pid} #{worker_index}")
+      rescue SystemCallError => error
+        @launcher.logger.error "Mold (pid #{Process.pid}) could not fork child process #{worker_index}: #{error.class}: #{error.message}"
+        @pipes.report("e #{Process.pid} #{worker_index} #{error.errno}")
       end
 
+      # Connections opened in the mold (e.g. by a :mold hook) must not be
+      # shared with its children.
+      def disconnect_backend
+        Delayed::Worker.backend.before_fork
+      rescue StandardError => error
+        @launcher.logger.error "Mold (pid #{Process.pid}) could not disconnect from the database: #{error.class}: #{error.message}"
+      end
+
+      # Only its own children: a hook's subprocesses are the hook's to reap.
       def reap_children
-        loop do
-          pid, status = Process.wait2(-1, Process::WNOHANG)
-          break unless pid
+        @children.dup.each_key do |pid|
+          _, status = Process.wait2(pid, Process::WNOHANG)
+          next unless status
           @children.delete(pid)
-          @pipes.report("x #{pid} #{status.exitstatus || '-'} #{status.termsig || '-'}")
+          @pipes.report("x #{Process.pid} #{pid} #{status.exitstatus || '-'} #{status.termsig || '-'}")
+        rescue Errno::ECHILD
+          @children.delete(pid)
         end
-      rescue Errno::ECHILD
-        nil
       end
     end
   end

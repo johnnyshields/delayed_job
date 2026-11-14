@@ -87,6 +87,11 @@ module Delayed
       log(:info) { "Mold (pid #{p[:pid]}) activated, generation #{p[:generation]}" }
     end
 
+    def mold_refork_completed(event)
+      p = event.payload
+      log(:info) { "Mold (pid #{p[:pid]}) refork completed, generation #{p[:generation]}" }
+    end
+
     def mold_retired(event)
       log(:info) { "Mold (pid #{event.payload[:pid]}) retired" }
     end

@@ -29,6 +29,18 @@ Delayed::Launcher::Forking.respawn_delay_unit = respawn_delay_unit if respawn_de
 # Seconds between child pings in mold mode (see Launcher::Mold).
 mold_ping_interval = options.delete(:mold_ping_interval)
 Delayed::Launcher::Forking.mold_ping_interval = mold_ping_interval if mold_ping_interval
+# Mold timings (see Launcher::MoldSupervisor), lowered by specs.
+{:mold_retry_delay_unit => :retry_delay_unit, :mold_boot_timeout => :boot_timeout,
+ :mold_drain_deadline => :drain_deadline}.each do |option, setting|
+  value = options.delete(option)
+  Delayed::Launcher::MoldSupervisor.send("#{setting}=", value) if value
+end
+# Runs the mold process as without a child subreaper (not Linux, no fiddle).
+Delayed::ProcessUtil.define_singleton_method(:enable_child_subreaper) { false } if options.delete(:no_subreaper)
+# Child processes forked by a mold crash (exit 3) as they start.
+broken_mold = options.delete(:broken_mold)
+# Seconds a mold sleeps in a before(:mold) hook, before it is ready.
+mold_hook_delay = options.delete(:mold_hook_delay)
 
 Delayed::Backend::SqliteFile::Job.connect(db_path)
 Delayed::Worker.backend = Delayed::Backend::SqliteFile::Job
@@ -75,6 +87,26 @@ if crash_queue
       super()
     end
   end)
+end
+
+if broken_mold
+  Delayed::Backend::SqliteFile::Job.singleton_class.prepend(Module.new do
+    define_method(:after_fork) do
+      exit!(3) if $0.include?(' gen ')
+      super()
+    end
+  end)
+end
+
+if mold_hook_delay
+  Delayed::Worker.plugins << Class.new(Delayed::Plugin) do
+    callbacks do |lifecycle|
+      lifecycle.before(:mold) do |pid, _generation|
+        puts "mold #{pid} hook sleeping"
+        sleep mold_hook_delay
+      end
+    end
+  end
 end
 
 options[:pools] = options[:pools].map { |queues, count| [queues, count] } if options[:pools]

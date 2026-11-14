@@ -604,43 +604,86 @@ MOLD=1000,5000,20000 NUM_PROCESSES=4 rake jobs:work
 Delayed::Worker.mold = [1000, 5000, 20000] # true for [1000]
 ```
 
+On Linux, the parent becomes a *child subreaper* (`prctl`, through the
+`fiddle` gem), so the mold, and any child process it leaves behind, is
+reparented to the parent:
+
 ```
 delayed_job (parent)
- ├─ delayed_job.1: mold
- │   ├─ delayed_job.2: 2/5 busy, queues=*
- │   └─ delayed_job.3: 5/5 busy, queues=*
+ ├─ delayed_job.1: mold gen 1
+ ├─ delayed_job.2 gen 1: 2/5 busy, queues=*      (forked by the mold)
+ └─ delayed_job.3 gen 1: 5/5 busy, queues=*
 ```
+
+(`ps` shows the children under the mold while it lives.) Elsewhere, or if
+`fiddle` can't be loaded, a warning is logged and the mold is reparented to
+init instead, with its children under it: process-tree tools such as
+`pstree` or `pkill -P` won't find them under the parent, so use the process
+group, the cgroup, or the `process_spawned` events (`:mold_pid`).
 
 * The child process with the most jobs performed is promoted, preferring one
   with no job running, so promotion doesn't wait for a long job. Its running
   jobs finish first (interrupted and released after `--shutdown-timeout`, if
-  set).
-* Child processes are reforked one at a time: each replacement is forked from
-  the mold and starts working before the process it replaces is stopped, so
-  capacity doesn't drop. The previous mold exits once its child processes have.
-* After the last threshold, `SIGURG` to the parent promotes a new mold at any
-  time.
-* Before forking, the mold disconnects the backend (as the parent does) and
-  compacts its heap. Add your own steps with the `:mold` lifecycle hook, e.g.
-  to close clients the children shouldn't share:
+  set, never counting as a failed attempt). If it is still busy after 5
+  minutes, its slot is refilled meanwhile.
+* Child processes are reforked about 10% at a time (at least one), idle ones
+  first: each replacement is forked from the mold, and the process it replaces
+  is stopped once it has started, so capacity doesn't drop. If a replacement
+  dies before starting, the old process is kept. The previous mold then
+  exits.
+* While reforking, up to N + 10% child processes run (each holding its
+  database connections), plus the new mold and, briefly, the old one: leave
+  memory and connection headroom for that.
+* After the last threshold, `SIGURG` to the parent promotes a new mold, once
+  any refork in progress has finished.
+* If the mold dies (e.g. killed by the OOM killer), its child processes carry
+  on (adopted by the parent; without a subreaper they stop gracefully and are
+  replaced), the parent forks new child processes itself, and a new mold is
+  promoted, with a back-off growing after each failure in a row. A promotion
+  that fails (the mold never gets ready) is retried the same way. A mold
+  whose child processes keep failing to start, or that stops forking them,
+  is killed and replaced the same way.
+* Before forking, the mold runs your `:mold` hooks, compacts its heap, and
+  disconnects the backend before each fork. Use the hook to close clients
+  the children shouldn't share (it's passed the mold's pid and generation):
 
   ```ruby
   class MoldPlugin < Delayed::Plugin
     callbacks do |lifecycle|
-      lifecycle.before(:mold) { |_pid| Redis.current.disconnect! }
-      lifecycle.after(:mold) { |_pid| puts 'Mold exiting' }
+      lifecycle.before(:mold) { |_pid, _generation| Redis.current.disconnect! }
+      lifecycle.after(:mold) { |_pid, _generation| puts 'Mold exiting' }
     end
   end
   ```
-* Dying child processes are recovered and replaced as usual. If the mold
-  itself dies, its child processes stop gracefully (as when their parent
-  dies) and are replaced from the parent, until the next promotion.
 * Needs `fork` (not on JRuby or TruffleRuby), and runs only in forking mode
   (`--fork` or `rake jobs:work`). With `-n1`, no process works jobs while the
   only one is promoted. It can't be combined with `--identifier`.
 
-Measure the gain before relying on it: compare the children's total PSS
-(`grep Pss /proc/<pid>/smaps_rollup`) before and after a refork.
+The parent logs the total PSS (proportional set size, which counts shared
+pages once) of its child processes and molds when a mold is activated and
+again once every child process is reforked (`mold_activated` and
+`mold_refork_completed` events, `:pss_mb`). Check the gain before relying on
+it.
+
+##### Fork safety
+
+A mold is a process that has been running jobs, so it may hold state that
+doesn't survive `fork`. Plain forking from the parent can be fine while
+reforking isn't:
+
+* **Threads** don't survive fork. Before its first fork, the mold logs a
+  warning naming any thread still running (e.g. a client's background
+  monitor). A thread holding a lock at fork time can leave the lock held
+  forever in every child.
+* **Connections** (Redis, HTTP pools, extra database clients) opened while
+  running jobs are shared by every child unless closed in `before(:mold)`.
+* **Fork-unsafe native libraries**: e.g. grpc (set
+  `GRPC_ENABLE_FORK_SUPPORT`, or avoid it in jobs), libvips/ruby-vips, and
+  others built on libgobject.
+
+A job (or library) that leaves its process unsafe to fork can call
+`Delayed::Worker.no_longer_fork_safe!`; that child process is then never
+promoted. Try mold mode in staging first.
 
 ### Running via Rake
 

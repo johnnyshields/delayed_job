@@ -110,15 +110,31 @@ module Delayed
       end
 
       # In a mold: forks the child process the parent asked for.
-      def fork_mold_child(worker_index, pool_index, close_ios)
+      def fork_mold_child(worker_index, pool_index, generation, close_ios)
         options = pool_index == Mold::NO_POOL ? @options : @options.merge(:queues => pools[pool_index].first)
         child_signals.clear # Before forking: the child's traps append to it.
         fork do
           pending_signals = capture_signals
           close_ios.each(&:close)
           %w[CHLD URG].each { |signal| Signal.trap(signal, 'DEFAULT') }
+          @mold_generation = generation
           run_worker(get_name(worker_index), options, pending_signals)
         end
+      end
+
+      # Starts a child process, retrying with back-off if fork fails.
+      def add_worker_safely(options, replaces_pid = nil)
+        add_worker(options, :replaces_pid => replaces_pid)
+      rescue SystemCallError => error
+        fork_failed(error, options, replaces_pid)
+      end
+
+      # Forks a requested child process here, retrying with back-off if fork
+      # fails.
+      def start_child_safely(index, options, spawn)
+        start_child(options, spawn, index)
+      rescue SystemCallError => error
+        fork_failed(error, options, spawn[:replaces_pid])
       end
 
     private
@@ -220,18 +236,21 @@ module Delayed
       # it to).
       def add_worker(options, replaces_pid: nil, delay: 0, streak: nil)
         return if stop_signals.any?
+        spawn = {:replaces_pid => replaces_pid, :delay => delay, :streak => streak}
+        return start_child(options, spawn) unless @mold_supervisor&.forking_from_mold?
         index = @worker_index
         @worker_index += 1
-        spawn = {:replaces_pid => replaces_pid, :delay => delay, :streak => streak}
-        return @mold_supervisor.request_fork(index, options, spawn) if @mold_supervisor&.forking_from_mold?
-        start_child(index, options, spawn)
+        @mold_supervisor.request_fork(index, options, spawn.merge(:generation => @mold_supervisor.generation))
       end
 
-      # Forks a child process here.
-      def start_child(index, options, spawn)
+      # Forks a child process here, named after `index` (by default the next
+      # one, used up only once forked).
+      def start_child(options, spawn, index = nil)
         return if stop_signals.any?
-        worker_name = get_name(index)
-        child_started(worker_name, fork_worker(worker_name, options), options, spawn)
+        worker_name = get_name(index || @worker_index)
+        pid = fork_worker(worker_name, options)
+        @worker_index += 1 unless index
+        child_started(worker_name, pid, options, spawn)
       end
 
       # Records a forked child process. `spawn`: :replaces_pid, :delay,
@@ -243,7 +262,7 @@ module Delayed
         respawn_streaks[worker_pid] = spawn[:streak] if spawn[:streak]
         @mold_supervisor&.child_started(worker_pid, spawn)
         Delayed.instrument(:process_spawned, {:worker => worker_name, :pid => worker_pid, :replaces_pid => spawn[:replaces_pid],
-                                              :delay => spawn[:delay] || 0}.merge(spawn.slice(:mold_pid)))
+                                              :delay => spawn[:delay] || 0}.merge(spawn.slice(:mold_pid, :generation).compact))
         catch_up_on_stop(worker_pid)
         worker_pid
       end
@@ -339,8 +358,8 @@ module Delayed
         logger.warn 'No child processes found'
       end
 
-      # Molds aren't waited for, and children forked by a mold are reported
-      # by it, so this polls.
+      # Polls: children forked by a mold are reported by it, and, without a
+      # subreaper, molds and their orphans aren't this process's to wait for.
       def run_mold_loop
         loop do
           reap_children
@@ -350,12 +369,15 @@ module Delayed
         end
       end
 
-      # Direct children, and orphans when this process is PID 1.
+      # Direct children, and orphans reparented here (subreaper or PID 1),
+      # e.g. molds, a dead mold's children, and processes jobs left behind.
       def reap_children
         loop do
           pid, status = Process.wait2(-1, Process::WNOHANG)
           break unless pid
-          handle_exit(pid, status) unless @mold_supervisor.reaped(pid)
+          next if @mold_supervisor.reaped(pid)
+          next if handle_exit(pid, status)
+          logger.debug "Reaped process (pid #{pid}) exited: #{status}"
         end
       rescue Errno::ECHILD
         nil
@@ -380,7 +402,7 @@ module Delayed
 
       def handle_exit(worker_pid, child_status)
         worker_name, options = workers_lock.synchronize { workers.delete(worker_pid) }
-        return unless worker_name
+        return false unless worker_name
         # A child replaced by a refork isn't again; a promoted one is, at once.
         mold_role = @mold_supervisor&.child_exited(worker_pid, child_status)
         replace = !@stopped && mold_role != :retiring
@@ -388,10 +410,8 @@ module Delayed
         recover_jobs_of_worker(worker_name, worker_pid, options, child_status)
         publish_child_exited(worker_name, worker_pid, child_status, respawn_in(worker_pid, replace, mold_role))
         warn_if_sigkilled(worker_name, worker_pid, child_status, replace)
-        return unless replace
-        return replace_worker(worker_name, worker_pid, options, child_status) unless mold_role == :promoted
-        forget_child(worker_pid)
-        @mold_supervisor.defer_slot(options)
+        refill_slot([worker_name, worker_pid, options, child_status], mold_role) if replace
+        true
       ensure
         @plans&.delete(worker_pid)
       end
@@ -408,6 +428,14 @@ module Delayed
         nil
       end
 
+      # A promoted child's slot is refilled from its mold, once ready.
+      def refill_slot(exited, mold_role)
+        return replace_worker(*exited) unless mold_role == :promoted
+        _, pid, options, = exited
+        forget_child(pid)
+        @mold_supervisor.defer_slot(options, pid)
+      end
+
       def forget_child(pid)
         @plans&.delete(pid)
         started_at.delete(pid)
@@ -419,11 +447,10 @@ module Delayed
         logger.warn "Child process #{worker_name} (pid #{pid}) was SIGKILLed (e.g. by the OOM killer)#{'; replacing it' if replace}"
       end
 
-      # Seconds until replaced, or nil if not. A child promoted to mold is
-      # replaced at once.
+      # Seconds until replaced, or nil if not (or not yet known: a child
+      # promoted to mold is replaced once its mold is ready).
       def respawn_in(pid, replace, mold_role)
-        return unless replace
-        return 0 if mold_role == :promoted
+        return unless replace && mold_role != :promoted
         respawn_plan(pid)[2] || 0
       end
 
@@ -465,6 +492,17 @@ module Delayed
                      "#{error.class}: #{error.message}; retrying in #{retry_delay}s"
         Delayed::Worker.thread_error(error, :context => 'Forking', :worker => worker_name, :pid => pid)
         pending_replacements << [monotonic_now + retry_delay, [worker_name, pid, options, status, streak + 1, retry_delay]]
+        nil
+      end
+
+      # A fork outside #respawn failed: retried like a failed respawn.
+      def fork_failed(error, options, replaces_pid)
+        worker_name, = workers[replaces_pid]
+        worker_name ||= get_name(@worker_index)
+        retry_delay = respawn_delay(1)
+        logger.error "Could not fork a child process: #{error.class}: #{error.message}; retrying in #{retry_delay}s"
+        Delayed::Worker.thread_error(error, :context => 'Forking', :worker => worker_name, :pid => replaces_pid)
+        pending_replacements << [monotonic_now + retry_delay, [worker_name, replaces_pid, options, nil, 1, retry_delay]]
         nil
       end
 
@@ -586,11 +624,17 @@ module Delayed
       end
 
       # Pipes and supervisor exist before the first fork, so every child
-      # process inherits the pipes.
+      # process inherits the pipes. As a child subreaper (Linux), this
+      # process adopts molds and their orphans, and waits for them.
       def setup_workers
         if molding?
           @mold_pipes = Mold::Pipes.new
-          @mold_supervisor = MoldSupervisor.new(self, mold_thresholds, @mold_pipes, logger)
+          @reaps_orphans = Process.pid == 1 || ProcessUtil.enable_child_subreaper
+          unless @reaps_orphans
+            logger.warn 'Mold process: could not make the parent a child subreaper (needs Linux and the fiddle gem); ' \
+                        "a mold's child processes will stop if it dies"
+          end
+          @mold_supervisor = MoldSupervisor.new(self, mold_thresholds, @mold_pipes, @reaps_orphans)
         end
         super
       end
@@ -602,44 +646,76 @@ module Delayed
         super
       end
 
+      def set_process_name(name) # rubocop:disable Naming/AccessorMethodName
+        super(@mold_generation.to_i > 0 ? "#{name} gen #{@mold_generation}" : name)
+      end
+
       # In a child process. A promoted one stops like on TERM, then forks
-      # its mold.
+      # its mold, if nothing is left running that a fork would freeze.
       def run_dispatcher(worker_name, dispatcher, pending_signals)
         return super unless @mold_pipes
         Signal.trap('URG') { dispatcher.promote }
         @mold_pipes.report("b #{Process.pid}") # After the trap: only booted children are promoted.
         ping = start_mold_ping(dispatcher)
         super
-        return unless dispatcher.promoted?
         ping.kill.join
-        fork_mold(worker_name)
+        return unless dispatcher.promoted?
+        child_signals.clear
+        capture_signals # Signals now only recorded: the mold checks them.
+        promote_to_mold(worker_name, dispatcher)
       end
 
       def start_mold_ping(dispatcher)
         Thread.new do
           loop do
-            @mold_pipes.report("p #{Process.pid} #{dispatcher.jobs_performed} #{dispatcher.busy_threads}", :blocking => false)
+            unsafe = Delayed::Worker.fork_safe? ? 0 : 1
+            @mold_pipes.report("p #{Process.pid} #{dispatcher.jobs_performed} #{dispatcher.busy_threads} #{unsafe}", :blocking => false)
             sleep mold_ping_interval
           end
         end
       end
 
-      # This process then exits, orphaning the mold: a mold's children are
-      # never molds, so a retired mold can exit once its children have.
+      # Exits with Mold::PROMOTION_FAILED (the parent then retries) instead
+      # of forking a mold that would freeze a thread mid-way.
+      def promote_to_mold(worker_name, dispatcher)
+        if !dispatcher.cleanly_stopped?
+          logger.error "Child process #{worker_name} (pid #{Process.pid}) promoted to mold still has threads running; not forking a mold"
+        elsif child_signals.empty? && dispatcher.promoted?
+          return fork_mold(worker_name)
+        end
+        exit!(Mold::PROMOTION_FAILED)
+      end
+
+      # This process then exits, orphaning the mold; as a child subreaper,
+      # the parent adopts it.
       def fork_mold(worker_name)
         Delayed::Worker.before_fork
+        info = {:promoted_pid => Process.pid, :generation => @mold_generation.to_i + 1, :exit_when_retired => @reaps_orphans}
+        launcher_pid = @launcher_pid
         mold_pid = fork do
-          Mold.new(self, @mold_pipes).run do
-            @supervisor_pid = Process.pid # Of the children it forks.
-            set_process_name("#{worker_name}: mold")
-            warmup_heap
-          end
-          exit!(0) # Not the dispatcher's at_exit hooks again.
+          run_mold(worker_name, info, launcher_pid)
         end
         @mold_pipes.report("M #{Process.pid} #{mold_pid}")
       end
 
-      public :workers, :handle_exit, :add_worker, :start_child, :child_started, :child_signal
+      def run_mold(worker_name, info, launcher_pid)
+        status = 0
+        Mold.new(self, @mold_pipes, info).run do
+          # Its children stop when their parent is gone; adopted by the
+          # launcher (subreaper), they carry on when it dies.
+          @supervisor_pid = @reaps_orphans ? [Process.pid, launcher_pid] : Process.pid
+          @mold_generation = info[:generation]
+          set_process_name("#{worker_name}: mold")
+        end
+      rescue Exception => error # rubocop:disable Lint/RescueException
+        status = 1
+        logger.error "Mold (pid #{Process.pid}) failed: #{error.class}: #{error.message}"
+      ensure
+        [$stdout, $stderr].each { |io| io.flush rescue nil }
+        exit!(status) # Not the dispatcher's at_exit hooks again.
+      end
+
+      public :workers, :handle_exit, :add_worker, :start_child, :child_started, :child_signal, :child_signals, :logger, :warmup_heap
     end
   end
 end

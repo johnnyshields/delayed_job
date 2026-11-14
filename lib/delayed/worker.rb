@@ -223,6 +223,17 @@ module Delayed
       raise ArgumentError, "prefetch must be a whole number from 0 to #{MAX_PREFETCH} (got #{value.inspect})"
     end
 
+    # Call from a job (or library code) that leaves this process unsafe to
+    # fork, e.g. a background thread holding a lock in native code: with
+    # Worker.mold, this child process is then never promoted to mold.
+    def self.no_longer_fork_safe!
+      @fork_unsafe = true
+    end
+
+    def self.fork_safe?
+      !@fork_unsafe
+    end
+
     # The mold thresholds (job counts), or nil when off.
     def self.mold_thresholds(value = mold)
       return if value.nil? || value == false

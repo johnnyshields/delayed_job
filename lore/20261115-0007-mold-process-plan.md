@@ -171,3 +171,40 @@ Target: `/mnt/c/workspace/delayed_job-multi-threaded`, branch `mold` (off `multi
    - `git checkout -b mold multi-threaded`;
    - commit the lore file with the plan's major items in the message, then commit the implementation;
    - push and run `gh pr create --base multi-threaded`, with Why = memory (copy-on-write sharing of warmed workers), ending with the Claude Code attribution line.
+
+---
+
+## Update (2026-11-15): architecture after review
+
+Five reviews were run: parent-side hardening, child/mold-side hardening, a comparison with Puma, a dig through Puma's history, and a study of Shopify's Pitchfork. They superseded parts of the plan above. The code now works as follows.
+
+### Classes
+- **`Forking`** is one class. In mold mode it calls the supervisor through explicit `@mold_supervisor&.` hooks. It also holds the child side of promotion: the URG trap, the ping thread, `promote_to_mold`, `fork_mold` and `run_mold`.
+- **`MoldSupervisor`** is the parent-side state machine, created only with `Worker.mold`.
+- **`Mold`** is the mold process, and **`Mold::Pipes`** is the protocol:
+  - fork records are 12 bytes (`NNN`: worker index, pool index, generation);
+  - status lines are `b`, `p` (with a fork-unsafe flag), `M`, `m` (with the promoted child's pid), `f`, `e` (fork failed) and `x` (with the mold's pid).
+- **`ProcessUtil`** provides the subreaper (Fiddle `prctl`), a zombie-aware `alive?` and `pss_kb`.
+
+### Decisions
+- **Subreaper (Linux, `fiddle` gemspec dependency).** Molds, and the children of a dead mold, reparent to the parent, which `wait`s on them. A child accepts either its mold or the launcher as its parent (`supervisor_pid` is an array). Without a subreaper, it falls back to `kill(0)` polling, where zombies and EPERM count as gone, and children stop when their mold dies.
+- **No double fork.** The subreaper gives nearly all of its benefit. Puma promotes in place; ours forks the mold and exits, and with the subreaper every mold is a direct child of the parent.
+- **Retired molds exit at once** when the parent adopts their children; otherwise they exit once their children have.
+- **A lost mold** (died, broken after 3 boot failures in a row, or hung on a fork) means the parent forks pending children itself, then promotes a new mold (`trigger: :mold_lost`). The back-off doubles per failure in a row and resets after 10 minutes of a stable mold.
+- **Refork** runs about 10% of the children at a time, idle ones first. Each step is tied to its replacement: the old child is stopped once the replacement boots, and if the replacement dies first, the old child is kept.
+- **Promotion:**
+  - The mold is forked only after a clean stop (no job or heartbeat thread left alive) and with no signal pending; otherwise the child exits with status 75 and the promotion is retried.
+  - The threshold advances only once the mold is active.
+  - The slot of a promoted child that is still draining is refilled after 5 minutes.
+- **Timeouts:**
+  - boot: 60s;
+  - mold fork: 30s, then KILL;
+  - mold ready: 120s;
+  - mold forked: 5s after the promoted child exits.
+- **Skipped:**
+  - unlimited reforking at the last threshold;
+  - a stop-first refork mode;
+  - molds sending pings;
+  - per-fork hooks in the mold;
+  - Pitchfork-only mechanisms;
+  - phased restart.

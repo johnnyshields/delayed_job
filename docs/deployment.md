@@ -12,13 +12,18 @@ supervisor (systemd / Kubernetes / ...)
 ```
 
 With `--mold` (experimental), a child process is promoted to a mold that forks
-the child processes from then on (see the README, Mold process):
+the child processes from then on (see the README, Mold process). On Linux the
+launcher is a child subreaper, so the mold, and children it leaves behind,
+are reparented to it:
 
 ```
 launcher (parent)
- └─ mold                       runs no jobs; forks children, reports their exits
-     └─ child process × N
+ ├─ mold                       runs no jobs; forks children, reports their exits
+ └─ child process × N          forked by the mold
 ```
+
+Leave headroom for a refork: up to N + 10% children plus two molds run at
+once. Read the README's Fork safety section before enabling it.
 
 Concurrency is processes × threads. Nothing restarts the launcher itself:
 run it under a supervisor.

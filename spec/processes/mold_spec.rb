@@ -16,6 +16,8 @@ describe 'Mold process', :processes do
   # Reads output until it matches `pattern`; returns the match.
   def read_until(reader, output, pattern, timeout = 20)
     wait_for(timeout) { (output << read_available(reader)).match(pattern) }
+  rescue RuntimeError
+    raise "#{pattern.inspect} not seen in #{timeout}s. Output:\n#{output.lines.grep_v(/SleepJob|reserved/).join}"
   end
 
   def ppid_of(pid)
@@ -23,10 +25,7 @@ describe 'Mold process', :processes do
   end
 
   def alive?(pid)
-    Process.kill(0, pid)
-    true
-  rescue Errno::ESRCH
-    false
+    Delayed::ProcessUtil.alive?(pid)
   end
 
   def mold_children(output, mold_pid)
@@ -63,12 +62,12 @@ describe 'Mold process', :processes do
     expect(alive?(mold_pid)).to be false
   end
 
-  it 'promotes again on SIGURG to the parent, and the retired mold exits once its children have' do
+  it 'promotes again on SIGURG to the parent, stopping the retired mold, its children carrying on' do
     enqueue_sleepers(20)
     pid, reader = spawn_launcher(launch_options.merge(:log_events => true))
     output = +''
     first = read_until(reader, output, /Mold \(pid (\d+)\) ready/)[1].to_i
-    wait_for { mold_children(output << read_available(reader), first).size >= 2 }
+    read_until(reader, output, /Reforked every child process from mold \(pid #{first}\)/)
     Process.kill('URG', pid)
     second = wait_for(20) { (output << read_available(reader)).scan(/Mold \(pid (\d+)\) ready/).flatten.map(&:to_i).find { |m| m != first } }
     expect(second).not_to eq first
@@ -79,6 +78,7 @@ describe 'Mold process', :processes do
     expect(status).to be_success
     expect(output).to match(/promoted to mold after \d+ job\(s\) \(signal\)/)
     expect(output).to include "Mold (pid #{first}) retired"
+    expect(output).to include "Retired mold (pid #{first}) exited"
     expect(output).to include "Mold (pid #{second}) activated, generation 2"
   end
 
@@ -103,27 +103,135 @@ describe 'Mold process', :processes do
     expect(job.last_error).to match(/was killed by signal 9/)
   end
 
-  it 'replaces the children of a SIGKILLed mold from the parent' do
+  it 'keeps the children of a SIGKILLed mold running, adopted by the parent, and promotes a new mold' do
     enqueue_sleepers(10)
-    pid, reader = spawn_launcher(launch_options)
+    pid, reader = spawn_launcher(launch_options.merge(:mold_retry_delay_unit => 0.5, :log_events => true))
+    output = +''
+    mold_pid = read_until(reader, output, /Mold \(pid (\d+)\) ready/)[1].to_i
+    wait_for { mold_children(output << read_available(reader), mold_pid).size >= 2 }
+    children = mold_children(output, mold_pid)
+    Process.kill('KILL', mold_pid)
+    read_until(reader, output, /Lost mold \(pid #{mold_pid}\); promoting a new mold in [\d.]+s/)
+    expect(children).to all(satisfy { |child| alive?(child) && ppid_of(child) == pid })
+    enqueue_sleepers(10, 0.05, :queue => 'later').each { |job| job.update!(:queue => nil) }
+    second = wait_for(30) { (output << read_available(reader)).scan(/Mold \(pid (\d+)\) ready/).flatten.map(&:to_i).find { |m| m != mold_pid } }
+    wait_for { mold_children(output << read_available(reader), second).size >= 2 }
+    status = stop_launcher(pid, reader, output)
+
+    expect(status).to be_success
+    expect(output).to match(/promoted to mold after \d+ job\(s\) \(mold_lost\)/)
+    expect(ProcessHelpers::Job.where.not(:locked_by => nil).count).to eq 0
+    expect(ProcessHelpers::Run.group(:key).count.values).to all(eq 1)
+  end
+
+  it 'replaces the children of a SIGKILLed mold from the parent without a subreaper' do
+    enqueue_sleepers(10)
+    pid, reader = spawn_launcher(launch_options.merge(:no_subreaper => true, :mold_retry_delay_unit => 30))
     output = +''
     mold_pid = read_until(reader, output, /Mold \(pid (\d+)\) ready/)[1].to_i
     wait_for { mold_children(output << read_available(reader), mold_pid).size >= 2 }
     orphans = mold_children(output, mold_pid)
     Process.kill('KILL', mold_pid)
-    read_until(reader, output, /Mold \(pid #{mold_pid}\) exited; forking child processes from the parent again/)
+    read_until(reader, output, /Mold \(pid #{mold_pid}\) exited; forking child processes from the parent/)
     wait_for { orphans.none? { |orphan| alive?(orphan) } }
     # Two started by the parent at boot, two replacing the orphans.
-    wait_for { (output << read_available(reader)).scan(/\(pid \d+\) started$/).size >= 4 }
+    wait_for { (output << read_available(reader)).scan(/\(pid \d+\) started( queues=\S+)?$/).size >= 4 }
     later = enqueue_sleepers(1).first
     wait_for { reload_job(later).nil? }
     status = stop_launcher(pid, reader, output)
 
     expect(status).to be_success
+    expect(output).to include 'could not make the parent a child subreaper'
     orphans.each do |orphan|
       expect(output).to match(/Child process delayed_job\.\d+ \(pid #{orphan}\) exited: pid #{orphan} exit unknown/)
     end
     expect(ProcessHelpers::Job.where.not(:locked_by => nil).count).to eq 0
+  end
+
+  it 'keeps the old children when the mold forks children that crash, then stops the broken mold' do
+    enqueue_sleepers(10)
+    pid, reader = spawn_launcher(launch_options.merge(:broken_mold => true, :mold_retry_delay_unit => 30, :respawn_delay_unit => 0.1))
+    output = +''
+    read_until(reader, output, /Mold \(pid (\d+)\) ready/)
+    read_until(reader, output, /failed to start in a row.*; stopping it/, 30)
+    later = enqueue_sleepers(3, 0, :queue => 'later').each { |job| job.update!(:queue => nil) }
+    wait_for { later.all? { |job| reload_job(job).nil? } } # Still working.
+    status = stop_launcher(pid, reader, output)
+
+    expect(status).to be_success
+    expect(output).to match(/died before booting; keeping pid \d+/)
+    expect(output).to match(/Mold \(pid \d+\) is broken; forking child processes from the parent/)
+    expect(ProcessHelpers::Job.where.not(:locked_by => nil).count).to eq 0
+  end
+
+  it 'promotes again when a mold dies before it is ready' do
+    enqueue_sleepers(20)
+    pid, reader = spawn_launcher(launch_options.merge(:mold_hook_delay => 3, :mold_retry_delay_unit => 0.5))
+    output = +''
+    first = read_until(reader, output, /mold (\d+) hook sleeping/)[1].to_i
+    Process.kill('KILL', first)
+    read_until(reader, output, /Mold \(pid #{first}\) exited before it was ready; promoting a new mold in/)
+    enqueue_sleepers(10, 0.05, :queue => 'more').each { |job| job.update!(:queue => nil) }
+    read_until(reader, output, /Mold \(pid (?!#{first}\))\d+\) ready/, 40)
+    status = stop_launcher(pid, reader, output)
+
+    expect(status).to be_success
+    expect(ProcessHelpers::Job.where.not(:locked_by => nil).count).to eq 0
+  end
+
+  it 'leaks no file descriptors across generations' do
+    enqueue_sleepers(20)
+    pid, reader = spawn_launcher(launch_options)
+    output = +''
+    fds = lambda do |mold|
+      wait_for { mold_children(output << read_available(reader), mold).size >= 2 }
+      mold_children(output, mold).map { |child| Dir.children("/proc/#{child}/fd").size rescue nil }.compact.max
+    end
+    molds = [read_until(reader, output, /Mold \(pid (\d+)\) ready/)[1].to_i]
+    counts = [fds.call(molds.last)]
+    2.times do
+      read_until(reader, output, /Reforked every child process from mold \(pid #{molds.last}\)/)
+      Process.kill('URG', pid)
+      molds << wait_for(20) { (output << read_available(reader)).scan(/Mold \(pid (\d+)\) ready/).flatten.map(&:to_i).find { |m| !molds.include?(m) } }
+      counts << fds.call(molds.last)
+    end
+    status = stop_launcher(pid, reader, output)
+
+    expect(status).to be_success
+    # Generation 1 also holds what the parent had open; none grow after.
+    expect(counts.drop(1).uniq.size).to eq(1), "fd counts per generation: #{counts.inspect}"
+    expect(counts.last).to be <= counts.first
+    expect(output).to include 'generation 3'
+  end
+
+  it 'does not promote again on the job counts of the previous generation' do
+    enqueue_sleepers(40)
+    pid, reader = spawn_launcher(launch_options.merge(:mold => [5, 1000]))
+    output = +''
+    mold_pid = read_until(reader, output, /Mold \(pid (\d+)\) ready/)[1].to_i
+    wait_for { ProcessHelpers::Job.count.zero? }
+    sleep 1
+    status = stop_launcher(pid, reader, output)
+
+    expect(status).to be_success
+    expect(output.scan(/Mold \(pid \d+\) ready/).size).to eq 1
+    expect(output).to include "from mold (pid #{mold_pid})"
+  end
+
+  it 'stops the mold and its children quietly when the parent is SIGKILLed' do
+    enqueue_sleepers(10)
+    pid, reader = spawn_launcher(launch_options)
+    output = +''
+    mold_pid = read_until(reader, output, /Mold \(pid (\d+)\) ready/)[1].to_i
+    wait_for { mold_children(output << read_available(reader), mold_pid).size >= 2 }
+    children = mold_children(output, mold_pid)
+    Process.kill('KILL', pid)
+    Process.wait(pid)
+    wait_for(20) { ([mold_pid] + children).none? { |p| alive?(p) } }
+    output << read_to_eof(reader)
+    reader.close
+
+    expect(output).not_to match(/Error|failed:/)
   end
 
   it 'stops gracefully, molds included, when TERMed during a refork' do

@@ -222,6 +222,12 @@ module Delayed
       synchronize { busy_count }
     end
 
+    # No job or heartbeat thread is left running (once stopped): safe to
+    # fork, as nothing is frozen mid-way in the child.
+    def cleanly_stopped?
+      @threads.none?(&:alive?) && !(@heartbeat && @heartbeat.alive?)
+    end
+
     # Process title, e.g. "delayed_job.0: 3/4 busy, queues=mail,sms".
     def procline
       state = if quit? then 'quitting, '
@@ -261,16 +267,16 @@ module Delayed
     # Worker.raise_signal_exceptions. QUIT: see #quit.
     def trap_signals
       trap('TERM') do
+        first = !stop? || @promoted # A promotion's stop wasn't the signal's.
         @promoted = false
-        first = !stop?
         Thread.new { say 'Exiting...' } if first
         stop
         raise_signal('TERM') if first && Worker.raise_signal_exceptions
       end
 
       trap('INT') do
+        first = !stop? || @promoted
         @promoted = false
-        first = !stop?
         Thread.new { say 'Exiting...' } if first
         stop
         raise_signal('INT') if first && Worker.raise_signal_exceptions && Worker.raise_signal_exceptions != :term
@@ -371,8 +377,9 @@ module Delayed
 
     # Re-parented (parent died): stops gracefully.
     def supervisor_gone?
-      return false unless supervisor_pid && Process.ppid != supervisor_pid
-      say "Parent process #{supervisor_pid} is gone; stopping", 'warn'
+      return false unless supervisor_pid && !Array(supervisor_pid).include?(Process.ppid)
+      say "Parent process #{Array(supervisor_pid).first} is gone; stopping", 'warn'
+      @promoted = false
       stop
       true
     end
@@ -852,7 +859,8 @@ module Delayed
     # records a failed attempt instead.
     def release_interrupted(worker, job, interrupt, slot)
       release_slot(worker, slot, 'shutdown') do
-        if Worker.count_shutdown_interrupts
+        # A promotion only saves memory: it never costs the job an attempt.
+        if Worker.count_shutdown_interrupts && !promoted?
           worker.job_say(job, 'interrupted by shutdown; counted as a failed attempt', 'warn')
           worker.fail_attempt(job, interrupt)
         else

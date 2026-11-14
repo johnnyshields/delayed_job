@@ -104,6 +104,28 @@ describe 'Mold process (Worker.mold)' do
       Delayed::Worker.prefetch = 0
     end
 
+    it 'reports a clean stop only once no thread is left running' do
+      dispatcher = described_class.new
+      expect(dispatcher).to be_cleanly_stopped
+      dispatcher.instance_variable_set(:@threads, [Thread.new { sleep 5 }])
+      expect(dispatcher).not_to be_cleanly_stopped
+    ensure
+      dispatcher.instance_variable_get(:@threads).each(&:kill)
+    end
+
+    it 'cancels a promotion when its parent is gone' do
+      dispatcher = described_class.new(:supervisor_pid => [-1, -2])
+      capture_say(log, *and_workers(dispatcher))
+      dispatcher.promote
+      expect(dispatcher.send(:supervisor_gone?)).to be true
+      expect(dispatcher).not_to be_promoted
+    end
+
+    it 'accepts any of several parents' do
+      dispatcher = described_class.new(:supervisor_pid => [-1, Process.ppid])
+      expect(dispatcher.send(:supervisor_gone?)).to be false
+    end
+
     it 'does not promote once stopping, and a stop signal cancels a promotion' do
       dispatcher = described_class.new
       dispatcher.stop
@@ -140,8 +162,230 @@ describe 'Mold process (Worker.mold)' do
   end
 
   it 'encodes fork records in a fixed size' do
-    record = [7, Delayed::Launcher::Mold::NO_POOL].pack(Delayed::Launcher::Mold::FORK_RECORD)
+    record = [7, Delayed::Launcher::Mold::NO_POOL, 3].pack(Delayed::Launcher::Mold::FORK_RECORD)
     expect(record.bytesize).to eq Delayed::Launcher::Mold::FORK_RECORD_BYTES
-    expect(record.unpack(Delayed::Launcher::Mold::FORK_RECORD)).to eq [7, Delayed::Launcher::Mold::NO_POOL]
+    expect(record.unpack(Delayed::Launcher::Mold::FORK_RECORD)).to eq [7, Delayed::Launcher::Mold::NO_POOL, 3]
+  end
+
+  describe Delayed::ProcessUtil do
+    it 'counts an unreaped zombie as gone', :fork do
+      pid = fork { exit!(0) }
+      sleep 0.05 until described_class.zombie?(pid) || !RUBY_PLATFORM.include?('linux')
+      expect(described_class.alive?(pid)).to be false
+    ensure
+      Process.wait(pid) if pid
+    end
+
+    it 'counts a running process as alive, and a missing one as gone' do
+      expect(described_class.alive?(Process.pid)).to be true
+      expect(described_class.alive?(2**22 + 12_345)).to be false
+    end
+
+    it 'reads PSS on Linux' do
+      skip 'Linux only' unless File.exist?('/proc/self/smaps_rollup')
+      expect(described_class.pss_kb(Process.pid)).to be > 0
+    end
+  end
+
+  describe 'fork safety' do
+    after { Delayed::Worker.instance_variable_set(:@fork_unsafe, nil) }
+
+    it 'is safe until a job says otherwise' do
+      expect(Delayed::Worker).to be_fork_safe
+      Delayed::Worker.no_longer_fork_safe!
+      expect(Delayed::Worker).not_to be_fork_safe
+    end
+  end
+
+  describe Delayed::Launcher::MoldSupervisor do
+    # A stand-in for the forking launcher: records what the supervisor asks.
+    let(:launcher) do
+      Class.new do
+        attr_reader :workers, :started, :exits, :logged
+        attr_accessor :stopped
+
+        def initialize
+          @workers = {}
+          @started = []
+          @exits = []
+          @logged = []
+          @stopped = false
+        end
+
+        def stopped?
+          @stopped
+        end
+
+        def stopping?
+          @stopped
+        end
+
+        def pools; end
+
+        def child_name(index)
+          "delayed_job.#{index}"
+        end
+
+        def logger
+          log = @logged
+          Object.new.tap { |l| %i(info warn error debug).each { |m| l.define_singleton_method(m) { |msg| log << msg } } }
+        end
+
+        def add_worker_safely(options, replaces_pid = nil)
+          @started << [:add, options, replaces_pid]
+          nil
+        end
+
+        def start_child_safely(index, options, spawn)
+          @started << [:start, index, options, spawn]
+        end
+
+        def child_started(name, pid, options, spawn)
+          @workers[pid] = [name, options]
+          @started << [:child, pid, spawn]
+        end
+
+        def handle_exit(pid, status)
+          @exits << [pid, status]
+          @workers.delete(pid)
+        end
+      end.new
+    end
+    let(:pipes) { instance_double(Delayed::Launcher::Mold::Pipes, :request_fork => nil, :drain_fork_requests => nil) }
+    let(:supervisor) { described_class.new(launcher, [5], pipes, true) }
+    let(:signals) { [] }
+
+    before { allow(Process).to receive(:kill) { |signal, pid| signals << [signal, pid] } }
+
+    def boot(pid, spawn = {})
+      launcher.workers[pid] = ["delayed_job.#{pid}", {}]
+      supervisor.child_started(pid, spawn)
+      supervisor.send(:handle_status, 'b', pid)
+    end
+
+    def status(success)
+      instance_double(Process::Status, :success? => success, :to_s => success ? 'exit 0' : 'exit 1')
+    end
+
+    it 'promotes the busiest idle child once past the threshold, and activates only its mold' do
+      boot(10)
+      boot(11)
+      supervisor.send(:handle_status, 'p', 11, 3, 1, 0)
+      supervisor.send(:handle_status, 'p', 10, 6, 0, 0)
+      expect(signals).to include ['URG', 10]
+
+      supervisor.send(:handle_status, 'm', 900, 99) # Not this promotion's.
+      expect(signals).to include ['KILL', 900]
+      supervisor.send(:handle_status, 'm', 901, 10) # Ready before its "M".
+      supervisor.send(:handle_status, 'M', 10, 901)
+      expect(signals).not_to include ['KILL', 901]
+      expect(supervisor.generation).to eq 1
+    end
+
+    it 'never promotes a child that is no longer fork safe' do
+      boot(10)
+      supervisor.send(:handle_status, 'p', 10, 6, 0, 1)
+      expect(signals).not_to include ['URG', 10]
+    end
+
+    it 'retries a failed promotion after a back-off, keeping the threshold' do
+      described_class.retry_delay_unit = 0
+      boot(10)
+      supervisor.send(:handle_status, 'p', 10, 6, 0, 0)
+      expect(supervisor.child_exited(10, status(false))).to be_nil
+      expect(launcher.logged.join).to include 'promoting a new mold in 0s'
+      boot(11)
+      supervisor.send(:handle_status, 'p', 11, 6, 0, 0)
+      expect(signals).to include ['URG', 11]
+    ensure
+      described_class.retry_delay_unit = 10
+    end
+
+    it 'keeps the old child when its refork replacement dies before booting' do
+      boot(10)
+      boot(11)
+      supervisor.send(:handle_status, 'p', 10, 6, 0, 0)
+      supervisor.send(:handle_status, 'M', 10, 900)
+      supervisor.send(:handle_status, 'm', 900, 10)
+      expect(supervisor.child_exited(10, status(true))).to eq :promoted
+      supervisor.send(:advance_refork)
+      expect(launcher.started).to include [:add, {}, 11]
+      supervisor.child_started(20, :mold_pid => 900, :replaces_pid => 11, :generation => 1)
+      expect(supervisor.child_exited(20, status(false))).to eq :retiring
+      expect(launcher.logged.join).to include 'died before booting; keeping pid 11'
+      expect(signals).not_to include ['TERM', 11]
+    end
+
+    it 'stops the old child once its replacement boots' do
+      boot(10)
+      boot(11)
+      supervisor.send(:handle_status, 'p', 10, 6, 0, 0)
+      supervisor.send(:handle_status, 'M', 10, 900)
+      supervisor.send(:handle_status, 'm', 900, 10)
+      supervisor.send(:advance_refork)
+      launcher.workers[20] = ['delayed_job.20', {}]
+      supervisor.child_started(20, :mold_pid => 900, :replaces_pid => 11, :generation => 1)
+      supervisor.send(:handle_status, 'b', 20)
+      expect(signals).to include ['TERM', 11]
+    end
+
+    it 'ignores an exit report from a mold that did not fork that child' do
+      boot(10, :mold_pid => 900)
+      supervisor.send(:handle_status, 'x', 901, 10, 0, nil)
+      expect(launcher.exits).to be_empty
+      supervisor.send(:handle_status, 'x', 900, 10, 0, nil)
+      expect(launcher.exits.map(&:first)).to eq [10]
+    end
+
+    it 'forks a child itself when the mold fails to' do
+      supervisor.instance_variable_get(:@pending_forks)[4] = {:options => {}, :spawn => {}, :at => 0}
+      supervisor.send(:handle_status, 'e', 900, 4, 11)
+      expect(launcher.started).to include [:start, 4, {}, {}]
+    end
+
+    it 'kills a child process that does not boot in time' do
+      described_class.boot_timeout = 0
+      launcher.workers[10] = ['delayed_job.10', {}]
+      supervisor.child_started(10, {})
+      supervisor.send(:check_boot_timeouts)
+      expect(signals).to include ['KILL', 10]
+    ensure
+      described_class.boot_timeout = 60
+    end
+
+    it "refills a draining promoted child's slot after the deadline, without replacing it again" do
+      described_class.drain_deadline = 0
+      boot(10)
+      boot(11)
+      supervisor.send(:handle_status, 'p', 10, 6, 0, 0)
+      supervisor.send(:check_promotion)
+      expect(launcher.started).to include [:add, {}, 10]
+      expect(supervisor.child_exited(10, status(true))).to eq :retiring
+    ensure
+      described_class.drain_deadline = 300
+    end
+
+    it 'treats a mold that keeps failing to start children as broken and promotes a new one' do
+      boot(10)
+      boot(11)
+      supervisor.send(:handle_status, 'p', 10, 6, 0, 0)
+      supervisor.send(:handle_status, 'M', 10, 900)
+      supervisor.send(:handle_status, 'm', 900, 10)
+      3.times { |i| supervisor.child_started(30 + i, :mold_pid => 900, :generation => 1) }
+      3.times { |i| supervisor.child_exited(30 + i, status(false)) }
+      expect(signals).to include ['KILL', 900]
+      expect(supervisor).not_to be_forking_from_mold
+      expect(launcher.logged.join).to include 'Lost mold (pid 900); promoting a new mold in'
+    end
+
+    it 'ignores SIGURG during a promotion' do
+      boot(10)
+      boot(11)
+      supervisor.send(:handle_status, 'p', 10, 6, 0, 0)
+      supervisor.request_promotion
+      supervisor.send(:handle_promotion_requests)
+      expect(signals.count { |signal, _| signal == 'URG' }).to eq 1
+      expect(launcher.logged.join).to include 'ignoring it'
+    end
   end
 end
