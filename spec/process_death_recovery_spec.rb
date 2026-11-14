@@ -173,7 +173,7 @@ describe 'Recovering the jobs of a dead worker process' do
       subscription = ActiveSupport::Notifications.subscribe(/delayed_job/) { |name, *| events << name }
       expect(Delayed::Worker.recover_jobs_of(['dj.1 pid:77'], error)).to eq 0
       expect([job.attempts, job.failed_at, job.last_error, job.locked_by]).to eq [25, failed_at, 'the original error', nil]
-      expect(events.grep(/attempt_failed|job_failed|locks_released/)).to be_empty
+      expect(events.grep(/job_attempt_failed|job_failed|jobs_released/)).to be_empty
     ensure
       ActiveSupport::Notifications.unsubscribe(subscription) if subscription
       Delayed::Worker.destroy_failed_jobs = true
@@ -190,9 +190,9 @@ describe 'Recovering the jobs of a dead worker process' do
       expect([job.attempts, job.locked_by]).to eq [1, nil]
     end
 
-    it 'publishes one locks_released event naming the workers whose jobs it recovered' do
+    it 'publishes one jobs_released event naming the workers whose jobs it recovered' do
       events = []
-      subscription = ActiveSupport::Notifications.subscribe('locks_released.delayed_job') { |*, payload| events << payload }
+      subscription = ActiveSupport::Notifications.subscribe('jobs_released.delayed_job') { |*, payload| events << payload }
       locked_job('dj.1 pid:77 thread:0')
       2.times { locked_job('dj.1 pid:77 thread:1') }
       names = ['dj.1 pid:77 thread:0', 'dj.1 pid:77 thread:1', 'dj.1 pid:77 thread:2']

@@ -562,7 +562,7 @@ describe 'Stopping a worker' do
     it 'lets perform subscribers run uninterrupted' do
       seen = []
       p = paused
-      subscription = ActiveSupport::Notifications.subscribe('perform.delayed_job') do |*args|
+      subscription = ActiveSupport::Notifications.subscribe('job_performed.delayed_job') do |*args|
         p << true
         sleep 0.3
         seen << args.last[:success]
@@ -707,9 +707,9 @@ describe 'Stopping a worker' do
       expect(job.reload.attempts).to eq 0
     end
 
-    it 'publish locks_released' do
+    it 'publish jobs_released' do
       events = []
-      subscription = ActiveSupport::Notifications.subscribe('locks_released.delayed_job') { |*args| events << args.last }
+      subscription = ActiveSupport::Notifications.subscribe('jobs_released.delayed_job') { |*args| events << args.last }
       Delayed::Job.enqueue(SimpleJob.new)
       thread, gate = run_and_hold
       dispatcher.quit

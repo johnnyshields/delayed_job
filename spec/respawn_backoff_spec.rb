@@ -114,9 +114,9 @@ describe Delayed::Launcher::Forking, 'replacing child processes that keep dying'
       expect(launcher.send(:pending_replacements)).to be_empty
     end
 
-    it 'publishes child_spawned with the pid replaced and the delay' do
+    it 'publishes process_spawned with the pid replaced and the delay' do
       events = []
-      subscription = ActiveSupport::Notifications.subscribe('child_spawned.delayed_job') { |*args| events << args.last }
+      subscription = ActiveSupport::Notifications.subscribe('process_spawned.delayed_job') { |*args| events << args.last }
       first = start_child
       second = dies_after(first, 1)
       dies_after(second, 1)

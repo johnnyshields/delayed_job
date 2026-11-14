@@ -223,7 +223,7 @@ describe 'Prefetching jobs (Worker.prefetch)' do
 
     context 'behind a job that overran its max_run_time (stuck, e.g. in native code)' do
       let(:released) { Concurrent::Array.new }
-      let!(:subscriber) { ActiveSupport::Notifications.subscribe('locks_released.delayed_job') { |*, p| released << p } }
+      let!(:subscriber) { ActiveSupport::Notifications.subscribe('jobs_released.delayed_job') { |*, p| released << p } }
 
       after { ActiveSupport::Notifications.unsubscribe(subscriber) }
 
@@ -352,7 +352,7 @@ describe 'Prefetching jobs (Worker.prefetch)' do
 
     it 'releases the job unstarted once its lock expired in the queue' do
       released = Concurrent::Array.new
-      subscriber = ActiveSupport::Notifications.subscribe('locks_released.delayed_job') { |*, p| released << p }
+      subscriber = ActiveSupport::Notifications.subscribe('jobs_released.delayed_job') { |*, p| released << p }
       jobs = gate_jobs(2)
       d = dispatcher(1)
       aged = Concurrent::AtomicBoolean.new(false)
@@ -415,7 +415,7 @@ describe 'Prefetching jobs (Worker.prefetch)' do
     let(:depths) { Concurrent::Array.new }
 
     def record_depths
-      subscriber = ActiveSupport::Notifications.subscribe('reserve.delayed_job') do |*, payload|
+      subscriber = ActiveSupport::Notifications.subscribe('jobs_reserved.delayed_job') do |*, payload|
         depths << [payload[:depth], payload[:requested], payload[:reserved]]
       end
       yield
@@ -506,7 +506,7 @@ describe 'Prefetching jobs (Worker.prefetch)' do
     let(:released) { Concurrent::Array.new }
 
     def track_releases
-      subscriber = ActiveSupport::Notifications.subscribe('locks_released.delayed_job') do |*, payload|
+      subscriber = ActiveSupport::Notifications.subscribe('jobs_released.delayed_job') do |*, payload|
         released << payload
       end
       yield

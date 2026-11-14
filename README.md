@@ -367,12 +367,12 @@ so jobs are only queued while there are plenty. Each job a thread holds is
 locked under a slot name of its own, e.g. `... pid:123 thread:2 slot:1`. Also:
 
 * On `SIGTERM`/`SIGINT`, queued jobs are released at once (unlocked, attempts
-  unchanged) while running ones finish; a `locks_released` event reports them.
+  unchanged) while running ones finish; a `jobs_released` event reports them.
 * Without lock heartbeats, a job's lock lasts `max_run_time` from when it was
   reserved, queue time included. A queued job then runs with what is left of
   it as its time limit, so it stops before another worker could take it over;
   one whose lock expired while queued is released unstarted instead (a
-  `locks_released` event, `reason: 'lock expired in queue'`). With heartbeats,
+  `jobs_released` event, `reason: 'lock expired in queue'`). With heartbeats,
   queued jobs' locks are refreshed and run with their full `max_run_time` -
   unless the heartbeat has stopped refreshing locks (it gave up after repeated
   failures, or a refresh has hung for `lock_timeout`): jobs started then are
@@ -791,22 +791,18 @@ publishes a `thread_error.delayed_job` event (see below).
 
 ### Instrumentation
 
-Workers publish `ActiveSupport::Notifications` events named `<event>.delayed_job`:
+Workers publish `ActiveSupport::Notifications` events named `<event>.delayed_job`,
+grouped by what they are about:
 
-| Event | Payload |
-| --- | --- |
-| `start_process`, `stop_process` | `:dispatcher` (name), `:pid`, `:threads`, `:queues`, `:prefetch`, `:prefetch_dynamic`; `stop_process` adds `:error` (what stopped it, or nil) |
-| `reserve` (timed) | `:dispatcher`, `:requested` (free slots: idle threads, plus queue slots with prefetch), `:depth` (queue depth), `:reserved` |
-| `perform` (timed) | `:job`, `:worker`, `:success` |
-| `attempt_failed` | `:job`, `:worker`, `:error`, `:attempts` (including this one) |
-| `job_failed` | `:job`, `:worker`, `:error` - the job failed permanently |
-| `lock_lost` | `:job`, `:worker`, `:outcome` - the job's lock was taken over, so this run's outcome was discarded |
-| `thread_error` | `:error`, `:context`, and `:dispatcher`, `:worker`, `:job` where known - an error outside job handling (see `on_thread_error` above) |
-| `interrupt` | `:dispatcher`, `:jobs`, `:reason` - running jobs interrupted by the shutdown timeout or `SIGQUIT` |
-| `locks_released` | `:workers`, `:count`, `:reason` (`shutdown`, `process exit`, `lock expired in queue` or `stuck job`) |
-| `child_exited` | `:worker`, `:pid`, `:status`, `:uptime` (seconds), `:respawn_in` (seconds until it is replaced; 0 at once, more after quick deaths - see "Worker processes that die"; nil if the launcher is stopping) - a forked child process exited |
-| `child_spawned` | `:worker`, `:pid`, `:replaces_pid` (the pid of the child process it replaces, or nil), `:delay` (seconds waited before forking it) - the forking parent forked a child process |
-| `job_stuck` | `:job`, `:job_name`, `:worker`, `:max_run_time`, `:lock_timeout` - published on the lock heartbeat thread, so read only plain fields of `:job`; a job ran past its `max_run_time` without stopping (e.g. blocked in native code); with lock heartbeats, its lock is no longer refreshed and another worker may run it after `lock_timeout` |
+* `process_started`, `process_stopped` (a worker process), `process_spawned`,
+  `process_exited` (the forking parent's children);
+* `jobs_reserved` (timed: a poll), `job_performed` (timed), `job_attempt_failed`,
+  `job_failed`, `job_lock_lost`, `job_stuck`, `jobs_interrupted`,
+  `jobs_released`;
+* `thread_error` (see `on_thread_error` above).
+
+[docs/monitoring.md](docs/monitoring.md#events) lists when each is published,
+on which thread, and its payload.
 
 Timed events also carry `:exception` when their block raised. Events are
 published on worker threads; an exception raised by a subscriber is logged and
@@ -819,7 +815,7 @@ end
 ```
 
 `Delayed::LogSubscriber` logs these events to `Delayed::Worker.logger`
-(`reserve` and `perform` at debug level, with their durations). Workers already
+(`jobs_reserved` and `job_performed` at debug level, with their durations). Workers already
 log their activity, so it isn't attached by default:
 
 ```ruby

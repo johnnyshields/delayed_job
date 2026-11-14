@@ -259,8 +259,8 @@ module Delayed
 
     def self.publish_recovered(by_worker, error)
       return if by_worker.empty?
-      Delayed.instrument(:locks_released, :workers => by_worker.keys, :count => by_worker.values.sum(&:size),
-                                          :reason => 'process exit', :error => error)
+      Delayed.instrument(:jobs_released, :workers => by_worker.keys, :count => by_worker.values.sum(&:size),
+                                         :reason => 'process exit', :error => error)
     end
     private_class_method :publish_recovered
 
@@ -493,7 +493,7 @@ module Delayed
     def perform_job(job, time_cap = nil)
       running = Thread.current[:delayed_job_running]
       Thread.current[:delayed_job_running] = true # See #initialize.
-      Delayed.instrument(:perform, :job => job, :worker => name) do |payload|
+      Delayed.instrument(:job_performed, :job => job, :worker => name) do |payload|
         payload[:success] = self.class.lifecycle.run_callbacks(:perform, self, job) { run(job, time_cap) }
       end
     ensure
@@ -527,7 +527,7 @@ module Delayed
     end
 
     def lost_lock(job, outcome)
-      Delayed.instrument(:lock_lost, :job => job, :worker => name, :outcome => outcome)
+      Delayed.instrument(:job_lock_lost, :job => job, :worker => name, :outcome => outcome)
       job_say job, "was #{outcome} here, but its lock expired and another worker reserved it; " \
                    'leaving the job to that worker', 'warn'
     end
@@ -538,7 +538,7 @@ module Delayed
 
     def handle_failed_job(job, error)
       job.error = error
-      Delayed.instrument(:attempt_failed, :job => job, :worker => name, :error => error, :attempts => job.attempts + 1)
+      Delayed.instrument(:job_attempt_failed, :job => job, :worker => name, :error => error, :attempts => job.attempts + 1)
       job_say job, "FAILED (#{job.attempts} prior attempts) with #{error.class.name}: #{error.message}", 'error'
       reschedule(job)
     end

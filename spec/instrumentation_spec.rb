@@ -180,7 +180,7 @@ describe 'Instrumentation' do
       end
 
       it 'does not fail the job it reports on' do
-        subscribe(:perform) { raise 'subscriber bug' }
+        subscribe(:job_performed) { raise 'subscriber bug' }
         job = Delayed::Job.enqueue(SimpleJob.new)
         expect(Delayed::Worker.new.work_off).to eq [1, 0]
         expect(SimpleJob.runs).to eq 1
@@ -194,20 +194,20 @@ describe 'Instrumentation' do
 
     before { worker.name = 'w1' }
 
-    it 'publishes perform with the job, the worker and success' do
+    it 'publishes job_performed with the job, the worker and success' do
       job = Delayed::Job.enqueue(SimpleJob.new)
       worker.work_off
-      p = payload(:perform)
+      p = payload(:job_performed)
       expect(p[:job]).to eq job
       expect(p[:worker]).to eq 'w1'
       expect(p[:success]).to be true
     end
 
-    it 'publishes perform with success false, and attempt_failed, for a failed attempt' do
+    it 'publishes job_performed with success false, and job_attempt_failed, for a failed attempt' do
       job = Delayed::Job.enqueue(ErrorJob.new)
       worker.work_off
-      expect(payload(:perform)[:success]).to be false
-      p = payload(:attempt_failed)
+      expect(payload(:job_performed)[:success]).to be false
+      p = payload(:job_attempt_failed)
       expect(p[:job]).to eq job
       expect(p[:worker]).to eq 'w1'
       expect(p[:error].message).to eq 'did not work'
@@ -218,14 +218,14 @@ describe 'Instrumentation' do
     it 'counts attempts across retries' do
       Delayed::Job.enqueue(ErrorJob.new, :attempts => 3)
       worker.work_off
-      expect(payload(:attempt_failed)[:attempts]).to eq 4
+      expect(payload(:job_attempt_failed)[:attempts]).to eq 4
     end
 
     it 'publishes job_failed when a job fails permanently' do
       Delayed::Worker.max_attempts = 1
       job = Delayed::Job.enqueue(ErrorJob.new)
       worker.work_off
-      expect(named(:attempt_failed).size).to eq 1
+      expect(named(:job_attempt_failed).size).to eq 1
       p = payload(:job_failed)
       expect(p[:job]).to eq job
       expect(p[:worker]).to eq 'w1'
@@ -239,7 +239,7 @@ describe 'Instrumentation' do
       expect(payload(:job_failed)[:error]).to be_a Delayed::DeserializationError
     end
 
-    it 'publishes lock_lost when another worker took the job over' do
+    it 'publishes job_lock_lost when another worker took the job over' do
       job = Delayed::Job.enqueue(SimpleJob.new)
       job.locked_by = 'w1'
       job.locked_at = Delayed::Job.db_time_now
@@ -248,7 +248,7 @@ describe 'Instrumentation' do
         false
       end
       worker.run(job)
-      expect(payload(:lock_lost)).to include(:job => job, :worker => 'w1', :outcome => 'finished')
+      expect(payload(:job_lock_lost)).to include(:job => job, :worker => 'w1', :outcome => 'finished')
     end
   end
 
@@ -282,34 +282,34 @@ describe 'Instrumentation' do
       end
     end
 
-    it 'publishes start_process and stop_process around a run' do
+    it 'publishes process_started and process_stopped around a run' do
       Delayed::Worker.queues = %w[mail]
       run_to_completion
-      start = payload(:start_process)
+      start = payload(:process_started)
       expect(start).to eq(:dispatcher => dispatcher.name, :pid => Process.pid, :threads => 2, :queues => %w[mail],
                           :prefetch => 0, :prefetch_dynamic => false)
-      expect(payload(:stop_process)).to eq start.merge(:error => nil)
-      expect(events.first.name).to eq 'start_process.delayed_job'
-      expect(events.last.name).to eq 'stop_process.delayed_job'
+      expect(payload(:process_stopped)).to eq start.merge(:error => nil)
+      expect(events.first.name).to eq 'process_started.delayed_job'
+      expect(events.last.name).to eq 'process_stopped.delayed_job'
     end
 
-    it 'publishes stop_process with the error that stopped it' do
+    it 'publishes process_stopped with the error that stopped it' do
       allow(Delayed::Job).to receive(:reserve_batch).and_raise(IOError, 'down')
       allow(Delayed::Job).to receive(:recover_from)
       thread = run_in_thread
       expect { Timeout.timeout(5) { thread.join } }.to raise_error(Delayed::FatalBackendError)
-      expect(payload(:stop_process)[:error]).to be_a Delayed::FatalBackendError
+      expect(payload(:process_stopped)[:error]).to be_a Delayed::FatalBackendError
     end
 
-    it 'publishes reserve with the requested and reserved counts' do
+    it 'publishes jobs_reserved with the requested and reserved counts' do
       Delayed::Job.enqueue(SimpleJob.new)
       run_to_completion
-      reserves = named(:reserve).map(&:payload)
+      reserves = named(:jobs_reserved).map(&:payload)
       expect(reserves.first).to eq(:dispatcher => dispatcher.name, :requested => 2, :depth => 0, :reserved => 1)
       expect(reserves.last[:reserved]).to eq 0
     end
 
-    it 'publishes reserve and thread_error when reserving fails' do
+    it 'publishes jobs_reserved and thread_error when reserving fails' do
       calls = 0
       allow(Delayed::Job).to receive(:reserve_batch) do
         raise IOError, 'db hiccup' if (calls += 1) == 1
@@ -317,7 +317,7 @@ describe 'Instrumentation' do
       end
       allow(Delayed::Job).to receive(:recover_from)
       run_to_completion
-      failed = named(:reserve).first.payload
+      failed = named(:jobs_reserved).first.payload
       expect(failed[:exception]).to eq ['IOError', 'db hiccup']
       expect(failed[:reserved]).to eq 0
       expect(payload(:thread_error)).to include(:context => 'Reservation', :dispatcher => dispatcher.name, :worker => nil)
@@ -332,7 +332,7 @@ describe 'Instrumentation' do
       p = payload(:thread_error)
       expect(p[:context]).to eq 'Worker thread'
       expect(dispatcher.workers.map(&:name)).to include p[:worker]
-      expect(payload(:stop_process)[:error]).to be_a NoMemoryError
+      expect(payload(:process_stopped)[:error]).to be_a NoMemoryError
     end
 
     it 'publishes thread_error when refreshing locks fails' do
@@ -349,7 +349,7 @@ describe 'Instrumentation' do
       expect(errors.map { |e| e[:context] }.uniq).to eq ['Lock heartbeat']
     end
 
-    it 'publishes interrupt and locks_released when running jobs are interrupted' do
+    it 'publishes jobs_interrupted and jobs_released when running jobs are interrupted' do
       job = Delayed::Job.enqueue(BlockingJob.new)
       thread = run_in_thread
       Timeout.timeout(5) { BlockingJob.started.pop }
@@ -358,15 +358,15 @@ describe 'Instrumentation' do
       dispatcher.stop
       Timeout.timeout(10) { thread.join }
 
-      expect(payload(:interrupt)).to eq(:dispatcher => dispatcher.name, :jobs => 1, :reason => 'Quitting')
-      expect(payload(:locks_released)).to eq(:workers => [worker_name], :count => 1, :reason => 'shutdown')
-      perform = named(:perform).first.payload
+      expect(payload(:jobs_interrupted)).to eq(:dispatcher => dispatcher.name, :jobs => 1, :reason => 'Quitting')
+      expect(payload(:jobs_released)).to eq(:workers => [worker_name], :count => 1, :reason => 'shutdown')
+      perform = named(:job_performed).first.payload
       expect(perform[:exception].first).to eq 'Delayed::ShutdownInterrupt'
       expect(perform).not_to have_key(:success)
     end
 
-    it 'still releases an interrupted job when a perform subscriber fails' do
-      subscribe(:perform) { raise 'subscriber bug' }
+    it 'still releases an interrupted job when a job_performed subscriber fails' do
+      subscribe(:job_performed) { raise 'subscriber bug' }
       job = Delayed::Job.enqueue(BlockingJob.new)
       thread = run_in_thread
       Timeout.timeout(5) { BlockingJob.started.pop }
@@ -375,24 +375,24 @@ describe 'Instrumentation' do
 
       job.reload
       expect([job.locked_by, job.locked_at, job.attempts]).to eq [nil, nil, 0]
-      expect(payload(:locks_released)[:reason]).to eq 'shutdown'
+      expect(payload(:jobs_released)[:reason]).to eq 'shutdown'
       expect(named(:thread_error)).to be_empty
-      expect(payload(:stop_process)[:error]).to be_nil
-      expect(log.string).to include 'Error in a subscriber to perform.delayed_job: RuntimeError: subscriber bug'
+      expect(payload(:process_stopped)[:error]).to be_nil
+      expect(log.string).to include 'Error in a subscriber to job_performed.delayed_job: RuntimeError: subscriber bug'
     end
 
     it 'publishes no thread_error for a clean run' do
       Delayed::Job.enqueue(SimpleJob.new)
       run_to_completion
       expect(named(:thread_error)).to be_empty
-      expect(named(:interrupt)).to be_empty
+      expect(named(:jobs_interrupted)).to be_empty
     end
   end
 
   describe 'process events' do
     let(:status) { double('Process::Status', :signaled? => true, :termsig => 9, :success? => false, :to_s => 'pid 99 SIGKILL (signal 9)') }
 
-    it "publishes locks_released and attempt_failed for a dead worker's recovered jobs" do
+    it "publishes jobs_released and job_attempt_failed for a dead worker's recovered jobs" do
       job = Delayed::Job.enqueue(SimpleJob.new)
       job.locked_by = 'dead'
       job.locked_at = Delayed::Job.db_time_now
@@ -402,13 +402,13 @@ describe 'Instrumentation' do
       error = Delayed::ProcessExitError.new('delayed_job.0', 99, status)
       Delayed::Worker.recover_jobs_of(%w[dead idle], error)
 
-      expect(payload(:locks_released)).to eq(:workers => ['dead'], :count => 1, :reason => 'process exit', :error => error)
-      expect(payload(:attempt_failed)).to include(:job => job, :worker => 'dead', :error => error, :attempts => 1)
+      expect(payload(:jobs_released)).to eq(:workers => ['dead'], :count => 1, :reason => 'process exit', :error => error)
+      expect(payload(:job_attempt_failed)).to include(:job => job, :worker => 'dead', :error => error, :attempts => 1)
     end
 
     it 'publishes nothing for backends without locked_jobs' do
       Delayed::Worker.recover_jobs_of(%w[dead], Delayed::ProcessExitError.new('delayed_job.0', 99, status))
-      expect(named(:locks_released)).to be_empty
+      expect(named(:jobs_released)).to be_empty
     end
 
     describe Delayed::Launcher::Forking do
@@ -428,37 +428,37 @@ describe 'Instrumentation' do
 
       let(:crashed) { double('Process::Status', :signaled? => false, :termsig => nil, :exitstatus => 3, :success? => false) }
 
-      it 'publishes child_exited, then child_spawned for its replacement' do
+      it 'publishes process_exited, then process_spawned for its replacement' do
         allow(launcher).to receive(:fork_worker).and_return(123)
         launcher.send(:run_loop)
-        exited = payload(:child_exited)
+        exited = payload(:process_exited)
         expect(exited.except(:uptime)).to eq(:worker => 'delayed_job.1', :pid => 99, :status => crashed, :respawn_in => 0)
         expect(exited[:uptime]).to be_nil # Its start wasn't recorded here.
-        expect(payload(:child_spawned)).to eq(:worker => 'delayed_job.0', :pid => 123, :replaces_pid => 99, :delay => 0)
-        expect(events.map(&:name).grep(/\Achild_/)).to eq %w[child_exited.delayed_job child_spawned.delayed_job]
+        expect(payload(:process_spawned)).to eq(:worker => 'delayed_job.0', :pid => 123, :replaces_pid => 99, :delay => 0)
+        expect(events.map(&:name).grep(/\Aprocess_(spawned|exited)/)).to eq %w[process_exited.delayed_job process_spawned.delayed_job]
       end
 
-      it 'publishes child_exited with its uptime and the delay before its replacement' do
+      it 'publishes process_exited with its uptime and the delay before its replacement' do
         launcher.send(:started_at)[99] = Process.clock_gettime(Process::CLOCK_MONOTONIC) - 2
         allow(launcher).to receive(:sleep) { launcher.instance_variable_set(:@stopped, true) }
         launcher.send(:run_loop)
-        exited = payload(:child_exited)
+        exited = payload(:process_exited)
         expect(exited[:uptime]).to be_within(1).of(2)
         expect(exited[:respawn_in]).to eq 1
       end
 
-      it 'publishes child_exited without a replacement while stopping' do
+      it 'publishes process_exited without a replacement while stopping' do
         launcher.instance_variable_set(:@stopped, true)
         launcher.send(:run_loop)
-        expect(payload(:child_exited)[:respawn_in]).to be_nil
-        expect(named(:child_spawned)).to be_empty
+        expect(payload(:process_exited)[:respawn_in]).to be_nil
+        expect(named(:process_spawned)).to be_empty
       end
 
-      it 'publishes child_spawned for each initial child process' do
+      it 'publishes process_spawned for each initial child process' do
         allow(launcher).to receive(:fork_worker).and_return(201, 202)
         launcher.send(:workers).clear
         launcher.send(:setup_multiple_workers)
-        expect(named(:child_spawned).map(&:payload)).to eq [
+        expect(named(:process_spawned).map(&:payload)).to eq [
           {:worker => 'delayed_job.0', :pid => 201, :replaces_pid => nil, :delay => 0},
           {:worker => 'delayed_job.1', :pid => 202, :replaces_pid => nil, :delay => 0}
         ]
@@ -486,37 +486,37 @@ describe 'Instrumentation' do
       expect(subscriber.logger).to be Delayed::Worker.logger
     end
 
-    it 'logs start_process' do
-      expect(logged(:start_process, :dispatcher => 'dj', :pid => 1, :threads => 2, :queues => [])).to include 'INFO -- : Started dj (pid 1, 2 thread(s), queues=*)'
-      expect(logged(:start_process, :dispatcher => 'dj', :pid => 1, :threads => 1, :queues => %w[a b])).to include 'queues=a,b)'
+    it 'logs process_started' do
+      expect(logged(:process_started, :dispatcher => 'dj', :pid => 1, :threads => 2, :queues => [])).to include 'INFO -- : Started dj (pid 1, 2 thread(s), queues=*)'
+      expect(logged(:process_started, :dispatcher => 'dj', :pid => 1, :threads => 1, :queues => %w[a b])).to include 'queues=a,b)'
     end
 
-    it 'logs stop_process, with the error if any' do
-      expect(logged(:stop_process, :dispatcher => 'dj', :pid => 1, :error => nil)).to include 'Stopped dj (pid 1)'
-      expect(logged(:stop_process, :dispatcher => 'dj', :pid => 1, :error => IOError.new('down'))).to include 'Stopped dj (pid 1) with IOError: down'
+    it 'logs process_stopped, with the error if any' do
+      expect(logged(:process_stopped, :dispatcher => 'dj', :pid => 1, :error => nil)).to include 'Stopped dj (pid 1)'
+      expect(logged(:process_stopped, :dispatcher => 'dj', :pid => 1, :error => IOError.new('down'))).to include 'Stopped dj (pid 1) with IOError: down'
     end
 
-    it 'logs reserve at debug level, with the failure if any' do
-      expect(logged(:reserve, :dispatcher => 'dj', :requested => 4, :reserved => 2)).to include 'DEBUG -- : dj reserved 2 of 4 job(s) (12.3ms)'
-      expect(logged(:reserve, :dispatcher => 'dj', :requested => 4, :reserved => 0, :exception => %w[IOError down])).to include 'reserved 0 of 4 job(s) - IOError: down'
+    it 'logs jobs_reserved at debug level, with the failure if any' do
+      expect(logged(:jobs_reserved, :dispatcher => 'dj', :requested => 4, :reserved => 2)).to include 'DEBUG -- : dj reserved 2 of 4 job(s) (12.3ms)'
+      expect(logged(:jobs_reserved, :dispatcher => 'dj', :requested => 4, :reserved => 0, :exception => %w[IOError down])).to include 'reserved 0 of 4 job(s) - IOError: down'
     end
 
     it 'does not log debug events above debug level' do
-      expect(logged(:reserve, {:dispatcher => 'dj', :requested => 4, :reserved => 2}, Logger::INFO)).to eq ''
-      expect(logged(:perform, {:job => job, :worker => 'w', :success => true}, Logger::INFO)).to eq ''
+      expect(logged(:jobs_reserved, {:dispatcher => 'dj', :requested => 4, :reserved => 2}, Logger::INFO)).to eq ''
+      expect(logged(:job_performed, {:job => job, :worker => 'w', :success => true}, Logger::INFO)).to eq ''
     end
 
-    it 'logs perform outcomes' do
-      expect(logged(:perform, :job => job, :worker => 'w', :success => true)).to include "Job SimpleJob (id=#{job.id}) (queue=mail) succeeded on w (12.3ms)"
-      expect(logged(:perform, :job => job, :worker => 'w', :success => false)).to include 'failed on w'
-      expect(logged(:perform, :job => job, :worker => 'w', :exception => %w[Delayed::ShutdownInterrupt Quitting])).to include 'was interrupted (Delayed::ShutdownInterrupt) on w'
+    it 'logs job_performed outcomes' do
+      expect(logged(:job_performed, :job => job, :worker => 'w', :success => true)).to include "Job SimpleJob (id=#{job.id}) (queue=mail) succeeded on w (12.3ms)"
+      expect(logged(:job_performed, :job => job, :worker => 'w', :success => false)).to include 'failed on w'
+      expect(logged(:job_performed, :job => job, :worker => 'w', :exception => %w[Delayed::ShutdownInterrupt Quitting])).to include 'was interrupted (Delayed::ShutdownInterrupt) on w'
     end
 
-    it 'logs attempt_failed, job_failed and lock_lost' do
-      expect(logged(:attempt_failed, :job => job, :worker => 'w', :attempts => 2, :error => RuntimeError.new('nope'))).to include "WARN -- : Job SimpleJob (id=#{job.id}) (queue=mail) failed attempt 2 on w with RuntimeError: nope"
+    it 'logs job_attempt_failed, job_failed and job_lock_lost' do
+      expect(logged(:job_attempt_failed, :job => job, :worker => 'w', :attempts => 2, :error => RuntimeError.new('nope'))).to include "WARN -- : Job SimpleJob (id=#{job.id}) (queue=mail) failed attempt 2 on w with RuntimeError: nope"
       expect(logged(:job_failed, :job => job, :worker => 'w')).to include 'ERROR -- : Job SimpleJob'
       expect(log.string).to include 'failed permanently on w'
-      expect(logged(:lock_lost, :job => job, :worker => 'w', :outcome => 'finished')).to include 'was finished on w after its lock was taken over; result discarded'
+      expect(logged(:job_lock_lost, :job => job, :worker => 'w', :outcome => 'finished')).to include 'was finished on w after its lock was taken over; result discarded'
     end
 
     it 'logs a job without a queue, and a missing job' do
@@ -525,22 +525,22 @@ describe 'Instrumentation' do
       expect(logged(:job_failed, :job => nil, :worker => 'w')).to include 'Job failed permanently on w'
     end
 
-    it 'logs thread_error, interrupt and locks_released' do
+    it 'logs thread_error, jobs_interrupted and jobs_released' do
       expect(logged(:thread_error, :context => 'Reservation', :dispatcher => 'dj', :error => IOError.new('x'))).to include 'ERROR -- : Reservation error in dj: IOError: x'
       expect(logged(:thread_error, :context => 'Worker thread', :worker => 'w', :error => IOError.new('x'))).to include 'Worker thread error in w'
-      expect(logged(:interrupt, :dispatcher => 'dj', :jobs => 2, :reason => 'Quitting')).to include 'dj interrupted 2 running job(s) (Quitting)'
-      expect(logged(:locks_released, :workers => %w[a b], :count => 3, :reason => 'process exit')).to include 'Released 3 job(s) of a, b (process exit)'
+      expect(logged(:jobs_interrupted, :dispatcher => 'dj', :jobs => 2, :reason => 'Quitting')).to include 'dj interrupted 2 running job(s) (Quitting)'
+      expect(logged(:jobs_released, :workers => %w[a b], :count => 3, :reason => 'process exit')).to include 'Released 3 job(s) of a, b (process exit)'
     end
 
-    it 'logs child_exited, child_spawned and job_stuck' do
-      expect(logged(:child_exited, :worker => 'delayed_job.1', :pid => 9, :status => 'exit 3', :uptime => 2.04, :respawn_in => 1)).to include \
+    it 'logs process_exited, process_spawned and job_stuck' do
+      expect(logged(:process_exited, :worker => 'delayed_job.1', :pid => 9, :status => 'exit 3', :uptime => 2.04, :respawn_in => 1)).to include \
         'INFO -- : Child process delayed_job.1 (pid 9) exited after 2.0s: exit 3; replacing it in 1s'
-      expect(logged(:child_exited, :worker => 'delayed_job.1', :pid => 9, :status => 'exit 0', :uptime => nil, :respawn_in => 0)).to include \
+      expect(logged(:process_exited, :worker => 'delayed_job.1', :pid => 9, :status => 'exit 0', :uptime => nil, :respawn_in => 0)).to include \
         'Child process delayed_job.1 (pid 9) exited: exit 0; replacing it'
-      expect(logged(:child_exited, :worker => 'delayed_job.1', :pid => 9, :status => 'exit 0', :uptime => 5.0, :respawn_in => nil)).to include \
+      expect(logged(:process_exited, :worker => 'delayed_job.1', :pid => 9, :status => 'exit 0', :uptime => 5.0, :respawn_in => nil)).to include \
         '(pid 9) exited after 5.0s: exit 0; not replaced'
-      expect(logged(:child_spawned, :worker => 'delayed_job.2', :pid => 10, :replaces_pid => 9)).to include 'Child process delayed_job.2 (pid 10) spawned replacing pid 9'
-      expect(logged(:child_spawned, :worker => 'delayed_job.0', :pid => 8, :replaces_pid => nil)).to include 'Child process delayed_job.0 (pid 8) spawned'
+      expect(logged(:process_spawned, :worker => 'delayed_job.2', :pid => 10, :replaces_pid => 9)).to include 'Child process delayed_job.2 (pid 10) spawned replacing pid 9'
+      expect(logged(:process_spawned, :worker => 'delayed_job.0', :pid => 8, :replaces_pid => nil)).to include 'Child process delayed_job.0 (pid 8) spawned'
       label = "Job SimpleJob (id=#{job.id}) (queue=mail)"
       expect(job).not_to receive(:name) # It belongs to another thread.
       expect(logged(:job_stuck, :job => job, :job_name => label, :worker => 'w', :max_run_time => 60)).to include \

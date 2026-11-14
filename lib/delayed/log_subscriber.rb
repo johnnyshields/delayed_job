@@ -8,29 +8,29 @@ module Delayed
   #
   #   Delayed::LogSubscriber.attach_to :delayed_job
   #
-  # reserve and perform events are logged at debug level.
+  # jobs_reserved and job_performed events are logged at debug level.
   class LogSubscriber < ActiveSupport::LogSubscriber
     def logger
       Delayed::Worker.logger
     end
 
-    def start_process(event)
+    def process_started(event)
       p = event.payload
       log(:info) { "Started #{p[:dispatcher]} (pid #{p[:pid]}, #{p[:threads]} thread(s), queues=#{queues(p[:queues])})" }
     end
 
-    def stop_process(event)
+    def process_stopped(event)
       p = event.payload
       error_text = p[:error] ? " with #{p[:error].class}: #{p[:error].message}" : ''
       log(:info) { "Stopped #{p[:dispatcher]} (pid #{p[:pid]})#{error_text}" }
     end
 
-    def reserve(event)
+    def jobs_reserved(event)
       p = event.payload
       log(:debug) { "#{p[:dispatcher]} reserved #{p[:reserved]} of #{p[:requested]} job(s)#{raised(event)} (#{ms(event)})" }
     end
 
-    def perform(event)
+    def job_performed(event)
       p = event.payload
       outcome = if p[:exception] then "was interrupted (#{p[:exception].first})"
       elsif p[:success] then 'succeeded'
@@ -39,7 +39,7 @@ module Delayed
       log(:debug) { "#{job(p[:job])} #{outcome} on #{p[:worker]} (#{ms(event)})" }
     end
 
-    def attempt_failed(event)
+    def job_attempt_failed(event)
       p = event.payload
       log(:warn) { "#{job(p[:job])} failed attempt #{p[:attempts]} on #{p[:worker]} with #{p[:error].class}: #{p[:error].message}" }
     end
@@ -49,7 +49,7 @@ module Delayed
       log(:error) { "#{job(p[:job])} failed permanently on #{p[:worker]}" }
     end
 
-    def lock_lost(event)
+    def job_lock_lost(event)
       p = event.payload
       log(:warn) { "#{job(p[:job])} was #{p[:outcome]} on #{p[:worker]} after its lock was taken over; result discarded" }
     end
@@ -59,23 +59,23 @@ module Delayed
       log(:error) { "#{p[:context]} error in #{p[:dispatcher] || p[:worker]}: #{p[:error].class}: #{p[:error].message}" }
     end
 
-    def interrupt(event)
+    def jobs_interrupted(event)
       p = event.payload
       log(:warn) { "#{p[:dispatcher]} interrupted #{p[:jobs]} running job(s) (#{p[:reason]})" }
     end
 
-    def locks_released(event)
+    def jobs_released(event)
       p = event.payload
       log(:info) { "Released #{p[:count]} job(s) of #{Array(p[:workers]).join(', ')} (#{p[:reason]})" }
     end
 
-    def child_exited(event)
+    def process_exited(event)
       p = event.payload
       uptime = p[:uptime] ? format(' after %.1fs', p[:uptime]) : ''
       log(:info) { "Child process #{p[:worker]} (pid #{p[:pid]}) exited#{uptime}: #{p[:status]}; #{respawn(p[:respawn_in])}" }
     end
 
-    def child_spawned(event)
+    def process_spawned(event)
       p = event.payload
       replaces = p[:replaces_pid] ? " replacing pid #{p[:replaces_pid]}" : ''
       log(:info) { "Child process #{p[:worker]} (pid #{p[:pid]}) spawned#{replaces}" }
@@ -88,8 +88,8 @@ module Delayed
     end
 
     if respond_to?(:subscribe_log_level)
-      subscribe_log_level :reserve, :debug
-      subscribe_log_level :perform, :debug
+      subscribe_log_level :jobs_reserved, :debug
+      subscribe_log_level :job_performed, :debug
     end
 
   private

@@ -118,7 +118,7 @@ module Delayed
       @dead = [] # workers whose thread crashed: no more jobs for them
       @prefetch = 0
       # The queue depth (see #adjust_depth). Only the dispatcher's thread
-      # writes it; others (the reserve event, procline) just read it.
+      # writes it; others (the jobs_reserved event, procline) just read it.
       @depth = 0
       @threads = []
       @running = {} # thread => job it is running
@@ -159,7 +159,7 @@ module Delayed
     def run
       say thread_count > 1 ? "Starting job worker with #{thread_count} threads" : 'Starting job worker'
       warn_if_connection_pool_too_small
-      Delayed.instrument(:start_process, process_payload)
+      Delayed.instrument(:process_started, process_payload)
       error = nil
       begin
         with_lock_heartbeat do
@@ -175,7 +175,7 @@ module Delayed
           end
         end
       ensure
-        Delayed.instrument(:stop_process, process_payload.merge(:error => error || @thread_error))
+        Delayed.instrument(:process_stopped, process_payload.merge(:error => error || @thread_error))
       end
     end
 
@@ -415,7 +415,7 @@ module Delayed
     # Reserves up to one job per given worker. On error, lets the backend
     # recover and returns no jobs, until too many consecutive failures.
     def reserve(workers)
-      reserved = Delayed.instrument(:reserve, :dispatcher => name, :requested => workers.size, :depth => @depth) do |payload|
+      reserved = Delayed.instrument(:jobs_reserved, :dispatcher => name, :requested => workers.size, :depth => @depth) do |payload|
         payload[:reserved] = 0
         polling { Delayed::Job.reserve_batch(workers, Worker.lock_expiry) }.tap { |r| payload[:reserved] = r.size }
       end
@@ -857,7 +857,7 @@ module Delayed
       names = queued.map { |slot, _job| slot.name }
       with_executor { Delayed::Job.clear_locks_of!(names) }
       say "Released #{queued.size} queued job(s) #{message}", reason == :shutdown ? 'info' : 'warn'
-      Delayed.instrument(:locks_released, :workers => names, :count => queued.size, :reason => event_reason)
+      Delayed.instrument(:jobs_released, :workers => names, :count => queued.size, :reason => event_reason)
     rescue StandardError => error
       say "Could not release the queued jobs: #{error.class}: #{error.message}", 'error'
       thread_error(error, 'Releasing interrupted jobs')
@@ -899,7 +899,7 @@ module Delayed
       return if busy.empty?
       reason = quit? ? 'Quitting' : format('Shutdown timeout of %gs exceeded', Worker.shutdown_timeout)
       say "#{reason}: interrupting #{busy.size} running job(s)", 'warn'
-      Delayed.instrument(:interrupt, :dispatcher => name, :jobs => busy.size, :reason => reason)
+      Delayed.instrument(:jobs_interrupted, :dispatcher => name, :jobs => busy.size, :reason => reason)
       busy.each { |thread| thread.raise(ShutdownInterrupt, reason) }
       deadline = monotonic_now + INTERRUPT_GRACE
       busy.each { |thread| thread.join([deadline - monotonic_now, 0].max) }
@@ -929,7 +929,7 @@ module Delayed
         worker.job_say(job, 'interrupted by shutdown; released for another worker', 'warn')
       end
       Delayed::Job.clear_locks!(slot.name)
-      Delayed.instrument(:locks_released, :workers => [slot.name], :count => 1, :reason => 'shutdown')
+      Delayed.instrument(:jobs_released, :workers => [slot.name], :count => 1, :reason => 'shutdown')
     rescue StandardError => error
       say "Could not release the jobs of #{slot.name}: #{error.class}: #{error.message}", 'error'
       thread_error(error, 'Releasing interrupted jobs', worker.name)
@@ -962,7 +962,7 @@ module Delayed
       message, event_reason = UNSTARTED_REASONS.fetch(reason)
       worker.job_say(job, "#{message}; released for another worker", 'warn')
       Delayed::Job.clear_locks!(slot.name)
-      Delayed.instrument(:locks_released, :workers => [slot.name], :count => 1, :reason => event_reason)
+      Delayed.instrument(:jobs_released, :workers => [slot.name], :count => 1, :reason => event_reason)
     rescue StandardError => error
       say "Could not release the jobs of #{slot.name}: #{error.class}: #{error.message}", 'error'
       thread_error(error, 'Releasing interrupted jobs', worker.name)

@@ -205,7 +205,7 @@ module Delayed
         workers_lock.synchronize { workers[worker_pid] = [worker_name, options] }
         started_at[worker_pid] = monotonic_now
         @worker_index += 1
-        Delayed.instrument(:child_spawned, :worker => worker_name, :pid => worker_pid, :replaces_pid => replaces_pid, :delay => delay)
+        Delayed.instrument(:process_spawned, :worker => worker_name, :pid => worker_pid, :replaces_pid => replaces_pid, :delay => delay)
         catch_up_on_stop(worker_pid)
         worker_pid
       end
@@ -360,7 +360,7 @@ module Delayed
       def publish_child_exited(worker_name, pid, status)
         uptime, _streak, delay = respawn_plan(pid)
         respawn_in = @stopped ? nil : delay.to_i
-        Delayed.instrument(:child_exited, :worker => worker_name, :pid => pid, :status => status, :uptime => uptime, :respawn_in => respawn_in)
+        Delayed.instrument(:process_exited, :worker => worker_name, :pid => pid, :status => status, :uptime => uptime, :respawn_in => respawn_in)
       end
 
       # How long the child process `pid` ran (nil if its start wasn't
