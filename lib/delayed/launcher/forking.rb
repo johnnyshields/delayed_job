@@ -659,6 +659,7 @@ module Delayed
         ping = start_mold_ping(dispatcher)
         super
         ping.kill.join
+        exit!(Mold::PROMOTION_FAILED) if dispatcher.promotion_cancelled? # The parent then retries.
         return unless dispatcher.promoted?
         child_signals.clear
         capture_signals # Signals now only recorded: the mold checks them.

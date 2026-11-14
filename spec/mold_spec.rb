@@ -56,6 +56,14 @@ describe 'Mold process (Worker.mold)' do
       expect { launcher.launch }.to raise_error(NotImplementedError, /mold needs fork/)
     end
 
+    it 'uses up a worker index only once a fork succeeds (without mold)' do
+      launcher = Delayed::Launcher::Forking.new({})
+      launcher.instance_variable_set(:@stop_signals, Concurrent::Array.new)
+      allow(launcher).to receive(:fork_worker).and_raise(Errno::EAGAIN)
+      expect { launcher.send(:add_worker, {}) }.to raise_error(Errno::EAGAIN)
+      expect(launcher.instance_variable_get(:@worker_index)).to eq 0
+    end
+
     it 'forks even one process' do
       expect(Delayed::Launcher::Forking.new(:mold => true).send(:forking?)).to be true
       expect(Delayed::Launcher::Forking.new({}).send(:forking?)).to be false
@@ -124,6 +132,15 @@ describe 'Mold process (Worker.mold)' do
     it 'accepts any of several parents' do
       dispatcher = described_class.new(:supervisor_pid => [-1, Process.ppid])
       expect(dispatcher.send(:supervisor_gone?)).to be false
+    end
+
+    it 'reports a promotion cancelled by a signal' do
+      dispatcher = described_class.new
+      expect(dispatcher).not_to be_promotion_cancelled
+      dispatcher.promote
+      expect(dispatcher).not_to be_promotion_cancelled
+      dispatcher.send(:handle_pending_signal, 'TERM')
+      expect(dispatcher).to be_promotion_cancelled
     end
 
     it 'does not promote once stopping, and a stop signal cancels a promotion' do
@@ -376,6 +393,25 @@ describe 'Mold process (Worker.mold)' do
       expect(signals).to include ['KILL', 900]
       expect(supervisor).not_to be_forking_from_mold
       expect(launcher.logged.join).to include 'Lost mold (pid 900); promoting a new mold in'
+    end
+
+    it 'forks the pending children itself when the mold dies' do
+      boot(10)
+      boot(11)
+      supervisor.send(:handle_status, 'p', 10, 6, 0, 0)
+      supervisor.send(:handle_status, 'M', 10, 900)
+      supervisor.send(:handle_status, 'm', 900, 10)
+      supervisor.request_fork(7, {}, {:generation => 1})
+      expect(supervisor.reaped(900)).to be true
+      expect(launcher.started).to include [:start, 7, {}, {:generation => 1}]
+      expect(supervisor).not_to be_forking_from_mold
+      expect(launcher.logged.join).to include 'promoting a new mold in'
+    end
+
+    it 'forgets an early boot when its exit is reported for a child never recorded' do
+      supervisor.send(:handle_status, 'b', 50)
+      supervisor.send(:handle_status, 'x', 900, 50, 0, nil)
+      expect(supervisor.instance_variable_get(:@early_boots)).to be_empty
     end
 
     it 'ignores SIGURG during a promotion' do

@@ -359,7 +359,8 @@ module Delayed
 
       def mold_reaped_child(mold_pid, pid, exitstatus, termsig)
         info = @children[pid]
-        return unless info && info.mold_pid == mold_pid # Not that mold's (pid reused).
+        return @early_boots.delete(pid) unless info # Never recorded (e.g. given up on).
+        return unless info.mold_pid == mold_pid # Not that mold's (pid reused).
         @launcher.handle_exit(pid, ReportedStatus.new(pid, exitstatus, termsig))
       end
 

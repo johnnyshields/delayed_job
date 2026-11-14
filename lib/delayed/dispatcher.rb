@@ -205,12 +205,18 @@ module Delayed
     # Launcher::Mold). No-op once stopping. Signal-trap safe.
     def promote
       return if stop?
+      @promotion_started = true
       @promoted = true
       stop
     end
 
     def promoted?
       @promoted
+    end
+
+    # Promoted, then stopped by a signal (or its parent going away) instead.
+    def promotion_cancelled?
+      !!@promotion_started && !@promoted
     end
 
     # Jobs performed (succeeded or failed) since start.
