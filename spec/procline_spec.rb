@@ -14,8 +14,7 @@ describe 'The process title of a worker process' do
   before do
     Delayed::Job.delete_all
     BlockingJob.reset
-    allow(dispatcher).to receive(:say)
-    dispatcher.workers.each { |w| allow(w).to receive(:say) }
+    silence_say(*and_workers(dispatcher))
     allow(Delayed::Worker).to receive(:logger).and_return(Logger.new(nil))
   end
 
@@ -24,12 +23,8 @@ describe 'The process title of a worker process' do
     Delayed::Worker.reset
   end
 
-  def run_in_thread
-    Thread.new { dispatcher.run }.tap { |t| t.report_on_exception = false }
-  end
-
   def wait_for_title(expected)
-    Timeout.timeout(5) { sleep 0.01 until $0 == expected }
+    wait_until(5) { $0 == expected }
     $0
   end
 

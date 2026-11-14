@@ -107,9 +107,12 @@ describe 'A worker process dying while running jobs', :processes do
   end
 
   context 'when it keeps dying as it starts up' do
+    # Respawn delays of 0.25s, 0.5s, 1s, 2s... rather than 1s, 2s, 4s, 8s.
+    let(:unit) { 0.25 }
+
     it 'is replaced after a growing delay, until one starts' do
       started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-      pid, reader = spawn_launcher(:processes => 1, :pools => [[[], 1]], :crash_on_start => 3, :worker => worker_settings)
+      pid, reader = spawn_launcher(:processes => 1, :pools => [[[], 1]], :crash_on_start => 3, :respawn_delay_unit => unit, :worker => worker_settings)
       output = +''
       wait_for(20) { (output << read_available(reader)) =~ /Child process delayed_job\.3 \(pid \d+\) started/ }
       job = enqueue_process_job(ProcessJobs::SleepJob.new('after the crash loop', 0))
@@ -120,18 +123,18 @@ describe 'A worker process dying while running jobs', :processes do
       elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
 
       expect(status).to be_success, output
-      waits = output.scan(/died [\d.]+s after starting \((\d) time\(s\) in a row\); waiting (\d+)s before replacing it/)
-      expect(waits).to eq [%w[1 1], %w[2 2], %w[3 4]]
-      expect(elapsed).to be >= 7 # 1 + 2 + 4 seconds of waiting.
+      waits = output.scan(/died [\d.]+s after starting \((\d) time\(s\) in a row\); waiting ([\d.]+)s before replacing it/)
+      expect(waits).to eq [%w[1 0.25], %w[2 0.5], %w[3 1]]
+      expect(elapsed).to be >= 1.75 # 0.25 + 0.5 + 1 seconds of waiting.
       expect(ProcessHelpers::Run.where(:key => 'after the crash loop').count).to eq 1
     end
 
     it 'does not hold up replacing a healthy sibling that dies meanwhile' do
       job = enqueue_process_job(ProcessJobs::SleepJob.new('long', 30), :queue => 'healthy')
-      pid, reader = spawn_launcher(:pools => [[['crash'], 1], [['healthy'], 1]], :crash_queue => 'crash',
+      pid, reader = spawn_launcher(:pools => [[['crash'], 1], [['healthy'], 1]], :crash_queue => 'crash', :respawn_delay_unit => unit,
                                    :worker => worker_settings.merge(:shutdown_timeout => 1))
       output = +''
-      wait_for(30) { (output << read_available(reader)) =~ /waiting 8s before replacing it/ }
+      wait_for(30) { (output << read_available(reader)) =~ /waiting 2s before replacing it/ }
       healthy = reload_job(job).locked_by[/pid:(\d+)/, 1].to_i
       killed_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
       Process.kill('KILL', healthy)
@@ -146,8 +149,8 @@ describe 'A worker process dying while running jobs', :processes do
       output << rest
 
       expect(status).to be_success, output
-      # Reaped and recovered at once, not after the crashing sibling's 8s
-      # delay; replaced after at most its own (it was up under 10s: 1s).
+      # Reaped and recovered at once, not after the crashing sibling's 2s
+      # delay; replaced after at most its own (it was up under 10s: 0.25s).
       expect(recovered_after).to be < 1.5
       expect(replaced_after).to be < 3
       job = reload_job(job)
@@ -160,9 +163,10 @@ describe 'A worker process dying while running jobs', :processes do
     end
 
     it 'stops waiting when the launcher is stopped' do
-      pid, reader = spawn_launcher(:processes => 1, :pools => [[[], 1]], :crash_on_start => 100, :worker => worker_settings)
+      pid, reader = spawn_launcher(:processes => 1, :pools => [[[], 1]], :crash_on_start => 100, :respawn_delay_unit => unit,
+                                   :worker => worker_settings)
       output = +''
-      wait_for(20) { (output << read_available(reader)) =~ /waiting 4s before replacing it/ }
+      wait_for(20) { (output << read_available(reader)) =~ /waiting 1s before replacing it/ }
       stopped_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
       Process.kill('TERM', pid)
       status, rest = wait_for_launcher(pid, reader)

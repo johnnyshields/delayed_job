@@ -161,13 +161,10 @@ describe 'Delayed::Worker.on_thread_error' do
     end
 
     it 'publishes a thread_error event as well' do
-      events = []
-      subscription = ActiveSupport::Notifications.subscribe('thread_error.delayed_job') { |*args| events << args.last }
+      events = payloads_of(:thread_error)
       error = IOError.new('x')
       Delayed::Worker.thread_error(error, :context => 'Test')
       expect(events).to eq [{:context => 'Test', :error => error}]
-    ensure
-      ActiveSupport::Notifications.unsubscribe(subscription)
     end
 
     it 'does nothing more without a handler' do
@@ -192,13 +189,7 @@ describe 'Delayed::Worker.on_thread_error' do
     let(:dispatcher) { Delayed::Dispatcher.new(:threads => 2, :sleep_delay => 0.01, :quiet => true) }
 
     before do
-      allow(dispatcher).to receive(:say)
-      dispatcher.workers.each { |w| allow(w).to receive(:say) }
-    end
-
-    def run_to_completion
-      Delayed::Worker.exit_on_complete = true
-      Timeout.timeout(5) { dispatcher.run }
+      silence_say(*and_workers(dispatcher))
     end
 
     it 'include failed reservations' do

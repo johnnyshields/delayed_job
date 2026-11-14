@@ -61,6 +61,30 @@ describe Delayed::Launcher::Forking, 'replacing child processes that keep dying'
     expect(delays).to eq [1, 2, 4, 8, 16, 32, 60, 60, 60]
   end
 
+  context 'with a lower respawn_delay_unit (a test setting)' do
+    around do |example|
+      described_class.respawn_delay_unit = 0.25
+      example.run
+    ensure
+      described_class.respawn_delay_unit = 1
+    end
+
+    it 'scales the delays, still capped at RESPAWN_MAX_DELAY' do
+      expect((1..10).map { |streak| launcher.send(:respawn_delay, streak) }).to eq [0.25, 0.5, 1, 2, 4, 8, 16, 32, 60, 60]
+    end
+
+    it 'says the fractional delay' do
+      logged = []
+      allow(logger).to receive(:warn) { |text| logged << text }
+      launcher.send(:replace_worker, 'delayed_job.x', start_child, {}, crashed)
+      expect(logged.last).to end_with 'waiting 0.25s before replacing it'
+    end
+  end
+
+  it 'defaults respawn_delay_unit to 1 second' do
+    expect(described_class.respawn_delay_unit).to eq 1
+  end
+
   it 'resets the delay once a replacement stays up' do
     pid = start_child
     3.times { pid = dies_after(pid, 1) }
@@ -115,16 +139,13 @@ describe Delayed::Launcher::Forking, 'replacing child processes that keep dying'
     end
 
     it 'publishes process_spawned with the pid replaced and the delay' do
-      events = []
-      subscription = ActiveSupport::Notifications.subscribe('process_spawned.delayed_job') { |*args| events << args.last }
+      events = payloads_of(:process_spawned)
       first = start_child
       second = dies_after(first, 1)
       dies_after(second, 1)
       expect(events.map { |e| e.slice(:replaces_pid, :delay) }).to eq [
         {:replaces_pid => nil, :delay => 0}, {:replaces_pid => first, :delay => 1}, {:replaces_pid => second, :delay => 2}
       ]
-    ensure
-      ActiveSupport::Notifications.unsubscribe(subscription)
     end
   end
 
@@ -187,7 +208,7 @@ describe Delayed::Launcher::Forking, 'replacing child processes that keep dying'
       launcher.send(:started_at)[only] -= 100 # Long-lived: replaced at once, and the fork fails.
       thread = Thread.new { launcher.send(:run_loop) }
       thread.report_on_exception = false
-      Timeout.timeout(5) { sleep 0.01 until !thread.alive? || (launcher.send(:workers).keys - [only]).any? }
+      wait_until(5) { !thread.alive? || (launcher.send(:workers).keys - [only]).any? }
       expect(thread).to be_alive # The failed fork didn't end the run loop,
       expect(launcher.send(:workers).keys).to eq [pids.first - 1] # and was retried: the next pid forked.
       launcher.instance_variable_set(:@stopped, true)
@@ -236,9 +257,9 @@ describe Delayed::Launcher::Forking, 'replacing child processes that keep dying'
       started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
       exits([crashing, crashed], [healthy, healthy_status])
       thread = Thread.new { launcher.send(:run_loop) }
-      Timeout.timeout(5) { sleep 0.01 until replaced.size == 1 }
+      wait_until(5) { replaced.size == 1 }
       expect(replaced.first.last - started).to be < 0.5 # Not after the crashing one's 1s delay.
-      Timeout.timeout(5) { sleep 0.01 until replaced.size == 2 }
+      wait_until(5) { replaced.size == 2 }
       expect(replaced.last.last - started).to be >= 0.9 # The crashing one, after its delay.
       launcher.instance_variable_set(:@stopped, true)
       launcher.send(:workers).clear
@@ -251,7 +272,7 @@ describe Delayed::Launcher::Forking, 'replacing child processes that keep dying'
       exits([crashing, crashed], [other, crashed])
       allow(launcher).to receive(:sleep) { |s| Kernel.sleep(s) }
       thread = Thread.new { launcher.send(:run_loop) }
-      Timeout.timeout(0.5) { sleep 0.01 until launcher.send(:pending_replacements).size == 2 }
+      wait_until(0.5) { launcher.send(:pending_replacements).size == 2 }
       expect(launcher).to have_received(:recover_jobs_of_worker).twice
       launcher.instance_variable_set(:@stopped, true)
       launcher.send(:workers).clear
@@ -263,7 +284,7 @@ describe Delayed::Launcher::Forking, 'replacing child processes that keep dying'
       exits([only, crashed])
       allow(launcher).to receive(:sleep) { |s| Kernel.sleep(s) }
       thread = Thread.new { launcher.send(:run_loop) }
-      Timeout.timeout(5) { sleep 0.01 until launcher.send(:workers).size == 1 && !launcher.send(:workers).key?(only) }
+      wait_until(5) { launcher.send(:workers).size == 1 && !launcher.send(:workers).key?(only) }
       launcher.instance_variable_set(:@stopped, true)
       launcher.send(:workers).clear
       Timeout.timeout(5) { thread.join }
@@ -276,7 +297,7 @@ describe Delayed::Launcher::Forking, 'replacing child processes that keep dying'
       allow(launcher).to receive(:sleep) { |s| Kernel.sleep(s) }
       expect(launcher).to receive(:add_worker).never
       thread = Thread.new { launcher.send(:run_loop) }
-      Timeout.timeout(5) { sleep 0.01 until launcher.send(:pending_replacements).any? }
+      wait_until(5) { launcher.send(:pending_replacements).any? }
       launcher.instance_variable_set(:@stopped, true)
       expect(Timeout.timeout(2) { thread.join }).to eq thread
     end

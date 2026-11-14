@@ -5,9 +5,7 @@ describe 'Worker processes whose parent goes away' do
     let(:messages) { Concurrent::Array.new }
 
     def dispatcher(options = {})
-      described_class.new(options).tap do |d|
-        allow(d).to receive(:say) { |text, level = 'info'| messages << [level, text] }
-      end
+      described_class.new(options).tap { |d| capture_say(messages, d) }
     end
 
     describe '#supervisor_pid' do

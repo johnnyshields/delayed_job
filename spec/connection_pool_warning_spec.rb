@@ -15,9 +15,7 @@ describe 'The connection pool size warning' do
   after { Delayed::Worker.reset }
 
   def dispatcher(threads)
-    Delayed::Dispatcher.new(:threads => threads).tap do |d|
-      allow(d).to receive(:say) { |text, level = 'info'| messages << [level, text] }
-    end
+    Delayed::Dispatcher.new(:threads => threads).tap { |d| capture_say(messages, d) }
   end
 
   def warn!(threads)

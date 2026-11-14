@@ -4,33 +4,33 @@ module Delayed
   # (rake jobs:work): one set of rules for both. Errors are ArgumentErrors
   # naming the option as it was given (see CLI_NAMES and ENV_NAMES).
   module LaunchOptions
-    CLI_NAMES = {
-      :processes => '--processes', :threads => '--threads', :read_ahead => '--read-ahead', :prefetch => '--prefetch',
-      :min_priority => '--min-priority', :max_priority => '--max-priority', :sleep_delay => '--sleep-delay',
-      :shutdown_timeout => '--shutdown-timeout', :lock_heartbeat_interval => '--lock-heartbeat',
-      :lock_timeout => '--lock-timeout', :identifier => '--identifier', :queues => '--queues', :pools => '--pool'
+    POSITIVE = [:integer, ->(n) { n >= 1 }, 'must be 1 or greater'].freeze
+    WHOLE = [:integer, ->(_) { true }, 'must be a whole number'].freeze
+    SECONDS = [:seconds, ->(s) { s >= 0 }, 'must be a number of seconds, 0 or greater'].freeze
+    POSITIVE_SECONDS = [:seconds, ->(s) { s > 0 }, 'must be greater than 0'].freeze
+    PREFETCH = [:integer, ->(n) { n.between?(0, Worker::MAX_PREFETCH) }, "must be a whole number from 0 to #{Worker::MAX_PREFETCH}"].freeze
+
+    # option => [command-line name, environment variable, rule]; a rule is
+    # [kind, valid?, what a valid value is], for options parsed as numbers.
+    OPTIONS = {
+      :processes => ['--processes', 'NUM_PROCESSES', POSITIVE],
+      :threads => ['--threads', 'NUM_THREADS', POSITIVE],
+      :read_ahead => ['--read-ahead', 'READ_AHEAD', POSITIVE],
+      :prefetch => ['--prefetch', 'PREFETCH', PREFETCH],
+      :min_priority => ['--min-priority', 'MIN_PRIORITY', WHOLE],
+      :max_priority => ['--max-priority', 'MAX_PRIORITY', WHOLE],
+      :sleep_delay => ['--sleep-delay', 'SLEEP_DELAY', SECONDS],
+      :shutdown_timeout => ['--shutdown-timeout', 'SHUTDOWN_TIMEOUT', SECONDS],
+      :lock_heartbeat_interval => ['--lock-heartbeat', 'LOCK_HEARTBEAT', POSITIVE_SECONDS],
+      :lock_timeout => ['--lock-timeout', 'LOCK_TIMEOUT', POSITIVE_SECONDS],
+      :identifier => ['--identifier', nil, nil], # No environment variable.
+      :queues => ['--queues', 'QUEUES', nil],
+      :pools => ['--pool', 'POOLS', nil]
     }.freeze
 
-    ENV_NAMES = {
-      :processes => 'NUM_PROCESSES', :threads => 'NUM_THREADS', :read_ahead => 'READ_AHEAD', :prefetch => 'PREFETCH',
-      :min_priority => 'MIN_PRIORITY', :max_priority => 'MAX_PRIORITY', :sleep_delay => 'SLEEP_DELAY',
-      :shutdown_timeout => 'SHUTDOWN_TIMEOUT', :lock_heartbeat_interval => 'LOCK_HEARTBEAT',
-      :lock_timeout => 'LOCK_TIMEOUT', :queues => 'QUEUES', :pools => 'POOLS'
-    }.freeze
-
-    # option => [kind, valid?, what a valid value is]
-    RULES = {
-      :processes => [:integer, ->(n) { n >= 1 }, 'must be 1 or greater'],
-      :threads => [:integer, ->(n) { n >= 1 }, 'must be 1 or greater'],
-      :read_ahead => [:integer, ->(n) { n >= 1 }, 'must be 1 or greater'],
-      :prefetch => [:integer, ->(n) { n.between?(0, Worker::MAX_PREFETCH) }, "must be a whole number from 0 to #{Worker::MAX_PREFETCH}"],
-      :min_priority => [:integer, ->(_) { true }, 'must be a whole number'],
-      :max_priority => [:integer, ->(_) { true }, 'must be a whole number'],
-      :sleep_delay => [:seconds, ->(s) { s >= 0 }, 'must be a number of seconds, 0 or greater'],
-      :shutdown_timeout => [:seconds, ->(s) { s >= 0 }, 'must be a number of seconds, 0 or greater'],
-      :lock_heartbeat_interval => [:seconds, ->(s) { s > 0 }, 'must be greater than 0'],
-      :lock_timeout => [:seconds, ->(s) { s > 0 }, 'must be greater than 0']
-    }.freeze
+    CLI_NAMES = OPTIONS.transform_values(&:first).freeze
+    ENV_NAMES = OPTIONS.transform_values { |(_, env)| env }.compact.freeze
+    RULES = OPTIONS.transform_values(&:last).compact.freeze
 
     # Parses the text given for `option` (a key of RULES): a whole number,
     # or a number of seconds (see Delayed.parse_seconds). Raises an

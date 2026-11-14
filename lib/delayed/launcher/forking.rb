@@ -1,3 +1,4 @@
+require 'active_support/core_ext/class/attribute'
 require 'concurrent/array'
 
 module Delayed
@@ -15,6 +16,11 @@ module Delayed
       # stays up longer resets it.
       RESPAWN_MIN_UPTIME = 10
       RESPAWN_MAX_DELAY = 60
+
+      # The first respawn delay, in seconds (doubled with each quick death
+      # in a row, up to RESPAWN_MAX_DELAY). A setting for tests, which wait
+      # through crash loops: lower it to keep them fast.
+      class_attribute :respawn_delay_unit, :instance_writer => false, :default => 1
 
       # options[:pid_file]: true writes a pidfile named after this process
       # in options[:pid_dir]; a String is the pidfile's path. Off by default.
@@ -108,11 +114,7 @@ module Delayed
         Signal.trap('HUP') do
           next if forked_child?
           Thread.new { logger.info('Received SIGHUP. Waiting for workers to finish current job...') }
-          @stopped = true
-          stop_signals << 'TERM' unless stop_signals.include?('TERM')
-          forward_signal('TERM')
-          timeout = shutdown_timeout
-          schedule_kill(timeout + SHUTDOWN_GRACE) if timeout
+          stop_from_trap('TERM', kill_after_shutdown_timeout)
         end
       rescue ArgumentError => error
         logger.warn "Cannot trap SIGHUP on this platform (#{error.message})"
@@ -127,11 +129,7 @@ module Delayed
         Signal.trap(signal) do
           next child_signal(signal) if forked_child?
           Thread.new { logger.info("Received SIG#{signal}. Waiting for workers to finish current job...") }
-          @stopped = true
-          stop_signals << signal unless stop_signals.include?(signal)
-          forward_signal(signal)
-          timeout = shutdown_timeout
-          schedule_kill(timeout + SHUTDOWN_GRACE) if timeout
+          stop_from_trap(signal, kill_after_shutdown_timeout)
         end
       end
 
@@ -143,13 +141,26 @@ module Delayed
         Signal.trap('QUIT') do
           next child_signal('QUIT') if forked_child?
           Thread.new { logger.info('Received SIGQUIT. Interrupting running jobs...') }
-          @stopped = true
-          stop_signals << 'QUIT' unless stop_signals.include?('QUIT')
-          forward_signal('QUIT')
-          schedule_kill(SHUTDOWN_GRACE)
+          stop_from_trap('QUIT', SHUTDOWN_GRACE)
         end
       rescue ArgumentError => error
         logger.warn "Cannot trap SIGQUIT on this platform (#{error.message}); use TERM or INT to stop"
+      end
+
+      # Stops the launcher on `signal`, forwarding it to the worker processes
+      # and SIGKILLing any left after `kill_after` seconds (if any).
+      # Signal-trap safe: takes no lock and doesn't log.
+      def stop_from_trap(signal, kill_after)
+        @stopped = true
+        stop_signals << signal unless stop_signals.include?(signal)
+        forward_signal(signal)
+        schedule_kill(kill_after) if kill_after
+      end
+
+      # SHUTDOWN_GRACE seconds past the shutdown timeout, if one is set.
+      def kill_after_shutdown_timeout
+        timeout = shutdown_timeout
+        timeout + SHUTDOWN_GRACE if timeout
       end
 
       # Signal-trap safe: doesn't log.
@@ -339,6 +350,8 @@ module Delayed
                       "#{'; replacing it' unless @stopped}"
         end
         replace_worker(worker_name, worker_pid, options, child_status) unless @stopped
+      ensure
+        @plans&.delete(worker_pid)
       end
 
       # Replaces a child process that exited: at once, or - if it died soon
@@ -347,11 +360,12 @@ module Delayed
       # or nil if the replacement is delayed.
       def replace_worker(worker_name, pid, options, status)
         uptime, streak, delay = respawn_plan(pid)
+        @plans.delete(pid)
         started_at.delete(pid)
         respawn_streaks.delete(pid)
         return respawn(worker_name, pid, options, status, streak, 0) unless delay
         logger.warn format('Child process %<name>s (pid %<pid>d) died %<uptime>.1fs after starting (%<streak>d time(s) in a row); ' \
-                           'waiting %<delay>ds before replacing it',
+                           'waiting %<delay>gs before replacing it',
                            :name => worker_name, :pid => pid, :uptime => uptime.to_f, :streak => streak, :delay => delay)
         pending_replacements << [monotonic_now + delay, [worker_name, pid, options, status, streak, delay]]
         nil
@@ -359,18 +373,21 @@ module Delayed
 
       def publish_child_exited(worker_name, pid, status)
         uptime, _streak, delay = respawn_plan(pid)
-        respawn_in = @stopped ? nil : delay.to_i
+        respawn_in = @stopped ? nil : delay || 0
         Delayed.instrument(:process_exited, :worker => worker_name, :pid => pid, :status => status, :uptime => uptime, :respawn_in => respawn_in)
       end
 
       # How long the child process `pid` ran (nil if its start wasn't
       # recorded), its quick deaths in a row, and the seconds to wait before
-      # replacing it (nil for none). Changes nothing.
+      # replacing it (nil for none). Worked out once per exit (until
+      # #handle_exit is done), so its event and its replacement agree.
       def respawn_plan(pid)
-        started = started_at[pid]
-        uptime = started && monotonic_now - started
-        streak = uptime && uptime < RESPAWN_MIN_UPTIME ? respawn_streaks[pid].to_i + 1 : 0
-        [uptime, streak, respawn_delay(streak)]
+        (@plans ||= {})[pid] ||= begin
+          started = started_at[pid]
+          uptime = started && monotonic_now - started
+          streak = uptime && uptime < RESPAWN_MIN_UPTIME ? respawn_streaks[pid].to_i + 1 : 0
+          [uptime, streak, respawn_delay(streak)]
+        end
       end
 
       # Forks the replacements that fell due, unless the launcher is stopping.
@@ -403,7 +420,7 @@ module Delayed
       # quick deaths in a row, or nil for none.
       def respawn_delay(streak)
         return if streak.zero?
-        [2**(streak - 1), RESPAWN_MAX_DELAY].min
+        [respawn_delay_unit * 2**(streak - 1), RESPAWN_MAX_DELAY].min
       end
 
       # [[due time, replacement], ...] of child processes waiting to be
@@ -445,7 +462,10 @@ module Delayed
       # be reached, the locks are left to expire.
       def recover_jobs_of_worker(worker_name, pid, options, status)
         lock_names = Delayed::Worker.lock_names("#{worker_name} ", pid, threads(options), prefetch(options))
-        return release_locks_of_exited(lock_names) if status.success?
+        # A child process that exited cleanly released its jobs' locks
+        # itself; any left (a job that ignored its shutdown interrupt) are
+        # stale now that it is gone: release them, attempts unchanged.
+        return Delayed::Job.clear_locks_of!(lock_names) if status.success?
         count = Delayed::Worker.recover_jobs_of(lock_names, ProcessExitError.new(worker_name, pid, status))
         logger.warn "Recovered #{count} job(s) left locked by child process #{worker_name} (pid #{pid})" if count > 0
       rescue StandardError => error
@@ -454,13 +474,6 @@ module Delayed
         Delayed::Worker.thread_error(error, :context => 'Recovering jobs', :worker => worker_name, :pid => pid)
       ensure
         disconnect_backend
-      end
-
-      # A child process that exited cleanly released its jobs' locks itself;
-      # any left (a job that ignored its shutdown interrupt) are stale now
-      # that it is gone: release them, attempts unchanged, for another worker.
-      def release_locks_of_exited(lock_names)
-        Delayed::Job.clear_locks_of!(lock_names)
       end
 
       # Drops the connections opened by recovery, so the next forked worker

@@ -170,12 +170,11 @@ describe 'Recovering the jobs of a dead worker process' do
       failed_at = now - 60
       job = locked_job('dj.1 pid:77', :attempts => 25, :failed_at => failed_at, :last_error => 'the original error')
       events = []
-      subscription = ActiveSupport::Notifications.subscribe(/delayed_job/) { |name, *| events << name }
+      subscribe(/delayed_job/) { |name, *| events << name }
       expect(Delayed::Worker.recover_jobs_of(['dj.1 pid:77'], error)).to eq 0
       expect([job.attempts, job.failed_at, job.last_error, job.locked_by]).to eq [25, failed_at, 'the original error', nil]
       expect(events.grep(/job_attempt_failed|job_failed|jobs_released/)).to be_empty
     ensure
-      ActiveSupport::Notifications.unsubscribe(subscription) if subscription
       Delayed::Worker.destroy_failed_jobs = true
     end
 
@@ -191,16 +190,13 @@ describe 'Recovering the jobs of a dead worker process' do
     end
 
     it 'publishes one jobs_released event naming the workers whose jobs it recovered' do
-      events = []
-      subscription = ActiveSupport::Notifications.subscribe('jobs_released.delayed_job') { |*, payload| events << payload }
+      events = payloads_of(:jobs_released)
       locked_job('dj.1 pid:77 thread:0')
       2.times { locked_job('dj.1 pid:77 thread:1') }
       names = ['dj.1 pid:77 thread:0', 'dj.1 pid:77 thread:1', 'dj.1 pid:77 thread:2']
       Delayed::Worker.recover_jobs_of(names, error)
       expect(events.size).to eq 1
       expect(events.first).to include(:workers => ['dj.1 pid:77 thread:0', 'dj.1 pid:77 thread:1'], :count => 3, :reason => 'process exit')
-    ensure
-      ActiveSupport::Notifications.unsubscribe(subscription)
     end
 
     it 'runs the :error callbacks with a worker named after the thread that held each job' do

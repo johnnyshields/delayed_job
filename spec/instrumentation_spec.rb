@@ -35,14 +35,6 @@ describe 'Instrumentation' do
     found.first.payload
   end
 
-  # Subscribes a block to one event for the duration of the example.
-  def subscribe(name, &block)
-    subscription = ActiveSupport::Notifications.subscribe("#{name}.delayed_job", &block)
-    @subscriptions = (@subscriptions || []) << subscription
-  end
-
-  after { (@subscriptions || []).each { |s| ActiveSupport::Notifications.unsubscribe(s) } }
-
   describe 'Delayed.instrument' do
     it 'publishes <event>.delayed_job with the payload' do
       Delayed.instrument(:custom, :a => 1)
@@ -255,32 +247,7 @@ describe 'Instrumentation' do
   describe 'dispatcher events' do
     let(:dispatcher) { Delayed::Dispatcher.new(:threads => 2, :sleep_delay => 0.05, :quiet => true) }
 
-    before do
-      allow(dispatcher).to receive(:say)
-      dispatcher.workers.each { |w| allow(w).to receive(:say) }
-    end
-
-    def run_to_completion
-      Delayed::Worker.exit_on_complete = true
-      Timeout.timeout(5) { dispatcher.run }
-    end
-
-    def run_in_thread
-      @thread = Thread.new { dispatcher.run }.tap { |t| t.report_on_exception = false }
-    end
-
-    # A failed example must not leave its dispatcher publishing events
-    # into the next one.
-    after do
-      next unless @thread
-      BlockingJob.release = true
-      dispatcher.stop
-      begin
-        @thread.join(5)
-      rescue Exception # rubocop:disable Lint/RescueException
-        nil # Raised in the example already.
-      end
-    end
+    before { silence_say(*and_workers(dispatcher)) }
 
     it 'publishes process_started and process_stopped around a run' do
       Delayed::Worker.queues = %w[mail]

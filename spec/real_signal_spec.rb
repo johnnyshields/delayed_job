@@ -20,8 +20,7 @@ describe 'A dispatcher receiving real signals' do
     skip 'needs to run on the main thread' unless Thread.current == Thread.main
     Delayed::Job.delete_all
     GateJob.reset
-    allow(dispatcher).to receive(:say) { |text, level = 'info'| log << [level, text] }
-    dispatcher.workers.each { |w| allow(w).to receive(:say) { |text, level = 'info'| log << [level, text] } }
+    capture_say(log, *and_workers(dispatcher))
   end
 
   after { GateJob.release = true }

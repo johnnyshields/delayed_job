@@ -94,7 +94,7 @@ describe 'Lock heartbeats' do
 
     before do
       SimpleJob.runs = 0
-      allow(dispatcher).to receive(:say) { |text, level = 'info'| messages << [level, text] }
+      capture_say(messages, dispatcher)
       Delayed::Worker.lock_heartbeat_interval = 0.1
       Delayed::Worker.lock_timeout = 0.5
     end
@@ -275,8 +275,7 @@ describe 'Lock heartbeats' do
       end
 
       it 'publishes a thread_error event' do
-        events = []
-        subscription = ActiveSupport::Notifications.subscribe('thread_error.delayed_job') { |*args| events << args.last }
+        events = payloads_of(:thread_error)
         calls = 0
         allow(job_class).to receive(:touch_locks) {
           raise ScriptError, 'broken' if (calls += 1) == 1
@@ -284,8 +283,6 @@ describe 'Lock heartbeats' do
         }
         run_briefly
         expect(events.map { |p| p[:context] }).to eq ['Lock heartbeat']
-      ensure
-        ActiveSupport::Notifications.unsubscribe(subscription)
       end
 
       it 'keeps beating after a StandardError while choosing which locks to refresh' do
@@ -397,7 +394,7 @@ describe 'Lock heartbeats' do
       let(:other) { dispatcher.workers.last }
 
       before do
-        dispatcher.workers.each { |w| allow(w).to receive(:say) { |text, level = 'info'| messages << [level, text] } }
+        capture_say(messages, *dispatcher.workers)
       end
 
       # Records the job as Worker#run does, started `seconds_ago`.
@@ -472,15 +469,12 @@ describe 'Lock heartbeats' do
         end
 
         it 'publishes job_stuck once per stuck job' do
-          events = []
-          subscription = ActiveSupport::Notifications.subscribe('job_stuck.delayed_job') { |*args| events << args.last }
+          events = payloads_of(:job_stuck)
           job = job_with_max_run_time(1)
           job_running(worker, job, 2)
           3.times { dispatcher.send(:heartbeat_names) }
           expect(events).to eq [{:job => job, :job_name => "Job StuckJob (id=#{job.id})", :worker => worker.name,
                                  :max_run_time => 1, :lock_timeout => 0.5}]
-        ensure
-          ActiveSupport::Notifications.unsubscribe(subscription)
         end
 
         it 'logs again for the next job that overruns on the same worker' do

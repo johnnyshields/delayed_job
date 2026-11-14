@@ -246,10 +246,10 @@ describe Delayed::Dispatcher do
           ConcurrencyJob.reset(3) # The first job keeps one thread busy throughout.
           Delayed::Job.enqueue(ConcurrencyJob.new(1))
           thread = Thread.new { d.run }
-          Timeout.timeout(3) { sleep 0.01 until ConcurrencyJob.running == 1 }
+          wait_until(3) { ConcurrencyJob.running == 1 }
           late = Delayed::Job.enqueue(ConcurrencyJob.new(2))
           # Picked up by the idle thread within sleep_delay, not after the 3s job.
-          Timeout.timeout(1.5) { sleep 0.01 until ConcurrencyJob.running == 2 }
+          wait_until(1.5) { ConcurrencyJob.running == 2 }
           expect(ConcurrencyJob.runs[2]).to eq 1
           expect(late.reload.locked_by).not_to be_nil
           d.quit
@@ -261,7 +261,7 @@ describe Delayed::Dispatcher do
           enqueue_jobs(2)
           polls = reserve_in_polls(1)
           thread = Thread.new { dispatcher.run }
-          Timeout.timeout(3) { sleep 0.01 until polls.size >= 2 }
+          wait_until(3) { polls.size >= 2 }
           expect(polls[1].first - polls[0].first).to be >= 0.15 # Only after the job finished.
           dispatcher.stop
           Timeout.timeout(3) { thread.join }
@@ -294,7 +294,7 @@ describe Delayed::Dispatcher do
         enqueue_jobs(4)
         polls = reserve_in_polls(4)
         thread = Thread.new { dispatcher.run }
-        Timeout.timeout(3) { sleep 0.01 until Delayed::Job.all.empty? || polls.size > 1 }
+        wait_until(3) { Delayed::Job.all.empty? || polls.size > 1 }
         dispatcher.stop
         Timeout.timeout(3) { thread.join }
         expect(polls.first.last).to eq 4
@@ -379,7 +379,7 @@ describe Delayed::Dispatcher do
           it 'is raised into running jobs too (signals only), and stops every thread' do
             k = klass
             m = message
-            ConcurrencyJob.reset(5)
+            ConcurrencyJob.reset(2)
             # Poll again while the job runs (after the partial first batch).
             allow(Delayed::Job).to receive(:partial_batch_may_leave_jobs?).and_return(true)
             job = Delayed::Job.enqueue(ConcurrencyJob.new(1))
@@ -395,10 +395,10 @@ describe Delayed::Dispatcher do
             took = Process.clock_gettime(Process::CLOCK_MONOTONIC) - took
             expect(dispatcher.instance_variable_get(:@threads)).to all(satisfy { |t| !t.alive? })
             if klass <= SignalException
-              expect(took).to be < 4 # Interrupted, not left to run its 5s.
+              expect(took).to be < 1.5 # Interrupted, not left to run its 2s.
               expect(Delayed::Job.all).to include job # Not completed.
             else
-              expect(took).to be >= 4 # An exit lets the running job finish.
+              expect(took).to be >= 1.5 # An exit lets the running job finish.
             end
           end
         end

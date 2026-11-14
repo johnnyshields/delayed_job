@@ -403,7 +403,7 @@ RAILS_ENV=production script/delayed_job start --exit-on-complete
 RAILS_ENV=production script/delayed_job run --exit-on-complete
 ```
 
-### Experimental: Forking Mode
+### Forking Mode
 
 The `script/delayed_job` process (described above) uses the
 [Daemons](https://github.com/thuehlinger/daemons) gem which has several
@@ -802,10 +802,7 @@ grouped by what they are about:
 * `thread_error` (see `on_thread_error` above).
 
 [docs/monitoring.md](docs/monitoring.md#events) lists when each is published,
-on which thread, and its payload.
-
-Timed events also carry `:exception` when their block raised. Events are
-published on worker threads; an exception raised by a subscriber is logged and
+on which thread, and its payload. A subscriber that raises is logged and
 ignored, so it can't fail or skip a job.
 
 ```ruby
@@ -815,8 +812,8 @@ end
 ```
 
 `Delayed::LogSubscriber` logs these events to `Delayed::Worker.logger`
-(`jobs_reserved` and `job_performed` at debug level, with their durations). Workers already
-log their activity, so it isn't attached by default:
+(`jobs_reserved` and `job_performed` at debug level, with their durations).
+Workers already log their activity, so it isn't attached by default:
 
 ```ruby
 Delayed::LogSubscriber.attach_to :delayed_job

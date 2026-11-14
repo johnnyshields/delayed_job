@@ -25,7 +25,7 @@ describe 'Exiting on complete, with jobs that enqueue jobs' do
       next m.call(*args) unless polls == 2
       # This poll's query ran before the first link enqueued the second;
       # the first link then finishes while the poll is still under way.
-      Timeout.timeout(5) { sleep 0.01 until ChainJob.runs.size == 1 }
+      wait_until(5) { ChainJob.runs.size == 1 }
       sleep 0.05 # Let its worker thread record that it finished.
       []
     end

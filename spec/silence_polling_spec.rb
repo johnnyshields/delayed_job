@@ -27,10 +27,8 @@ describe 'Delayed::Worker.silence_polling' do
   end
 
   def run_to_completion(dispatcher)
-    allow(dispatcher).to receive(:say)
-    dispatcher.workers.each { |w| allow(w).to receive(:say) }
-    Delayed::Worker.exit_on_complete = true
-    Timeout.timeout(10) { dispatcher.run }
+    silence_say(*and_workers(dispatcher))
+    super
   end
 
   # SQL statements logged, by kind.

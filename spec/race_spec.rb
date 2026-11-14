@@ -17,8 +17,7 @@ describe 'Races' do
 
   def quiet_dispatcher(options)
     Delayed::Dispatcher.new(options).tap do |d|
-      allow(d).to receive(:say)
-      d.workers.each { |w| allow(w).to receive(:say) }
+      silence_say(*and_workers(d))
     end
   end
 

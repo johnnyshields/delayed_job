@@ -141,8 +141,4 @@ counts per pod.
 
 ## Development
 
-Code changes are reloaded before the next job. With several threads, a reload
-waits until no thread is running a job, so a long job holds up the others
-after a code change; use one thread if that gets in the way.
-
-See [monitoring.md](monitoring.md) for what to watch in production.
+For code reloading with threads, see Development in the README. See [monitoring.md](monitoring.md) for what to watch in production.

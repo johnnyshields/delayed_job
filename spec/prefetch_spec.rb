@@ -13,23 +13,8 @@ describe 'Prefetching jobs (Worker.prefetch)' do
     ConcurrencyJob.reset(0.01)
   end
 
-  let(:running) { Concurrent::Array.new }
-
-  # Stops every dispatcher a failed example left running, so that its
-  # threads don't finish jobs during the next example.
-  after do
-    GateJob.release = true
-    running.each do |d, thread|
-      d.stop
-      thread.join(10)
-    end
-  end
-
   def dispatcher(threads, options = {})
-    Delayed::Dispatcher.new({:threads => threads, :sleep_delay => 0.05}.merge(options)).tap do |d|
-      allow(d).to receive(:say) { |text, level = 'info'| log << [level, text] }
-      d.workers.each { |w| allow(w).to receive(:say) { |text, level = 'info'| log << [level, text] } }
-    end
+    Delayed::Dispatcher.new({:threads => threads, :sleep_delay => 0.05}.merge(options)).tap { |d| capture_say(log, *and_workers(d)) }
   end
 
   # Records each reservation: [requested names, reserved count, depth].
@@ -43,22 +28,11 @@ describe 'Prefetching jobs (Worker.prefetch)' do
     Delayed::Job.all.select(&:locked_by)
   end
 
-  def run_in_thread(dispatcher)
-    Thread.new { dispatcher.run }.tap do |thread|
-      thread.report_on_exception = false if thread.respond_to?(:report_on_exception=)
-      running << [dispatcher, thread]
-    end
-  end
-
   # Builds the dispatcher's slots and inboxes, without starting threads.
   def prepare(dispatcher)
     dispatcher.send(:build_slots)
     dispatcher.workers.each { |w| dispatcher.instance_variable_get(:@inboxes)[w] = Delayed::Inbox.new }
     dispatcher
-  end
-
-  def wait_until(timeout = 5)
-    Timeout.timeout(timeout) { sleep 0.01 until yield }
   end
 
   def stop_and_join(dispatcher, thread)
@@ -222,10 +196,7 @@ describe 'Prefetching jobs (Worker.prefetch)' do
     end
 
     context 'behind a job that overran its max_run_time (stuck, e.g. in native code)' do
-      let(:released) { Concurrent::Array.new }
-      let!(:subscriber) { ActiveSupport::Notifications.subscribe('jobs_released.delayed_job') { |*, p| released << p } }
-
-      after { ActiveSupport::Notifications.unsubscribe(subscriber) }
+      let!(:released) { payloads_of(:jobs_released) }
 
       # Two workers; the first runs a stuck job with one queued behind it.
       def stuck_setup
@@ -351,8 +322,7 @@ describe 'Prefetching jobs (Worker.prefetch)' do
     end
 
     it 'releases the job unstarted once its lock expired in the queue' do
-      released = Concurrent::Array.new
-      subscriber = ActiveSupport::Notifications.subscribe('jobs_released.delayed_job') { |*, p| released << p }
+      released = payloads_of(:jobs_released)
       jobs = gate_jobs(2)
       d = dispatcher(1)
       aged = Concurrent::AtomicBoolean.new(false)
@@ -372,8 +342,6 @@ describe 'Prefetching jobs (Worker.prefetch)' do
       expect(log.map(&:last).grep(/waited in its queue until its lock expired/).size).to eq 1
       expect(GateJob.finished).to eq [0, 1]
       stop_and_join(d, thread)
-    ensure
-      ActiveSupport::Notifications.unsubscribe(subscriber)
     end
   end
 
@@ -415,12 +383,8 @@ describe 'Prefetching jobs (Worker.prefetch)' do
     let(:depths) { Concurrent::Array.new }
 
     def record_depths
-      subscriber = ActiveSupport::Notifications.subscribe('jobs_reserved.delayed_job') do |*, payload|
-        depths << [payload[:depth], payload[:requested], payload[:reserved]]
-      end
+      subscribe(:jobs_reserved) { |*, payload| depths << [payload[:depth], payload[:requested], payload[:reserved]] }
       yield
-    ensure
-      ActiveSupport::Notifications.unsubscribe(subscriber)
     end
 
     it 'starts at depth 0, grows one level per full poll and polls again at once' do
@@ -492,7 +456,7 @@ describe 'Prefetching jobs (Worker.prefetch)' do
       crash << :go
       GateJob.release = true # The other worker's job finishes as it stops.
       expect { Timeout.timeout(10) { thread.join } }.to raise_error(crash_error, 'boom')
-      running.clear
+      running_dispatchers.clear # Already joined.
       expect(d.send(:in_flight)).to eq 0
       expect(d.send(:free_slots)).to all(satisfy { |slot| d.instance_variable_get(:@slot_owner)[slot] != d.workers.first })
       left = Delayed::Job.all.reject { |job| GateJob.finished.include?(job.payload_object.key) }
@@ -506,12 +470,8 @@ describe 'Prefetching jobs (Worker.prefetch)' do
     let(:released) { Concurrent::Array.new }
 
     def track_releases
-      subscriber = ActiveSupport::Notifications.subscribe('jobs_released.delayed_job') do |*, payload|
-        released << payload
-      end
+      subscribe(:jobs_released) { |*, payload| released << payload }
       yield
-    ensure
-      ActiveSupport::Notifications.unsubscribe(subscriber)
     end
 
     def unlocked?(job)

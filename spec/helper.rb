@@ -62,6 +62,7 @@ else
   loader.push_dir File.dirname(__FILE__)
   # Process-level specs load these files explicitly, in subprocesses too
   loader.ignore File.join(File.dirname(__FILE__), 'processes')
+  loader.ignore File.join(File.dirname(__FILE__), 'helpers') # Required below.
   loader.setup
 end
 
@@ -96,7 +97,13 @@ end
 # parallel on JRuby, where Array#<< can lose entries.
 require 'concurrent/array'
 
+Dir[File.join(__dir__, 'helpers', '*.rb')].sort.each { |file| require file }
+
 RSpec.configure do |config|
+  config.include LogHelpers
+  config.include ThreadHelpers
+  config.include EventHelpers
+
   # Each example starts with no job in the test backend: one left behind by
   # an earlier example (e.g. a job that never got to run) would otherwise be
   # run by the next dispatcher, which may then wait for it forever.
@@ -106,6 +113,13 @@ RSpec.configure do |config|
 
   config.after(:each) do
     Delayed::Worker.reset
+  end
+
+  # Declared after the reset above, so it runs first (after hooks run in
+  # reverse): dispatchers stop under the example's settings.
+  config.after(:each) do
+    stop_running_dispatchers
+    unsubscribe_all
   end
 
   # Specs that fork (real worker processes, children of jobs) can't run where

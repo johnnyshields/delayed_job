@@ -28,16 +28,13 @@ namespace :jobs do
       :processes => number.call(:processes) || number.call(:processes, 'NUM_WORKERS') || 1,
       :quiet => flag.call('QUIET')
     }
-    {
-      :min_priority => number.call(:min_priority), :max_priority => number.call(:max_priority),
-      :sleep_delay => number.call(:sleep_delay), :read_ahead => number.call(:read_ahead),
-      :threads => number.call(:threads), :prefetch => number.call(:prefetch),
-      :shutdown_timeout => number.call(:shutdown_timeout),
-      :lock_heartbeat_interval => number.call(:lock_heartbeat_interval), :lock_timeout => number.call(:lock_timeout)
-    }.each { |option, value| @options[option] = value unless value.nil? }
-    @options[:prefetch_dynamic] = true if flag.call('PREFETCH_DYNAMIC')
-    @options[:silence_polling] = true if flag.call('SILENCE_POLLING')
-    @options[:count_shutdown_interrupts] = true if flag.call('COUNT_SHUTDOWN_INTERRUPTS')
+    (Delayed::LaunchOptions::RULES.keys - [:processes]).each do |option|
+      value = number.call(option)
+      @options[option] = value unless value.nil?
+    end
+    %w[PREFETCH_DYNAMIC SILENCE_POLLING COUNT_SHUTDOWN_INTERRUPTS].each do |variable|
+      @options[variable.downcase.to_sym] = true if flag.call(variable)
+    end
     # PIDFILE=path, or PIDFILE=1 (true, yes, on) for tmp/pids/delayed_job.pid.
     if flag.call('PIDFILE')
       @options[:pid_file] = ENV['PIDFILE'] =~ /\A(?:1|t|true|y|yes|on)\z/i ? true : ENV['PIDFILE']

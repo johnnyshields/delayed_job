@@ -261,8 +261,7 @@ describe Delayed::Worker do
     it 'raises on worker threads too' do
       job = enqueue_job_calling_new
       dispatcher = Delayed::Dispatcher.new(:threads => 2, :sleep_delay => 0.05)
-      allow(dispatcher).to receive(:say)
-      dispatcher.workers.each { |w| allow(w).to receive(:say) }
+      silence_say(*and_workers(dispatcher))
       lifecycle = Delayed::Worker.lifecycle
       Delayed::Worker.exit_on_complete = true
       Timeout.timeout(5) { dispatcher.run }

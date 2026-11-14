@@ -7,8 +7,7 @@ describe 'Stopping a worker' do
   before do
     Delayed::Job.delete_all
     GateJob.reset
-    allow(dispatcher).to receive(:say) { |text, level = 'info'| log << [level, text] }
-    dispatcher.workers.each { |w| allow(w).to receive(:say) { |text, level = 'info'| log << [level, text] } }
+    capture_say(log, *and_workers(dispatcher))
   end
 
   after do
@@ -114,14 +113,14 @@ describe 'Stopping a worker' do
     end
 
     it 'counts the timeout from when the stop was requested' do
-      Delayed::Worker.shutdown_timeout = 2
+      Delayed::Worker.shutdown_timeout = 1
       enqueue(GateJob.new(:a))
       in_slow_poll = Queue.new
       calls = 0
       allow(Delayed::Job).to receive(:reserve_batch).and_wrap_original do |m, *args|
         next m.call(*args) if (calls += 1) == 1
         in_slow_poll << true
-        sleep 3 # The dispatcher only notices the stop after this.
+        sleep 1.5 # The dispatcher only notices the stop after this.
         []
       end
       thread = run_until_started(1)
@@ -130,9 +129,9 @@ describe 'Stopping a worker' do
         dispatcher.stop
         Timeout.timeout(10) { thread.join }
       end
-      # The 2s timeout ran out during the 3s poll: the job is interrupted as
-      # soon as the dispatcher looks (about 3s), not 2s after that (5s).
-      expect(took).to be < 4.5
+      # The 1s timeout ran out during the 1.5s poll: the job is interrupted
+      # as soon as the dispatcher looks (about 1.5s), not 1s after that (2.5s).
+      expect(took).to be < 2.3
       expect(GateJob.interrupted).to eq [:a]
     end
 
@@ -195,7 +194,7 @@ describe 'Stopping a worker' do
 
     def start
       @thread = Thread.new { dispatcher.run }
-      Timeout.timeout(5) { sleep 0.01 until worker_threads.size == 2 && worker_threads.all? { |t| t.status == 'sleep' } }
+      wait_until(5) { worker_threads.size == 2 && worker_threads.all? { |t| t.status == 'sleep' } }
       @thread
     end
 
@@ -214,7 +213,7 @@ describe 'Stopping a worker' do
         expect(worker_threads).to all(be_alive)
 
         job = Delayed::Job.enqueue(SimpleJob.new)
-        Timeout.timeout(5) { sleep 0.01 while Delayed::Job.all.include?(job) }
+        wait_until(5) { !Delayed::Job.all.include?(job) }
         stop_and_join
         expect(reported).to be_empty
         expect(dispatcher.instance_variable_get(:@thread_error)).to be_nil
@@ -227,7 +226,7 @@ describe 'Stopping a worker' do
         jobs = Array.new(2) { Delayed::Job.enqueue(NapJob.new) }
         outcomes = Timeout.timeout(5) { Array.new(2) { NapJob.outcomes.pop } }
         expect(outcomes).to eq [:finished, :finished]
-        Timeout.timeout(5) { sleep 0.01 until (Delayed::Job.all & jobs).empty? }
+        wait_until(5) { (Delayed::Job.all & jobs).empty? }
         expect(reported).to be_empty
       end
     end
@@ -247,7 +246,7 @@ describe 'Stopping a worker' do
       thread.raise(Delayed::ShutdownInterrupt, 'late')
       sleep 0.05
       gate << true
-      Timeout.timeout(5) { sleep 0.01 while dispatcher.send(:in_flight) > 0 }
+      wait_until(5) { dispatcher.send(:in_flight).zero? }
 
       expect(thread).to be_alive
       expect(Delayed::Job.all).not_to include(job)
@@ -300,13 +299,13 @@ describe 'Stopping a worker' do
       thread = run_until_started(1)
       busy = dispatcher.instance_variable_get(:@running).keys.first
       busy.raise(SignalException, 'TERM')
-      Timeout.timeout(5) { sleep 0.01 until GateJob.interrupted == [:a] }
-      Timeout.timeout(5) { sleep 0.01 while job.locked_by && GateJob.started.empty? }
+      wait_until(5) { GateJob.interrupted == [:a] }
+      wait_until(5) { !(job.locked_by && GateJob.started.empty?) }
       # Not failed: the same job, unlocked as it was (or picked up again).
       expect([job.attempts, job.run_at, job.last_error, job.failed_at]).to eq [0, run_at, nil, nil]
       expect(busy).to be_alive # The thread carries on.
       GateJob.release = true
-      Timeout.timeout(5) { sleep 0.01 until Delayed::Job.count.zero? }
+      wait_until(5) { Delayed::Job.count.zero? }
       expect(dispatcher.send(:in_flight)).to eq 0
       dispatcher.stop
       Timeout.timeout(5) { thread.join }
@@ -318,7 +317,7 @@ describe 'Stopping a worker' do
       thread = run_until_started(1)
       busy = dispatcher.instance_variable_get(:@running).keys.first
       busy.raise(SignalException, 'TERM')
-      Timeout.timeout(5) { sleep 0.01 until GateJob.interrupted == [:a] }
+      wait_until(5) { GateJob.interrupted == [:a] }
       GateJob.release = true # Released, it is run again.
       dispatcher.stop
       Timeout.timeout(5) { thread.join }
@@ -562,7 +561,7 @@ describe 'Stopping a worker' do
     it 'lets perform subscribers run uninterrupted' do
       seen = []
       p = paused
-      subscription = ActiveSupport::Notifications.subscribe('job_performed.delayed_job') do |*args|
+      subscribe(:job_performed) do |*args|
         p << true
         sleep 0.3
         seen << args.last[:success]
@@ -571,8 +570,6 @@ describe 'Stopping a worker' do
       quit_while_paused
       expect(seen).to eq [true]
       expect(Delayed::Job.all).not_to include(job)
-    ensure
-      ActiveSupport::Notifications.unsubscribe(subscription)
     end
 
     %i(success after).each do |hook|
@@ -708,16 +705,13 @@ describe 'Stopping a worker' do
     end
 
     it 'publish jobs_released' do
-      events = []
-      subscription = ActiveSupport::Notifications.subscribe('jobs_released.delayed_job') { |*args| events << args.last }
+      events = payloads_of(:jobs_released)
       Delayed::Job.enqueue(SimpleJob.new)
       thread, gate = run_and_hold
       dispatcher.quit
       gate << true
       Timeout.timeout(10) { thread.join }
       expect(events).to eq [{:workers => [dispatcher.workers.first.name], :count => 1, :reason => 'shutdown'}]
-    ensure
-      ActiveSupport::Notifications.unsubscribe(subscription)
     end
   end
 
@@ -774,8 +768,7 @@ describe 'Stopping a worker' do
   describe 'shutting down with a deadline' do
     it 'waits for every thread, running a job or not, before returning' do
       d = Delayed::Dispatcher.new(:threads => 3, :sleep_delay => 0.05)
-      allow(d).to receive(:say)
-      d.workers.each { |w| allow(w).to receive(:say) }
+      silence_say(*and_workers(d))
       exiting = Queue.new
       Delayed::Worker.lifecycle.before(:perform) { |_worker, _job| Thread.current[:ran_job] = true }
       Delayed::Worker.lifecycle.after(:execute) do |_worker|
@@ -1498,7 +1491,7 @@ describe 'Signals received while a worker process starts up' do
 
       Process.kill('TERM', Process.pid)
       Process.kill('INT', Process.pid)
-      Timeout.timeout(2) { sleep 0.01 until pending.size == 2 }
+      wait_until(2) { pending.size == 2 }
 
       expect(pending).to contain_exactly('TERM', 'INT') # Their order isn't guaranteed (JRuby).
       expect(parent_trap_ran).to be false
@@ -1522,7 +1515,7 @@ describe 'Signals received while a worker process starts up' do
     it 'records each signal once, though it may arrive twice' do
       pending = launcher.send(:capture_signals)
       Process.kill('TERM', Process.pid)
-      Timeout.timeout(2) { sleep 0.01 until pending.any? }
+      wait_until(2) { pending.any? }
       Process.kill('TERM', Process.pid)
       sleep 0.1
       expect(pending).to eq ['TERM']
@@ -1533,7 +1526,7 @@ describe 'Signals received while a worker process starts up' do
       skip 'the JVM reserves SIGQUIT' if RUBY_ENGINE == 'jruby'
       pending = launcher.send(:capture_signals)
       Process.kill('QUIT', Process.pid)
-      Timeout.timeout(2) { sleep 0.01 until pending.any? }
+      wait_until(2) { pending.any? }
       expect(pending).to eq ['QUIT']
     end
 

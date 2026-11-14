@@ -23,6 +23,9 @@ crash_queue = options.delete(:crash_queue)
 # Seconds each forked child process waits before replacing the launcher's
 # (inherited) signal traps: lets specs signal it in that window.
 capture_delay = options.delete(:capture_delay)
+# The first respawn delay of a crash loop (see Launcher::Forking).
+respawn_delay_unit = options.delete(:respawn_delay_unit)
+Delayed::Launcher::Forking.respawn_delay_unit = respawn_delay_unit if respawn_delay_unit
 
 Delayed::Backend::SqliteFile::Job.connect(db_path)
 Delayed::Worker.backend = Delayed::Backend::SqliteFile::Job
