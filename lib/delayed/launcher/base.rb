@@ -67,7 +67,7 @@ module Delayed
           setup_pooled_workers
         elsif process_identifier
           setup_identified_worker
-        elsif processes > 1
+        elsif multiple_processes?
           setup_multiple_workers
         else
           setup_single_worker
@@ -83,6 +83,14 @@ module Delayed
 
       def setup_multiple_workers
         processes.times { add_worker(@options) }
+      end
+
+      def multiple_processes?
+        processes > 1
+      end
+
+      def run_dispatcher(_worker_name, dispatcher, pending_signals)
+        dispatcher.start(pending_signals)
       end
 
       def setup_single_worker
@@ -104,7 +112,7 @@ module Delayed
         setup_logger
         dispatcher = Delayed::Dispatcher.new(options.merge(:supervisor_pid => supervisor_pid, :procline => $0))
         dispatcher.name_prefix = "#{worker_name} "
-        dispatcher.start(pending_signals)
+        run_dispatcher(worker_name, dispatcher, pending_signals)
       rescue StandardError => error
         STDERR.puts error.message
         STDERR.puts error.backtrace

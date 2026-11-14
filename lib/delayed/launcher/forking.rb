@@ -4,6 +4,8 @@ require 'concurrent/array'
 module Delayed
   module Launcher
     class Forking < Base
+      include Mold
+      prepend MoldSupervisor
       # Seconds past the shutdown timeout (or QUIT) before the parent SIGKILLs
       # workers, so they can interrupt and release their jobs.
       SHUTDOWN_GRACE = Delayed::Dispatcher::INTERRUPT_GRACE + 5
@@ -184,18 +186,25 @@ module Delayed
       # (e.g. while booting, before any child existed to forward it to).
       def add_worker(options, replaces_pid: nil, delay: 0)
         return if stop_signals.any?
-        worker_name = get_name(@worker_index)
-        worker_pid = fork_worker(worker_name, options)
+        index = @worker_index
+        @worker_index += 1
+        worker_name = get_name(index)
+        child_started(worker_name, fork_worker(worker_name, options), options, :replaces_pid => replaces_pid, :delay => delay)
+      end
 
+      # Records a forked child process. `spawn`: :replaces_pid, :delay, and
+      # :mold_pid when a mold forked it.
+      def child_started(worker_name, worker_pid, options, spawn)
         queues = options[:queues]
         queue_msg = " queues=#{queues.empty? ? '*' : queues.join(',')}" if queues
         thread_msg = " threads=#{threads(options)}" if threads(options) > 1
-        logger.info "Child process #{worker_name} (pid #{worker_pid}) started#{queue_msg}#{thread_msg}"
+        mold_msg = " from mold (pid #{spawn[:mold_pid]})" if spawn[:mold_pid]
+        logger.info "Child process #{worker_name} (pid #{worker_pid}) started#{mold_msg}#{queue_msg}#{thread_msg}"
 
         workers_lock.synchronize { workers[worker_pid] = [worker_name, options] }
         started_at[worker_pid] = monotonic_now
-        @worker_index += 1
-        Delayed.instrument(:process_spawned, :worker => worker_name, :pid => worker_pid, :replaces_pid => replaces_pid, :delay => delay)
+        Delayed.instrument(:process_spawned, {:worker => worker_name, :pid => worker_pid, :replaces_pid => spawn[:replaces_pid],
+                                              :delay => spawn[:delay] || 0}.merge(spawn.slice(:mold_pid)))
         catch_up_on_stop(worker_pid)
         worker_pid
       end
@@ -302,15 +311,16 @@ module Delayed
       def handle_exit(worker_pid, child_status)
         worker_name, options = workers_lock.synchronize { workers.delete(worker_pid) }
         return unless worker_name
+        replace = replace_exited?(worker_pid, options, child_status)
         logger.info "Child process #{worker_name} (pid #{worker_pid}) exited: #{child_status}"
         recover_jobs_of_worker(worker_name, worker_pid, options, child_status)
-        publish_child_exited(worker_name, worker_pid, child_status)
+        publish_child_exited(worker_name, worker_pid, child_status, replace)
 
         if child_status.termsig == 9 && !@killed
           logger.warn "Child process #{worker_name} (pid #{worker_pid}) was SIGKILLed (e.g. by the OOM killer)" \
-                      "#{'; replacing it' unless @stopped}"
+                      "#{'; replacing it' if replace}"
         end
-        replace_worker(worker_name, worker_pid, options, child_status) unless @stopped
+        replace_worker(worker_name, worker_pid, options, child_status) if replace
       ensure
         @plans&.delete(worker_pid)
       end
@@ -329,9 +339,14 @@ module Delayed
         nil
       end
 
-      def publish_child_exited(worker_name, pid, status)
+      # Whether an exited child process is replaced (MoldSupervisor overrides).
+      def replace_exited?(_pid, _options, _status)
+        !@stopped
+      end
+
+      def publish_child_exited(worker_name, pid, status, replace = !@stopped)
         uptime, _streak, delay = respawn_plan(pid)
-        respawn_in = @stopped ? nil : delay || 0
+        respawn_in = replace ? delay || 0 : nil
         Delayed.instrument(:process_exited, :worker => worker_name, :pid => pid, :status => status, :uptime => uptime, :respawn_in => respawn_in)
       end
 

@@ -93,6 +93,7 @@ module Delayed
       @procline_name = options[:procline]
       @stopped = false
       @quit = false
+      @promoted = false
       @stop_requested_at = nil
 
       @mutex = Mutex.new
@@ -114,6 +115,7 @@ module Delayed
       @events = 0
       @thread_error = nil
       @failed_reserve_count = 0
+      @performed = 0 # Never reset, unlike the stats.
       reset_stats
     end
 
@@ -199,6 +201,27 @@ module Delayed
       @quit
     end
 
+    # Stops like #stop, then the launcher turns this process into a mold (see
+    # Launcher::Mold). No-op once stopping. Signal-trap safe.
+    def promote
+      return if stop?
+      @promoted = true
+      stop
+    end
+
+    def promoted?
+      @promoted
+    end
+
+    # Jobs performed (succeeded or failed) since start.
+    def jobs_performed
+      synchronize { @performed }
+    end
+
+    def busy_threads
+      synchronize { busy_count }
+    end
+
     # Process title, e.g. "delayed_job.0: 3/4 busy, queues=mail,sms".
     def procline
       state = if quit? then 'quitting, '
@@ -238,6 +261,7 @@ module Delayed
     # Worker.raise_signal_exceptions. QUIT: see #quit.
     def trap_signals
       trap('TERM') do
+        @promoted = false
         first = !stop?
         Thread.new { say 'Exiting...' } if first
         stop
@@ -245,6 +269,7 @@ module Delayed
       end
 
       trap('INT') do
+        @promoted = false
         first = !stop?
         Thread.new { say 'Exiting...' } if first
         stop
@@ -266,6 +291,7 @@ module Delayed
       Delayed.check_trappable!('QUIT')
       trap('QUIT') do
         Thread.new { say 'Received SIGQUIT: interrupting running jobs and exiting...' }
+        @promoted = false
         quit
       end
     rescue ArgumentError => error
@@ -275,6 +301,7 @@ module Delayed
     # Like the trap, but raises no SignalException: nothing is running yet.
     def handle_pending_signal(signal)
       say "Received SIG#{signal} while starting", 'warn'
+      @promoted = false
       signal == 'QUIT' ? quit : stop
     end
 
@@ -733,7 +760,7 @@ module Delayed
         # Defer a late signal until every inbox is closed: on JRuby one raised
         # in Queue#push surfaces as a ThreadError and leaves an inbox open.
         self.class.deferring_interrupts do
-          release_queued if @prefetch > 0
+          release_queued(@inboxes.values, promoted? ? :promotion : :shutdown) if @prefetch > 0
           @inboxes.each_value(&:close)
         end
         raise_in_threads(error) if error.is_a?(SignalException)
@@ -756,6 +783,7 @@ module Delayed
 
     QUEUED_RELEASE_REASONS = {
       :shutdown => ['on shutdown', 'shutdown'],
+      :promotion => ['on promotion to mold', 'promotion'],
       :stuck => ['queued behind a job that overran its max_run_time', 'stuck job']
     }.freeze
 
@@ -766,7 +794,7 @@ module Delayed
       message, event_reason = QUEUED_RELEASE_REASONS.fetch(reason)
       names = queued.map { |slot, _job| slot.name }
       with_executor { Delayed::Job.clear_locks!(names) }
-      say "Released #{queued.size} queued job(s) #{message}", reason == :shutdown ? 'info' : 'warn'
+      say "Released #{queued.size} queued job(s) #{message}", reason == :stuck ? 'warn' : 'info'
       Delayed.instrument(:jobs_released, :workers => names, :count => queued.size, :reason => event_reason)
     rescue StandardError => error
       say "Could not release the queued jobs: #{error.class}: #{error.message}", 'error'
@@ -871,6 +899,7 @@ module Delayed
     def job_finished(worker, slot, result)
       synchronize do
         result ? @success += 1 : @failure += 1
+        @performed += 1
         @running_slot.delete(worker)
       end
       slots_done([slot])

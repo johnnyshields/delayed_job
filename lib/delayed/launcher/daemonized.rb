@@ -3,6 +3,7 @@ module Delayed
     class Daemonized < Base
       def initialize(options)
         raise ArgumentError, '--pid-file is for --fork mode; daemonized workers write their pidfiles in --pid-dir' if options[:pid_file]
+        raise ArgumentError, '--mold is for --fork mode' if Delayed::Worker.mold_thresholds(options.fetch(:mold, Delayed::Worker.mold))
         super
       end
 

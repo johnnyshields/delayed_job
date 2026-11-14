@@ -73,7 +73,22 @@ module Delayed
     def process_spawned(event)
       p = event.payload
       replaces = p[:replaces_pid] ? " replacing pid #{p[:replaces_pid]}" : ''
-      log(:info) { "Child process #{p[:worker]} (pid #{p[:pid]}) spawned#{replaces}" }
+      mold = p[:mold_pid] ? " from mold (pid #{p[:mold_pid]})" : ''
+      log(:info) { "Child process #{p[:worker]} (pid #{p[:pid]}) spawned#{mold}#{replaces}" }
+    end
+
+    def mold_promoted(event)
+      p = event.payload
+      log(:info) { "Child process #{p[:worker]} (pid #{p[:pid]}) promoted to mold after #{p[:jobs]} job(s) (#{p[:trigger]})" }
+    end
+
+    def mold_activated(event)
+      p = event.payload
+      log(:info) { "Mold (pid #{p[:pid]}) activated, generation #{p[:generation]}" }
+    end
+
+    def mold_retired(event)
+      log(:info) { "Mold (pid #{event.payload[:pid]}) retired" }
     end
 
     def job_stuck(event)

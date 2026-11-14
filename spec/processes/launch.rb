@@ -26,6 +26,9 @@ capture_delay = options.delete(:capture_delay)
 # The first respawn delay of a crash loop (see Launcher::Forking).
 respawn_delay_unit = options.delete(:respawn_delay_unit)
 Delayed::Launcher::Forking.respawn_delay_unit = respawn_delay_unit if respawn_delay_unit
+# Seconds between child pings in mold mode (see Launcher::Mold).
+mold_ping_interval = options.delete(:mold_ping_interval)
+Delayed::Launcher::Forking.mold_ping_interval = mold_ping_interval if mold_ping_interval
 
 Delayed::Backend::SqliteFile::Job.connect(db_path)
 Delayed::Worker.backend = Delayed::Backend::SqliteFile::Job
