@@ -15,14 +15,28 @@ namespace :jobs do
   end
 
   task :environment_options => :environment do
+    names = Delayed::LaunchOptions::ENV_NAMES
+    number = lambda do |option, variable = names.fetch(option)|
+      Delayed::LaunchOptions.parse(option, ENV[variable], variable) if ENV[variable]
+    end
+    flag = ->(variable) { !!ENV[variable] && ENV[variable] !~ /\A(?:|0|f|false|n|no|off)\z/i }
+
     @options = {
-      :worker_count => ENV['NUM_WORKERS'] ? Integer(ENV['NUM_WORKERS']) : 1,
-      :quiet => !!ENV['QUIET'] && ENV['QUIET'] !~ /\A(?:0|f|false)\z/i
+      # NUM_WORKERS: deprecated alias.
+      :processes => number.call(:processes) || number.call(:processes, 'NUM_WORKERS') || 1,
+      :quiet => flag.call('QUIET')
     }
-    @options[:min_priority] = Integer(ENV['MIN_PRIORITY']) if ENV['MIN_PRIORITY']
-    @options[:max_priority] = Integer(ENV['MAX_PRIORITY']) if ENV['MAX_PRIORITY']
-    @options[:sleep_delay] = Integer(ENV['SLEEP_DELAY']) if ENV['SLEEP_DELAY']
-    @options[:read_ahead] = Integer(ENV['READ_AHEAD']) if ENV['READ_AHEAD']
+    (Delayed::LaunchOptions::RULES.keys - [:processes]).each do |option|
+      value = number.call(option)
+      @options[option] = value unless value.nil?
+    end
+    %w[PREFETCH_DYNAMIC BATCH_RESERVE SILENCE_LOGGING COUNT_SHUTDOWN_INTERRUPTS].each do |variable|
+      @options[variable.downcase.to_sym] = true if flag.call(variable)
+    end
+    # PIDFILE=path, or PIDFILE=1 for tmp/pids/delayed_job.pid.
+    if flag.call('PIDFILE')
+      @options[:pid_file] = ENV['PIDFILE'] =~ /\A(?:1|t|true|y|yes|on)\z/i ? true : ENV['PIDFILE']
+    end
 
     queues = (ENV['QUEUES'] || ENV['QUEUE'] || '').split(',')
     @options[:queues] = queues unless queues.empty?
@@ -30,21 +44,8 @@ namespace :jobs do
     pools = Delayed::PoolParser.new.add(ENV['POOLS'] || ENV['POOL'] || '').pools
     @options[:pools] = pools unless pools.empty?
 
-    if @options[:worker_count] < 1
-      raise ArgumentError, 'NUM_WORKERS must be 1 or greater'
-    end
-
-    if @options[:min_priority] && @options[:max_priority] && @options[:min_priority] > @options[:max_priority]
-      raise ArgumentError, 'MIN_PRIORITY must be less than or equal to MAX_PRIORITY'
-    end
-
-    if ENV['NUM_WORKERS'] && @options[:pools]
-      raise ArgumentError, 'Cannot specify both NUM_WORKERS and POOLS'
-    end
-
-    if @options[:queues] && @options[:pools]
-      raise ArgumentError, 'Cannot specify both QUEUES and POOLS'
-    end
+    # Same rules as script/delayed_job.
+    Delayed::LaunchOptions.validate!(@options, names)
   end
 
   desc "Exit with error status if any jobs older than max_age seconds haven't been attempted yet."
@@ -53,8 +54,6 @@ namespace :jobs do
 
     unprocessed_jobs = Delayed::Job.where('attempts = 0 AND created_at < ?', Time.now - args[:max_age].to_i).count
 
-    if unprocessed_jobs > 0
-      raise "#{unprocessed_jobs} jobs older than #{args[:max_age]} seconds have not been processed yet"
-    end
+    raise "#{unprocessed_jobs} jobs older than #{args[:max_age]} seconds have not been processed yet" if unprocessed_jobs > 0
   end
 end

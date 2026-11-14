@@ -2,12 +2,14 @@ module Delayed
   module Launcher
     class Daemonized < Base
       def initialize(options)
+        raise ArgumentError, '--pid-file is for --fork mode; daemonized workers write their pidfiles in --pid-dir' if options[:pid_file]
         super
       end
 
       def launch
         require_daemons!
         create_pid_dir
+        prepare_for_fork
         setup_workers
       end
 

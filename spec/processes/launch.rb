@@ -1,0 +1,78 @@
+# Runs a Delayed::Launcher::Forking on an SQLite file database.
+# Usage: ruby -Ilib spec/processes/launch.rb DB_PATH OPTIONS_JSON
+# OPTIONS_JSON holds the launcher options, plus "worker" settings applied to
+# Delayed::Worker (e.g. {"sleep_delay": 0.1}). Logs go to STDOUT.
+require 'bundler/setup'
+require 'json'
+require 'logger'
+require_relative 'backend'
+require_relative 'jobs'
+
+db_path, json = ARGV
+options = JSON.parse(json || '{}', :symbolize_names => true)
+worker_settings = options.delete(:worker) || {}
+# Seconds each forked worker process sleeps in after_fork, before it installs
+# its own signal traps: lets specs signal it during start-up.
+startup_delay = options.delete(:startup_delay)
+# Attaches Delayed::LogSubscriber, so specs can check the events.
+log_events = options.delete(:log_events)
+# The first N forked worker processes crash (exit 3) as they start up.
+crash_on_start = options.delete(:crash_on_start)
+# Worker processes working this queue crash (exit 3) whenever they start.
+crash_queue = options.delete(:crash_queue)
+# Seconds each forked child process waits before replacing the launcher's
+# (inherited) signal traps: lets specs signal it in that window.
+capture_delay = options.delete(:capture_delay)
+# The first respawn delay of a crash loop (see Launcher::Forking).
+respawn_delay_unit = options.delete(:respawn_delay_unit)
+Delayed::Launcher::Forking.respawn_delay_unit = respawn_delay_unit if respawn_delay_unit
+
+Delayed::Backend::SqliteFile::Job.connect(db_path)
+Delayed::Worker.backend = Delayed::Backend::SqliteFile::Job
+STDOUT.sync = true
+Delayed::Worker.logger = Logger.new(STDOUT).tap { |l| l.formatter = proc { |_s, _t, _p, m| "#{m}\n" } }
+worker_settings.each { |setting, value| Delayed::Worker.send("#{setting}=", value) }
+Delayed::LogSubscriber.attach_to :delayed_job if log_events
+
+if startup_delay
+  Delayed::Backend::SqliteFile::Job.singleton_class.prepend(Module.new do
+    define_method(:after_fork) do
+      puts "worker #{Process.pid} starting up"
+      sleep startup_delay
+      super()
+    end
+  end)
+end
+
+if crash_on_start
+  starts = "#{db_path}.starts"
+  Delayed::Backend::SqliteFile::Job.singleton_class.prepend(Module.new do
+    define_method(:after_fork) do
+      File.open(starts, 'a') { |f| f.puts Process.pid }
+      exit!(3) if File.readlines(starts).size <= crash_on_start
+      super()
+    end
+  end)
+end
+
+if capture_delay
+  Delayed::Launcher::Forking.prepend(Module.new do
+    define_method(:capture_signals) do
+      puts "child #{Process.pid} capturing signals in #{capture_delay}s"
+      sleep capture_delay
+      super()
+    end
+  end)
+end
+
+if crash_queue
+  Delayed::Dispatcher.prepend(Module.new do
+    define_method(:run) do
+      exit!(3) if Delayed::Worker.queues.include?(crash_queue)
+      super()
+    end
+  end)
+end
+
+options[:pools] = options[:pools].map { |queues, count| [queues, count] } if options[:pools]
+Delayed::Launcher::Forking.new(options.merge(:quiet => true)).launch

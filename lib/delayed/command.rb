@@ -1,11 +1,11 @@
 require 'optparse'
 
 module Delayed
-  class Command # rubocop:disable ClassLength
+  class Command # rubocop:disable Metrics/ClassLength
     def initialize(args)
       @options = {
         :quiet => true,
-        :worker_count => 1,
+        :processes => 1,
         :monitor => false
       }
 
@@ -41,7 +41,7 @@ module Delayed
       end
     end
 
-    def option_parser # rubocop:disable MethodLength, CyclomaticComplexity
+    def option_parser # rubocop:disable Metrics/MethodLength
       @option_parser ||= OptionParser.new do |opt|
         opt.banner = "Usage: #{Delayed.program_name} [options] start|stop|restart|run"
         opt.on('-h', '--help', 'Show this message') do
@@ -62,20 +62,30 @@ module Delayed
           @launch_strategy ||= :fork
         end
         opt.on('--min-priority N', 'Minimum priority of jobs to run.') do |n|
-          @options[:min_priority] = Integer(n) rescue nil
+          @options[:min_priority] = parse(:min_priority, n)
         end
         opt.on('--max-priority N', 'Maximum priority of jobs to run.') do |n|
-          @options[:max_priority] = Integer(n) rescue nil
+          @options[:max_priority] = parse(:max_priority, n)
         end
-        opt.on('-n', '--num-workers=workers', 'Number of child workers to spawn') do |n|
-          @options[:worker_count] = Integer(n) rescue 1
+        opt.on('-n', '--processes=N', 'Number of worker processes to spawn') do |n|
+          @options[:processes] = parse(:processes, n)
         end
-        opt.on('--number_of_workers=workers', 'Number of child workers to spawn') do |n|
-          STDERR.puts 'DEPRECATED: Use -n or --num-workers instead of --number_of_workers. This will be removed in the next major version.'
-          @options[:worker_count] = Integer(n) rescue 1
+        opt.on('--num-workers=N', 'DEPRECATED: Use --processes') do |n|
+          STDERR.puts 'DEPRECATED: Use -n or --processes instead of --num-workers. This will be removed in the next major version.'
+          @options[:processes] = parse(:processes, n, '--num-workers')
+        end
+        opt.on('-t', '--threads=N', 'Number of threads per worker process') do |n|
+          @options[:threads] = parse(:threads, n)
+        end
+        opt.on('--number_of_workers=N', 'DEPRECATED: Use --processes') do |n|
+          STDERR.puts 'DEPRECATED: Use -n or --processes instead of --number_of_workers. This will be removed in the next major version.'
+          @options[:processes] = parse(:processes, n, '--number_of_workers')
         end
         opt.on('--pid-dir=DIR', 'Specifies an alternate directory in which to store the process ids.') do |dir|
           @options[:pid_dir] = dir
+        end
+        opt.on('--pid-file[=PATH]', 'With --fork, write the parent process id to PATH (default: <pid-dir>/delayed_job.pid) and refuse to start if that process is running') do |path|
+          @options[:pid_file] = path || true
         end
         opt.on('--log-dir=DIR', 'Specifies an alternate directory in which to store the delayed_job log.') do |dir|
           @options[:log_dir] = dir
@@ -89,11 +99,35 @@ module Delayed
         opt.on('-m', '--monitor', 'Start monitor process.') do
           @options[:monitor] = true
         end
-        opt.on('--sleep-delay N', 'Amount of time to sleep when no jobs are found') do |n|
-          @options[:sleep_delay] = Integer(n) rescue nil
+        opt.on('--shutdown-timeout N', 'Seconds to let running jobs finish when stopping before interrupting and releasing them (default: wait for them)') do |n|
+          @options[:shutdown_timeout] = parse(:shutdown_timeout, n)
+        end
+        opt.on('--lock-heartbeat N', 'Refresh the locks of running jobs every N seconds, so a dead or hung worker\'s jobs are picked up after --lock-timeout (default: off)') do |n|
+          @options[:lock_heartbeat_interval] = parse(:lock_heartbeat_interval, n)
+        end
+        opt.on('--lock-timeout N', 'With --lock-heartbeat, seconds after which a lock that was not refreshed counts as abandoned (default: 300)') do |n|
+          @options[:lock_timeout] = parse(:lock_timeout, n)
+        end
+        opt.on('--count-shutdown-interrupts', 'Count a job interrupted by shutdown as a failed attempt (default: release it, attempts unchanged)') do
+          @options[:count_shutdown_interrupts] = true
+        end
+        opt.on('--silence-logging', "Don't log the database queries of polling for jobs and refreshing their locks") do
+          @options[:silence_logging] = true
+        end
+        opt.on('--sleep-delay N', 'Seconds to sleep when no jobs are found (default: 1)') do |n|
+          @options[:sleep_delay] = parse(:sleep_delay, n)
+        end
+        opt.on('--prefetch N', 'Jobs each thread may hold queued behind the one it runs, to start the next one without waiting for a poll (default: 0)') do |n|
+          @options[:prefetch] = parse(:prefetch, n)
+        end
+        opt.on('--batch-reserve', 'Reserve jobs for several free threads in one query, on backends that support it (e.g. delayed_job_mongoid)') do
+          @options[:batch_reserve] = true
+        end
+        opt.on('--prefetch-dynamic', 'Scale the prefetch queue depth with demand: from 0, one level deeper after each poll that gets every job it asks for, back to 0 after one that gets fewer') do
+          @options[:prefetch_dynamic] = true
         end
         opt.on('--read-ahead N', 'Number of jobs from the queue to consider') do |n|
-          @options[:read_ahead] = Integer(n) rescue nil
+          @options[:read_ahead] = parse(:read_ahead, n)
         end
         opt.on('-p', '--prefix NAME', 'String to be prefixed to worker process names') do |prefix|
           @options[:prefix] = prefix
@@ -104,10 +138,10 @@ module Delayed
         opt.on('--queue=queue1[,queue2]', 'Specify the job queues to work. Comma separated.') do |queue|
           @options[:queues] = queue.split(',')
         end
-        opt.on('--pools=queue1[,queue2][:worker_count][|...]', 'Specify queues and number of workers for a worker pool. Use pipe to delimit multiple pools.') do |pools|
+        opt.on('--pools=queue1[,queue2][:processes][|...]', 'Specify queues and number of processes for a worker pool. Use pipe to delimit multiple pools.') do |pools|
           pool_parser.add(pools)
         end
-        opt.on('--pool=queue1[,queue2][:worker_count]', 'Specify queues and number of workers for a worker pool') do |pool|
+        opt.on('--pool=queue1[,queue2][:processes]', 'Specify queues and number of processes for a worker pool') do |pool|
           pool_parser.add(pool)
         end
         opt.on('-x', '--exit-on-complete', 'Exit when no more jobs are available to run. This will exit if all jobs are scheduled to run in the future.') do
@@ -120,37 +154,26 @@ module Delayed
       @pool_parser ||= PoolParser.new
     end
 
+    def parse(option, value, name = LaunchOptions::CLI_NAMES.fetch(option))
+      LaunchOptions.parse(option, value, name)
+    end
+
+    # Same rules as rake jobs:work.
     def validate_options!
-      validate_worker_count!
-      validate_priority!
-      validate_identifier!
-      validate_workers_and_pools!
-      validate_queues_and_pools!
+      LaunchOptions.validate!(@options, LaunchOptions::CLI_NAMES)
+      validate_daemon_command!
     end
 
-    def validate_worker_count!
-      return unless @options[:worker_count] < 1
-      STDERR.puts 'WARNING: --num-workers must be 1 or greater. This will raise an ArgumentError in the next major version.'
-    end
+    DAEMON_COMMANDS = %w[stop restart reload zap status].freeze
 
-    def validate_priority!
-      return unless @options[:min_priority] && @options[:max_priority] && @options[:min_priority] > @options[:max_priority]
-      STDERR.puts 'WARNING: --min-priority must be less than or equal to --max-priority. This will raise an ArgumentError in the next major version.'
-    end
-
-    def validate_identifier!
-      return unless @options[:identifier] && @options[:worker_count] > 1
-      raise ArgumentError, 'Cannot specify both --num-workers and --identifier'
-    end
-
-    def validate_workers_and_pools!
-      return unless @options[:worker_count] > 1 && @options[:pools]
-      STDERR.puts 'WARNING: Cannot specify both --num-workers and --pool. This will raise an ArgumentError in the next major version.'
-    end
-
-    def validate_queues_and_pools!
-      return unless @options[:queues] && @options[:pools]
-      STDERR.puts 'WARNING: Cannot specify both --queues and --pool. This will raise an ArgumentError in the next major version.'
+    # --fork runs in the foreground, with no daemon pidfiles to stop or
+    # query a running launcher by.
+    def validate_daemon_command!
+      return unless @launch_strategy == :fork
+      command = (@options[:args] & DAEMON_COMMANDS).first
+      return unless command
+      raise ArgumentError, "--fork runs in the foreground and does not support #{command}: " \
+                           'stop it with a signal (TERM, INT or QUIT)'
     end
   end
 end

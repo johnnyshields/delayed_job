@@ -1,14 +1,20 @@
 module Delayed
   module Launcher
     class Base
-      attr_accessor :worker_count,
+      attr_accessor :processes,
                     :pools,
                     :process_prefix,
                     :process_identifier
 
+      # Deprecated.
+      alias_method :worker_count, :processes
+      alias_method :worker_count=, :processes=
+
       def initialize(options)
         @worker_index = 0
-        @worker_count = options.delete(:worker_count) || 1
+        processes = options.delete(:processes)
+        worker_count = options.delete(:worker_count)
+        @processes = processes || worker_count || 1
         @pools = options.delete(:pools)
         @pools = nil if @pools == []
         @monitor = options.delete(:monitor)
@@ -31,12 +37,37 @@ module Delayed
         Delayed::Worker.logger ||= Logger.new(File.join(@options[:log_dir], 'delayed_job.log'))
       end
 
+      # Maximizes copy-on-write sharing with forked workers.
+      def prepare_for_fork
+        eager_load_application
+        warmup_heap
+      end
+
+      # Rake tasks don't eager load by default, so each worker would autoload
+      # its own copy. Skipped with code reloading, which isn't shared anyway.
+      def eager_load_application
+        return unless defined?(::Rails.application) && ::Rails.application
+        return unless ::Rails.application.config.cache_classes
+        ::Rails.application.eager_load!
+      end
+
+      def warmup_heap
+        if Process.respond_to?(:warmup)
+          Process.warmup
+        else
+          GC.start
+          GC.compact if GC.respond_to?(:compact)
+        end
+      rescue NotImplementedError
+        nil # GC.compact is unsupported on this platform
+      end
+
       def setup_workers
         if pools
           setup_pooled_workers
         elsif process_identifier
           setup_identified_worker
-        elsif worker_count > 1
+        elsif processes > 1
           setup_multiple_workers
         else
           setup_single_worker
@@ -44,14 +75,14 @@ module Delayed
       end
 
       def setup_pooled_workers
-        pools.each do |queues, pool_worker_count|
+        pools.each do |queues, pool_process_count|
           options = @options.merge(:queues => queues)
-          pool_worker_count.times { add_worker(options) }
+          pool_process_count.times { add_worker(options) }
         end
       end
 
       def setup_multiple_workers
-        worker_count.times { add_worker(@options) }
+        processes.times { add_worker(@options) }
       end
 
       def setup_single_worker
@@ -66,22 +97,36 @@ module Delayed
         raise NotImplementedError, '#add_worker must be implemented in subclass'
       end
 
-      def run_worker(worker_name, options)
+      def run_worker(worker_name, options, pending_signals = [])
         Dir.chdir(Delayed.root)
         set_process_name(worker_name)
         Delayed::Worker.after_fork
         setup_logger
-        worker = Delayed::Worker.new(options)
-        worker.name_prefix = "#{worker_name} "
-        worker.start
-      rescue => e
-        STDERR.puts e.message
-        STDERR.puts e.backtrace
-        logger.fatal(e)
+        dispatcher = Delayed::Dispatcher.new(options.merge(:supervisor_pid => supervisor_pid, :procline => $0))
+        dispatcher.name_prefix = "#{worker_name} "
+        dispatcher.start(pending_signals)
+      rescue StandardError => error
+        STDERR.puts error.message
+        STDERR.puts error.backtrace
+        logger.fatal(error)
         exit_with_error_status
       end
 
-      def set_process_name(name) # rubocop:disable AccessorMethodName
+      # Overridden by the forking launcher; daemonized workers are detached
+      # and unsupervised.
+      def supervisor_pid
+        nil
+      end
+
+      def threads(options)
+        (options[:threads] || 1).to_i
+      end
+
+      def prefetch(options)
+        (options[:prefetch] || Delayed::Worker.prefetch).to_i
+      end
+
+      def set_process_name(name) # rubocop:disable Naming/AccessorMethodName
         $0 = process_prefix ? File.join(process_prefix, name) : name
       end
 

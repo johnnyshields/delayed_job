@@ -9,4 +9,37 @@ module Delayed
   end
 
   class FatalBackendError < RuntimeError; end
+
+  # Raised into a job's thread on SIGQUIT or when shutdown_timeout expires;
+  # the job is released with attempts unchanged. Not a StandardError, so
+  # `rescue => e` in job code doesn't swallow it.
+  class ShutdownInterrupt < Exception # rubocop:disable Lint/InheritException
+  end
+
+  # The pidfile belongs to a running process.
+  class AlreadyRunningError < StandardError
+    attr_reader :path, :pid
+
+    def initialize(path, pid)
+      @path = path
+      @pid = pid
+      running = pid ? " (pid #{pid})" : ''
+      super("delayed_job is already running#{running}: pidfile #{path} exists. " \
+            'Stop that process, or delete the file if it is not a delayed_job process.')
+    end
+  end
+
+  # Recorded on jobs that were running in a child process when it died.
+  class ProcessExitError < StandardError
+    attr_reader :worker_name, :pid, :status
+
+    def initialize(worker_name, pid, status)
+      @worker_name = worker_name
+      @pid = pid
+      @status = status
+      reason = status.signaled? ? "was killed by signal #{status.termsig}" : "exited with status #{status.exitstatus}"
+      super("Child process #{worker_name} (pid #{pid}) #{reason}")
+      set_backtrace([])
+    end
+  end
 end

@@ -37,7 +37,7 @@ end
 ENV['RAILS_ENV'] = 'test'
 
 # Trigger AR to initialize
-ActiveRecord::Base # rubocop:disable Void
+ActiveRecord::Base # rubocop:disable Lint/Void
 
 module Rails
   def self.root
@@ -60,6 +60,9 @@ else
 
   loader = Zeitwerk::Loader.new
   loader.push_dir File.dirname(__FILE__)
+  # Process-level specs load these files explicitly, in subprocesses too
+  loader.ignore File.join(File.dirname(__FILE__), 'processes')
+  loader.ignore File.join(File.dirname(__FILE__), 'helpers') # Required below.
   loader.setup
 end
 
@@ -89,9 +92,55 @@ class Story < ActiveRecord::Base
   handle_asynchronously :whatever
 end
 
+# Specs collect log lines, events and errors in Concurrent::Arrays: the stubs
+# and callbacks appending to them run on worker and heartbeat threads, in
+# parallel on JRuby, where Array#<< can lose entries.
+require 'concurrent/array'
+
+Dir[File.join(__dir__, 'helpers', '*.rb')].sort.each { |file| require file }
+
 RSpec.configure do |config|
+  config.include LogHelper
+  config.include ThreadHelper
+  config.include EventHelper
+
+  # Each example starts with no job in the test backend: one left behind by
+  # an earlier example (e.g. a job that never got to run) would otherwise be
+  # run by the next dispatcher, which may then wait for it forever.
+  config.before(:each) do
+    Delayed::Backend::Test::Job.delete_all
+  end
+
   config.after(:each) do
     Delayed::Worker.reset
+  end
+
+  # Declared after the reset above, so it runs first (after hooks run in
+  # reverse): dispatchers stop under the example's settings.
+  config.after(:each) do
+    stop_running_dispatchers
+    unsubscribe_all
+  end
+
+  # Specs that fork (real worker processes, children of jobs) can't run where
+  # there is no fork, e.g. JRuby.
+  config.define_derived_metadata(:file_path => %r{/spec/processes/}) { |meta| meta[:fork] = true }
+  config.filter_run_excluding :fork => true unless Process.respond_to?(:fork)
+  # Launcher specs stub out the fork itself: let them run the forking paths
+  # there too (the guard has specs of its own).
+  unless Process.respond_to?(:fork)
+    config.before(:each) do |example|
+      allow_any_instance_of(Delayed::Launcher::Forking).to receive(:fork_available?).and_return(true) unless example.metadata[:fork_guard]
+    end
+  end
+
+  # The launcher's signal traps log from a thread of their own: let those
+  # finish within their example, before its test doubles expire.
+  config.after(:each) do
+    Thread.list.each do |thread|
+      next if thread == Thread.current || thread.status == 'sleep' || !thread.inspect.include?('launcher/forking.rb')
+      thread.join(1)
+    end
   end
 
   config.expect_with :rspec do |c|

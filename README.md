@@ -216,6 +216,10 @@ jobs where a queue is not specified, set a default queue name with
 
 ## Running Jobs
 
+For production setups (systemd, Kubernetes, sizing, shutdown) see
+[docs/deployment.md](docs/deployment.md); for what to watch, see
+[docs/monitoring.md](docs/monitoring.md).
+
 ### Running as a Daemon Process
 
 `script/delayed_job` starts a background daemon process which will continually work jobs.
@@ -228,11 +232,12 @@ Then run the `start` command:
 # Run a single worker as a background process
 RAILS_ENV=production script/delayed_job start
 
-# Run 4 workers in separate background child processes
+# Run 4 worker processes (-n is short for --processes)
 RAILS_ENV=production script/delayed_job -n4 start
+RAILS_ENV=production script/delayed_job --processes=4 start
 ```
 
-Each worker will check the database at least every 5 seconds.
+Each worker will check the database at least every second (`sleep_delay`, default 1).
 
 ### Stopping and Restarting
 
@@ -252,7 +257,14 @@ RAILS_ENV=production script/delayed_job -n4 restart
 
 You must pass the same arguments to `restart` that you used when calling `start`.
 
-You may also send `SIGTERM` to stop Delayed Job.
+You may also send `SIGTERM` to stop Delayed Job. In forking mode the parent
+also treats `SIGHUP` (e.g. its terminal closing) as `SIGTERM`, and its worker
+processes ignore `SIGHUP`, so the parent's pidfile stays until they have all
+exited. A signal that arrives while the parent is still booting stops it before
+it forks any worker process. Settings that every worker process would refuse
+(e.g. `prefetch` above 20, or a `lock_timeout` set in an initializer that is
+less than twice `--lock-heartbeat`) make the parent exit with an `ArgumentError`
+before it forks.
 
 ### Worker Queues and Pools
 
@@ -260,12 +272,132 @@ You may also send `SIGTERM` to stop Delayed Job.
 # Set the --queues option to work from a particular queue
 RAILS_ENV=production script/delayed_job --queues=mailers,tasks start
 
-# Use the --pool option to specify a worker pool. You can use this option multiple
-# times to start different numbers of workers for different queues.
-# The following command will start 1 worker for the tracking queue,
-# 2 workers for the mailers and tasks queues, and 2 workers for any jobs:
+# Use the --pool option (queues:processes) to specify a worker pool. You can use
+# this option multiple times to start different numbers of processes for different queues.
+# The following command will start 1 process for the tracking queue,
+# 2 processes for the mailers and tasks queues, and 2 processes for any jobs:
 RAILS_ENV=production script/delayed_job --pool=tracking --pool=mailers,tasks:2 --pool=*:2 start
 ```
+
+### Multi-Threaded Workers
+
+Each worker process can run several jobs at once on separate threads, which
+uses much less memory than running more processes and works well for IO-bound
+jobs (HTTP calls, mailers, etc.). Use `-t`/`--threads` to set the number of
+threads per process; total concurrency is processes × threads.
+
+```
+# 2 worker processes, each running 5 jobs concurrently (10 jobs at a time)
+RAILS_ENV=production script/delayed_job --fork --processes=2 --threads=5 start
+
+# --threads applies to every process, including pool processes:
+# 3 processes (1 for mailers, 2 for any jobs), each with 4 threads
+RAILS_ENV=production script/delayed_job --fork --pool=mailers:1 --pool=*:2 --threads=4 start
+```
+
+Every worker process, single- or multi-threaded, runs one `Delayed::Dispatcher`.
+It reserves only as many jobs as there are idle threads and hands one to each,
+so polling the database does not grow with the number of threads, and a job is
+never locked while it waits for a thread. Each thread runs a `Delayed::Worker`
+that locks jobs under its own name (e.g. `... pid:123 thread:2`).
+
+Plugin callbacks: `:loop` wraps each poll and yields the `Delayed::Dispatcher`;
+`:execute` wraps each worker thread's lifetime and yields its `Delayed::Worker`;
+`:perform`, `:error` and `:failure` yield the `Delayed::Worker` running the job.
+
+When using threads:
+
+* Your job code must be thread-safe, and so must code Delayed Job calls from
+  its threads: plugin callbacks, `ActiveSupport::Notifications` subscribers,
+  `Delayed::Worker.on_thread_error` and your logger (Ruby's `Logger` is).
+  Subscribers to `job_stuck` run on the lock heartbeat thread while the job
+  runs: read only plain fields (`id`, `queue`) of its `:job`, and use
+  `:job_name`.
+* Don't call `Delayed::Worker.new` from a job: it would reset the settings and
+  plugin callbacks of every worker in the process, so it raises.
+* On JRuby, signal traps run on a thread of their own: with
+  `raise_signal_exceptions`, the signal is raised in the main thread.
+* The database connection pool must hold at least one connection per thread
+  plus one for the dispatcher, and one more with lock heartbeats (`pool` in
+  `config/database.yml`). A warning is logged if it is too small.
+* On SQLite with Rails before 8.0, the `timeout` option of `database.yml`
+  waits for a locked database without letting other threads run, so a thread
+  waiting for the lock stops the thread holding it until the timeout raises
+  "database is locked". Use Rails 8, or set
+  `raw_connection.busy_handler_timeout = <ms>` on each connection.
+* All threads of a process work the same queues, and every process runs the
+  same number of threads.
+* Under Rails, each job runs inside the Rails reloader (see Development below),
+  which also resets per-job state such as `ActiveSupport::CurrentAttributes`
+  and returns database connections to the pool after each job.
+* On `SIGTERM`/`SIGINT`, running jobs finish before the process exits, as with
+  single-threaded workers.
+
+#### Prefetch
+
+By default a thread that finishes a job waits for the next poll to get another.
+With `--prefetch=N` (rake: `PREFETCH`, or `Delayed::Worker.prefetch`), each
+thread also holds up to N jobs queued behind the one it runs, starts the next
+as soon as it finishes, and the dispatcher tops its queue back up:
+
+* `0` (default): jobs are reserved only for idle threads, one each.
+* `1`: an idle thread gets 2 jobs (one runs, one waits); a busy thread whose
+  queue is empty gets 1.
+* `N`: up to N queued jobs per thread (at most 20).
+
+The first jobs of each poll go to idle threads, so they start at once. A thread
+takes its most urgent queued job next (lowest priority, then earliest `run_at`),
+so a more urgent job reserved after its queue filled up doesn't wait behind the
+others - only behind the job running.
+
+```
+RAILS_ENV=production script/delayed_job --fork --processes=2 --threads=5 --prefetch=2 start
+```
+
+With `--prefetch-dynamic` (`PREFETCH_DYNAMIC=1`, `Delayed::Worker.prefetch_dynamic`),
+the queue depth adapts: it starts at 0 (idle threads only), grows by one level
+after each poll that got every job it asked for (up to `--prefetch`), and drops
+back to 0 after a poll that got fewer, as the queue ran dry. Jobs already queued
+still run. At depth 0 only idle threads get jobs, so the depth grows again once
+threads have worked through their queues and polls keep finding jobs for them.
+
+A queued job waits behind its thread's current job, so prefetch suits many
+short jobs; keep it at 0 for queues with long ones, or use `--prefetch-dynamic`
+so jobs are only queued while there are plenty. Each job a thread holds is
+locked under a slot name of its own, e.g. `... pid:123 thread:2 slot:1`. Also:
+
+* On `SIGTERM`/`SIGINT`, queued jobs are released at once (unlocked, attempts
+  unchanged) while running ones finish; a `jobs_released` event reports them.
+* Without lock heartbeats, a job's lock lasts `max_run_time` from when it was
+  reserved, queue time included. A queued job then runs with what is left of
+  it as its time limit, so it stops before another worker could take it over;
+  one whose lock expired while queued is released unstarted instead (a
+  `jobs_released` event, `reason: 'lock expired in queue'`). With heartbeats,
+  queued jobs' locks are refreshed and run with their full `max_run_time` -
+  unless the heartbeat has stopped refreshing locks (it gave up after repeated
+  failures, or a refresh has hung for `lock_timeout`): jobs started then are
+  limited to what is left of their lock (`lock_timeout` from its last refresh),
+  as without heartbeats.
+* With heartbeats, a job that runs past its `max_run_time` without stopping
+  (e.g. blocked in native code) also has the jobs queued behind it released
+  (`reason: 'stuck job'`), and no more are queued on its thread until it ends.
+* If a worker process dies, its queued jobs are recovered like its running ones,
+  each counting a failed attempt.
+
+With `--batch-reserve` (`BATCH_RESERVE=1`, `Delayed::Worker.batch_reserve`), a
+worker reserves the jobs for all its free threads in one batch query, on
+backends that implement one (`delayed_job_mongoid` does); others reserve one job
+per thread as before. It is off by default.
+
+Backend authors may override `Delayed::Job.reserve_batch(workers, max_run_time)`
+to reserve jobs for several threads in one query, used when
+`Delayed::Worker.batch_reserve` is set; each returned job must be
+locked under the name of the worker it is paired with. A backend whose batch
+may come back short while jobs are still available (it lost candidates to other
+processes) also returns true from `Delayed::Job.partial_batch_may_leave_jobs?`:
+the worker then polls again at once after a short batch. Otherwise (the default)
+a short batch means the queue ran dry, and idle threads poll again after
+`sleep_delay`.
 
 ### Exit On Complete Mode
 
@@ -277,7 +409,7 @@ RAILS_ENV=production script/delayed_job start --exit-on-complete
 RAILS_ENV=production script/delayed_job run --exit-on-complete
 ```
 
-### Experimental: Forking Mode
+### Forking Mode
 
 The `script/delayed_job` process (described above) uses the
 [Daemons](https://github.com/thuehlinger/daemons) gem which has several
@@ -298,8 +430,156 @@ RAILS_ENV=production script/delayed_job --fork -n4 start
 RAILS_ENV=production script/delayed_job --fork --pool=mailers,tasks:2 --pool=*:2 start
 ```
 
-Forking mode does not yet support the `restart`, `stop`, etc. script commands.
+Forking mode does not support the `restart`, `stop`, etc. script commands: they
+raise an `ArgumentError` (rather than starting another launcher). Stop it with a
+signal instead (see Stopping and Restarting).
 Use `SIGTERM` or `SIGINT` to allow workers to finish their current job then gracefully shutdown.
+The parent forwards these signals to its worker processes, so sending them to the
+parent alone (as `docker stop`, Kubernetes and systemd do) stops every worker.
+
+#### Process titles
+
+Each worker process keeps its title (as shown by `ps` and `top`) up to date
+with its busy threads and queues, and whether it is stopping:
+
+```
+delayed_job.0: 3/4 busy, queues=mailers
+delayed_job.1: stopping, 1/4 busy, queues=*
+delayed_job.2: 4/4 busy, 3 queued, depth 1/2, queues=*   # with --prefetch=2 --prefetch-dynamic
+```
+
+#### Pidfile
+
+With `--pid-file`, the parent process writes its pid to a file and refuses to
+start while another launcher holds that file, e.g. to stop a second
+`rake jobs:work` (a deploy script run twice, a cron job) from doubling your workers:
+
+```
+# tmp/pids/delayed_job.pid (or delayed_job.<identifier>.pid; see --pid-dir)
+RAILS_ENV=production script/delayed_job --fork -n4 --pid-file start
+RAILS_ENV=production script/delayed_job --fork -n4 --pid-file=/var/run/delayed_job.pid start
+PIDFILE=1 rake jobs:work
+PIDFILE=/var/run/delayed_job.pid rake jobs:work
+```
+
+A second launcher exits with `Delayed::AlreadyRunningError` before starting any
+worker. The parent deletes the file when it exits. Whether a launcher runs is
+decided by a lock on the file, not by the pid in it: a file left behind by a
+SIGKILLed launcher, or holding a pid since reused by another process, doesn't
+block a start. Worker processes inherit the lock, so workers orphaned by a
+SIGKILLed parent keep a new launcher from starting until they finish their jobs
+and exit. Daemon mode writes its own pidfiles in `--pid-dir` and doesn't take
+`--pid-file`.
+
+The same goes for processes your jobs start with `fork` (without `exec`): they
+inherit the lock too, so a new launcher won't start until they exit. Processes
+started with `spawn`, `system` or backticks run another program (`exec`) and
+don't keep it, since Ruby opens files close-on-exec. A job that forks a
+long-lived Ruby child can close the inherited pidfile in it:
+
+```ruby
+fork do
+  ObjectSpace.each_object(File).select { |f| Delayed::Pidfile.lock_file?(f) }.each(&:close)
+  # ...
+end
+```
+
+#### Shutdown timeout and SIGQUIT
+
+By default a stopping worker waits for its running jobs, however long they take.
+Set a shutdown timeout to bound that, e.g. below your orchestrator's grace period
+(Kubernetes' `terminationGracePeriodSeconds`, 30 seconds by default):
+
+```
+RAILS_ENV=production script/delayed_job --fork -n2 --shutdown-timeout=20 start
+SHUTDOWN_TIMEOUT=20 rake jobs:work
+# or in an initializer
+Delayed::Worker.shutdown_timeout = 20
+```
+
+Jobs still running when it expires are interrupted with `Delayed::ShutdownInterrupt`
+and released: unlocked, with their attempts and `run_at` unchanged, for another
+worker to run right away. `SIGQUIT` does the same immediately. The forking parent
+SIGKILLs any worker process still running 10 seconds after that.
+
+`Delayed::ShutdownInterrupt` is not a `StandardError`, so `rescue => e` in a job
+doesn't catch it. A released job runs again from the start, so jobs should be
+safe to retry.
+
+A job that never finishes within the shutdown timeout would come back on every
+deploy without ever failing. To count each interruption as a failed attempt
+instead (rescheduled with back-off, failing permanently after `max_attempts`):
+
+```
+RAILS_ENV=production script/delayed_job --fork --shutdown-timeout=20 --count-shutdown-interrupts start
+COUNT_SHUTDOWN_INTERRUPTS=1 SHUTDOWN_TIMEOUT=20 rake jobs:work
+Delayed::Worker.count_shutdown_interrupts = true
+```
+
+#### Lock heartbeats
+
+A worker locks each job it runs. If the worker dies or hangs without its
+process exiting (a frozen VM, a lost node, a deadlocked process), that lock is
+only considered abandoned after `max_run_time`, 4 hours by default. Lock
+heartbeats shorten that: each worker process refreshes the locks of its running
+jobs every few seconds, and a lock that hasn't been refreshed for the lock
+timeout counts as abandoned, so another worker picks the job up.
+
+```
+RAILS_ENV=production script/delayed_job --fork --lock-heartbeat=30 --lock-timeout=120 start
+LOCK_HEARTBEAT=30 LOCK_TIMEOUT=120 rake jobs:work
+# or in an initializer
+Delayed::Worker.lock_heartbeat_interval = 30
+Delayed::Worker.lock_timeout = 120 # default 300; at least twice the heartbeat
+```
+
+* Turn heartbeats on for **every** worker running the same jobs: a worker
+  without them doesn't refresh its locks, so its long jobs would be taken over
+  after the lock timeout.
+* The backend must support them (`Delayed::Job.lock_heartbeats?`); otherwise
+  Delayed Job logs a warning and locks expire after `max_run_time` as before.
+* A worker whose lock was taken over doesn't overwrite the new owner's result:
+  backends that implement `destroy_if_locked_by` and `save_if_locked_by` only
+  finish, reschedule or fail a job while the worker still holds its lock.
+* A job taken over from a worker that was only slow, not dead, runs twice.
+  Choose a lock timeout well above the time a worker can stall.
+* A job still running past its `max_run_time` (one its timeout can't
+  interrupt, e.g. blocked in native code) no longer has its lock refreshed:
+  an error is logged, and another worker may run it after the lock timeout -
+  as without heartbeats, where its lock would expire after `max_run_time`.
+
+#### When the parent process dies
+
+If the forking parent is killed (e.g. with `SIGKILL`), its worker processes
+notice within a second, stop polling, finish their running jobs (or interrupt
+and release them after the shutdown timeout) and exit, instead of running on as
+orphans.
+
+#### Worker processes that die
+
+When a worker process dies while running jobs (killed by the OOM killer or
+`SIGKILL`, or exiting with a failure status), the parent process recovers its
+jobs right away instead of leaving them locked until `max_run_time` expires.
+Each counts as a failed attempt with a `Delayed::ProcessExitError`: it is
+rescheduled with the usual back-off, or fails permanently after `max_attempts`,
+so a job that keeps killing its worker eventually stops. `:error` and
+`:failure` plugin callbacks and the job's `error` and `failure` hooks run as
+for any failed attempt.
+
+The dead worker process is then replaced, as is one that exits for any other
+reason; the other worker processes carry on. (Delayed Job used to shut down
+every worker process when one was `SIGKILL`ed.) A child process that dies
+within 10 seconds of starting - e.g. running out of memory as it boots - is
+replaced only after a delay that doubles with each such death in a row (1s,
+2s, 4s, ... up to 60s), so a crash loop doesn't spin; a replacement that stays
+up resets it.
+
+If the database can't be reached at that moment, the jobs' locks expire after
+`max_run_time` as before. Backends support this by implementing
+`Delayed::Job.locked_jobs(worker_name)`; for backends without it, the locks are
+only cleared. A process holds jobs under one lock name per thread (and per
+prefetch slot), so `locked_jobs` and `clear_locks!` are also called with an
+array of names, to list and clear them all in one query each.
 
 ### Running via Rake
 
@@ -315,22 +595,36 @@ Set the `QUEUES` or `POOLS` environment variable to work specific queues.
 rake jobs:work
 
 # Run 4 worker processes and exit when all jobs are finished
-NUM_WORKERS=4 rake jobs:workoff
+# (NUM_WORKERS is an alias of NUM_PROCESSES)
+NUM_PROCESSES=4 rake jobs:workoff
 
 # Work all jobs from the "mailers" and "tasks" queues, then exit
-NUM_WORKERS=4 QUEUES=mailers,tasks rake jobs:workoff
+NUM_PROCESSES=4 QUEUES=mailers,tasks rake jobs:workoff
 
 # You may also specify POOLS pipe-delimited
 POOLS=mailers,tasks:2|tweets:1|*:2 rake jobs:workoff
+
+# Run 2 worker processes with 5 threads each
+NUM_PROCESSES=2 NUM_THREADS=5 rake jobs:work
+
+# Write tmp/pids/delayed_job.pid; refuse to start if another launcher holds it
+PIDFILE=1 rake jobs:work
 ```
 
 Rake uses Forking Mode (see above) under-the-hood.
 
 ### Development
 
-In `development` environment, Delayed Job will automatically reload
-your application code after each 100 jobs or when the queue finishes.
+In `development` environment, Delayed Job runs each job inside the Rails
+reloader, so your application code is reloaded before a job when it has changed.
 You should not need to restart Delayed Job each time you update your code.
+
+With several threads (`--threads`), code is only reloaded once no thread is
+running a job, so a running job never sees half-reloaded classes. While a job
+runs, the other threads keep picking up jobs as usual - but once you change
+code, the next job to start waits until the running ones finish, then runs on
+the new code. So in development a long job holds up the others after each code
+change; run a single thread there if that gets in your way.
 
 ## Advanced Topics
 
@@ -467,6 +761,68 @@ class ParanoidNewsletterJob < NewsletterJob
 end
 ```
 
+### Silencing polling logs
+
+An idle worker polls for jobs every `sleep_delay` seconds (and, with lock
+heartbeats, refreshes its locks), which fills a debug-level SQL log. To keep
+those queries out of the log:
+
+```ruby
+Delayed::Worker.silence_logging = true
+```
+
+or `--silence-logging` / `SILENCE_LOGGING=1`. Only the polling thread is
+silenced, below `WARN`, while it polls: queries made by jobs, and by workers
+finishing them, are logged as usual. The default backend hook silences
+`ActiveRecord::Base.logger` (it needs an `ActiveSupport::Logger`); backends
+logging elsewhere override `Delayed::Job.silence_logging(&block)`.
+
+### Reporting errors outside of jobs
+
+Job errors go through the `:error` lifecycle callback and the job's `error`
+hook. Other errors - a failed reservation or lock heartbeat (e.g. the database
+is down), a crashed worker thread or dispatcher, a failing `failure` hook, the
+failed recovery of a dead worker process' jobs - are logged; to report them too:
+
+```ruby
+Delayed::Worker.on_thread_error = ->(error, info) do
+  Sentry.capture_exception(error, extra: info) # info: :context, :dispatcher, :worker, :job
+end
+```
+
+Errors raised by the handler are logged and ignored. Each such error also
+publishes a `thread_error.delayed_job` event (see below).
+
+### Instrumentation
+
+Workers publish `ActiveSupport::Notifications` events named `<event>.delayed_job`,
+grouped by what they are about:
+
+* `process_started`, `process_stopped` (a worker process), `process_spawned`,
+  `process_exited` (the forking parent's children);
+* `jobs_reserved` (timed: a poll), `job_performed` (timed), `job_attempt_failed`,
+  `job_failed`, `job_lock_lost`, `job_stuck`, `jobs_interrupted`,
+  `jobs_released`;
+* `thread_error` (see `on_thread_error` above).
+
+[docs/monitoring.md](docs/monitoring.md#events) lists when each is published,
+on which thread, and its payload. A subscriber that raises is logged and
+ignored, so it can't fail or skip a job.
+
+```ruby
+ActiveSupport::Notifications.subscribe('job_failed.delayed_job') do |event|
+  ErrorTracker.notify(event.payload[:error], job_id: event.payload[:job].id)
+end
+```
+
+`Delayed::LogSubscriber` logs these events to `Delayed::Worker.logger`
+(`jobs_reserved` and `job_performed` at debug level, with their durations).
+Workers already log their activity, so it isn't attached by default:
+
+```ruby
+Delayed::LogSubscriber.attach_to :delayed_job
+```
+
 ### Gory Details
 
 The library revolves around a `delayed_jobs` table which looks as follows:
@@ -515,7 +871,7 @@ Delayed::Worker.delay_jobs = ->(job) {
 }
 ```
 
-You may need to raise exceptions on SIGTERM signals, `Delayed::Worker.raise_signal_exceptions = :term` will cause the worker to raise a `SignalException` causing the running job to abort and be unlocked, which makes the job available to other workers. The default for this option is false.
+You may need to raise exceptions on SIGTERM signals, `Delayed::Worker.raise_signal_exceptions = :term` will cause the worker to raise a `SignalException` causing the running job to abort and be unlocked, which makes the job available to other workers. The default for this option is false. As with a shutdown timeout, the interrupted job is released with its attempts unchanged (unless `count_shutdown_interrupts` is set), and only the job's `perform` is interrupted: its hooks (`success`, `after`, ...) always run to the end, so a job that finished is never run again.
 
 Here is an example of changing job parameters in Rails:
 
