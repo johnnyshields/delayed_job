@@ -219,9 +219,9 @@ module Delayed
     # without Job.locked_jobs only get locks cleared. Returns the count.
     def self.recover_jobs_of(worker_names, error)
       # One query: threads x slots can be hundreds of names.
-      jobs = Delayed::Job.locked_jobs_of(worker_names)
+      jobs = Delayed::Job.locked_jobs(worker_names)
       if jobs.nil?
-        Delayed::Job.clear_locks_of!(worker_names)
+        Delayed::Job.clear_locks!(worker_names)
         return 0
       end
       # Permanently failed jobs keep their lock but weren't running: only
@@ -231,7 +231,7 @@ module Delayed
         worker = named(worker_name)
         held.count { |job| recover_job(worker, job, error) }
       end
-      Delayed::Job.clear_locks_of!(worker_names)
+      Delayed::Job.clear_locks!(worker_names)
       publish_recovered(by_worker, error)
       recovered
     end

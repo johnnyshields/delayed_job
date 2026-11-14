@@ -410,7 +410,7 @@ module Delayed
       def recover_jobs_of_worker(worker_name, pid, options, status)
         lock_names = Delayed::Worker.lock_names("#{worker_name} ", pid, threads(options), prefetch(options))
         # Clean exit: leftover locks are stale; release, attempts unchanged.
-        return Delayed::Job.clear_locks_of!(lock_names) if status.success?
+        return Delayed::Job.clear_locks!(lock_names) if status.success?
         count = Delayed::Worker.recover_jobs_of(lock_names, ProcessExitError.new(worker_name, pid, status))
         logger.warn "Recovered #{count} job(s) left locked by child process #{worker_name} (pid #{pid})" if count > 0
       rescue StandardError => error

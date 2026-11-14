@@ -364,8 +364,7 @@ describe 'Instrumentation' do
       job.locked_by = 'dead'
       job.locked_at = Delayed::Job.db_time_now
       job.save!
-      allow(Delayed::Job).to receive(:locked_jobs).with('dead').and_return([job])
-      allow(Delayed::Job).to receive(:locked_jobs).with('idle').and_return([])
+      allow(Delayed::Job).to receive(:locked_jobs).with(%w[dead idle]).and_return([job])
       error = Delayed::ProcessExitError.new('delayed_job.0', 99, status)
       Delayed::Worker.recover_jobs_of(%w[dead idle], error)
 

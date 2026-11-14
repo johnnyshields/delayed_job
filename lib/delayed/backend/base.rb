@@ -57,22 +57,13 @@ module Delayed
           false
         end
 
-        # Jobs locked by the named worker, or nil if unsupported. Needed to
-        # recover a dead process's jobs (Worker.recover_jobs_of); without it
-        # their locks are only cleared.
-        def locked_jobs(_worker_name)
+        # Jobs locked by the named worker, or by any of an array of names (in
+        # one query: a process has one per thread and prefetch slot), or nil
+        # if unsupported. Needed to recover a dead process's jobs
+        # (Worker.recover_jobs_of); without it their locks are only cleared.
+        # Backends' clear_locks! takes a name or an array of names likewise.
+        def locked_jobs(_worker_names)
           nil
-        end
-
-        # Like #locked_jobs for several names; may be overridden with one query.
-        def locked_jobs_of(worker_names)
-          jobs = worker_names.map { |name| locked_jobs(name) }
-          jobs.any?(&:nil?) ? nil : jobs.flatten(1)
-        end
-
-        # Like #clear_locks! for several names; may be overridden with one query.
-        def clear_locks_of!(worker_names)
-          worker_names.each { |name| clear_locks!(name) }
         end
 
         # True if the backend implements #touch_locks and treats locks older

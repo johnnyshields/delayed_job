@@ -578,10 +578,8 @@ If the database can't be reached at that moment, the jobs' locks expire after
 `max_run_time` as before. Backends support this by implementing
 `Delayed::Job.locked_jobs(worker_name)`; for backends without it, the locks are
 only cleared. A process holds jobs under one lock name per thread (and per
-prefetch slot), so backends should also override
-`Delayed::Job.locked_jobs_of(names)` and `clear_locks_of!(names)` to list and
-clear them all in one query each; the defaults call `locked_jobs` and
-`clear_locks!` once per name.
+prefetch slot), so `locked_jobs` and `clear_locks!` are also called with an
+array of names, to list and clear them all in one query each.
 
 ### Running via Rake
 

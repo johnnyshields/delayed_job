@@ -59,26 +59,20 @@ module Delayed
           create(*args)
         end
 
-        def self.locked_jobs(worker_name)
-          synchronize { all.select { |j| j.locked_by == worker_name } }
-        end
-
-        def self.locked_jobs_of(worker_names)
+        # A worker name, or an array of names.
+        def self.locked_jobs(worker_names)
           synchronize { locked_by_any(worker_names) }
         end
 
-        def self.clear_locks_of!(worker_names)
+        def self.clear_locks!(worker_names)
           synchronize { locked_by_any(worker_names).each(&:unlock) }
         end
 
         def self.locked_by_any(worker_names)
-          all.select { |j| worker_names.include?(j.locked_by) }
+          names = Array(worker_names)
+          all.select { |j| names.include?(j.locked_by) }
         end
         private_class_method :locked_by_any
-
-        def self.clear_locks!(worker_name)
-          clear_locks_of!([worker_name])
-        end
 
         # Find a few candidate jobs to run (in case some immediately get locked by others).
         def self.find_available(worker_name, limit = 5, max_run_time = Worker.max_run_time) # rubocop:disable Metrics/CyclomaticComplexity, Metrics/PerceivedComplexity

@@ -547,7 +547,7 @@ describe 'Prefetching jobs (Worker.prefetch)' do
       wait_until { GateJob.started.size == 2 && locked_jobs.size == 6 }
       # Stubs are set up here, on this thread: rspec-mocks isn't thread-safe.
       failing = Concurrent::AtomicBoolean.new(false)
-      allow(Delayed::Job).to receive(:clear_locks_of!).and_wrap_original do |orig, names|
+      allow(Delayed::Job).to receive(:clear_locks!).and_wrap_original do |orig, names|
         raise IOError, 'down' if failing.true?
         orig.call(names)
       end
@@ -588,7 +588,7 @@ describe 'Prefetching jobs (Worker.prefetch)' do
       d = dispatcher(1)
       thread = run_in_thread(d)
       wait_until { GateJob.started.size == 1 && locked_jobs.size == 3 }
-      allow(Delayed::Job).to receive(:clear_locks_of!).and_raise(IOError, 'down')
+      allow(Delayed::Job).to receive(:clear_locks!).and_raise(IOError, 'down')
       d.stop
       wait_until { reported.any? } # Queued jobs drained before the running one finishes.
       GateJob.release = true

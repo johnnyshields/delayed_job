@@ -653,7 +653,7 @@ module Delayed
     def clear_slot_locks(worker)
       return if @prefetch.zero?
       names = @slots[worker].map(&:name)
-      with_executor { Delayed::Job.clear_locks_of!(names) }
+      with_executor { Delayed::Job.clear_locks!(names) }
     rescue StandardError => error
       say "Could not release the jobs of #{worker.name}: #{error.class}: #{error.message}", 'error'
       thread_error(error, 'Releasing interrupted jobs', worker.name)
@@ -765,7 +765,7 @@ module Delayed
       return if queued.empty?
       message, event_reason = QUEUED_RELEASE_REASONS.fetch(reason)
       names = queued.map { |slot, _job| slot.name }
-      with_executor { Delayed::Job.clear_locks_of!(names) }
+      with_executor { Delayed::Job.clear_locks!(names) }
       say "Released #{queued.size} queued job(s) #{message}", reason == :shutdown ? 'info' : 'warn'
       Delayed.instrument(:jobs_released, :workers => names, :count => queued.size, :reason => event_reason)
     rescue StandardError => error
