@@ -12,12 +12,14 @@ Threads and polling:
 * Batch reservation: `--batch-reserve` (`BATCH_RESERVE=1`, `Delayed::Worker.batch_reserve`; off by default) lets a backend that implements a batch `reserve_batch` (e.g. delayed_job_mongoid) reserve the jobs for all free threads in one query.
 * Under Rails, each job runs inside the Rails reloader/executor; code is reloaded before a job when it has changed (instead of after each 100 jobs). With several threads, a reload waits until no thread is running a job.
 * The number of worker processes is set with `-n`/`--processes=N` (`NUM_PROCESSES`); `--num-workers`, `--number_of_workers` (with a deprecation warning) and `NUM_WORKERS` still work. Launchers take `:processes` and `:threads` (`:worker_count` and `Launcher#worker_count` remain as aliases).
+* Mold process (experimental): `--mold[=JOBS,...]` (`MOLD`, `Delayed::Worker.mold`; off by default) promotes a forked worker process that has performed JOBS jobs (default 1000; successive thresholds, comma-separated) to a mold, which runs no jobs and forks every worker process from then on, so they share its warmed memory copy-on-write. Worker processes are reforked about 10% at a time, idle ones first, each replacement starting before the process it replaces stops. `SIGURG` to the parent promotes a new mold. On Linux the parent is a child subreaper (a small C extension, built on install; none on JRuby), so a mold dying doesn't stop its worker processes; a new mold is then promoted. Failed promotions are retried with back-off, and a mold whose worker processes fail to start is replaced. A `:mold` lifecycle hook (pid, generation) runs in the mold; `Delayed::Worker.no_longer_fork_safe!` keeps a worker process from being promoted; events `mold_promoted`, `mold_activated`, `mold_refork_completed`, `mold_retired` (`mold_activated` and `mold_refork_completed` with PSS totals), and `mold_lost`, `mold_promotion_failed`, `mold_disabled` for failures (promotion stops after 5 in a row, until `SIGURG`). Needs `fork`; forking mode only. A port of Puma's `mold_worker`, informed by Pitchfork.
 * Before forking worker processes, the parent eager loads the Rails application and runs `Process.warmup` (or `GC.start` + `GC.compact`), so more memory is shared copy-on-write.
 
 Stopping:
 * Shutdown timeout: `--shutdown-timeout=N` (`SHUTDOWN_TIMEOUT`, `Delayed::Worker.shutdown_timeout`; default: wait) bounds how long a stopping worker waits; jobs still running are interrupted with `Delayed::ShutdownInterrupt` and released for another worker, attempts unchanged (`--count-shutdown-interrupts` counts them as failed attempts instead). `SIGQUIT` does the same at once. Only a job's `perform` is interrupted, never its hooks, so a finished job is never run again; a job interrupted by a signal (`raise_signal_exceptions`) is released the same way, and only the first `TERM`/`INT` raises.
 * The forking parent forwards `TERM`/`INT`/`QUIT` to its worker processes (`docker stop`, Kubernetes, systemd), treats `SIGHUP` as `SIGTERM`, stops before forking if signalled while it boots, and with a shutdown timeout SIGKILLs workers still running 10 seconds after it. Worker processes stop gracefully when their parent goes away, and record a signal that arrives while they start up.
 * Workers wake up immediately from their idle sleep when stopped.
+* When the shutdown timeout's kill fires, the forking parent only sends `SIGKILL`; its run loop then reaps each worker process, recovering its jobs (`process_exited` published), and the parent exits with status 1. It could exit 0 ("exited gracefully") mid-recovery, leaving jobs locked until `max_run_time`. If the parent is still running 10s after the kill, it exits regardless.
 
 Locks:
 * Lock heartbeats (off by default): `--lock-heartbeat=N` (`LOCK_HEARTBEAT`, `Delayed::Worker.lock_heartbeat_interval`) refreshes the locks of running jobs every N seconds, and `--lock-timeout` (`LOCK_TIMEOUT`, default 300) is how old an unrefreshed lock must be for another worker to take its job over, instead of `max_run_time`. A job running past its `max_run_time` stops being refreshed, so a stuck job can't hold its lock forever. Backend hooks: `lock_heartbeats?`, `touch_locks(names)`.
@@ -25,6 +27,7 @@ Locks:
 * Pidfile for forking mode: `--pid-file[=PATH]` (`PIDFILE=1` or a path; launcher option `:pid_file`) makes a second launcher exit with `Delayed::AlreadyRunningError` while the first, or any of its worker processes, still runs. Liveness is decided by a lock on the file, so a stale file never blocks a start.
 
 Monitoring:
+* `Delayed::ExitStatus::PROMOTION_FAILED` (75) and `JOBS_STUCK` (76): exit statuses of a forked child process that aren't crashes, for `process_exited` subscribers to tell apart.
 * Instrumentation: `ActiveSupport::Notifications` events `process_started`, `process_stopped`, `process_spawned`, `process_exited`, `jobs_reserved`, `job_performed`, `job_attempt_failed`, `job_failed`, `job_lock_lost`, `job_stuck`, `jobs_interrupted`, `jobs_released` and `thread_error` (`<event>.delayed_job`; see docs/monitoring.md). Subscriber exceptions are logged and ignored. `Delayed::LogSubscriber` logs them (opt-in: `Delayed::LogSubscriber.attach_to :delayed_job`).
 * `Delayed::Worker.on_thread_error` (taking the error and its info, the error, or nothing) is called with errors outside a job's own handling: failed reservations and lock heartbeats, crashed threads, failing `failure` hooks, failed recovery of a dead process' jobs.
 * `Delayed::Worker.silence_logging = true` (`--silence-logging`, `SILENCE_LOGGING=1`) keeps polling and lock-refresh queries out of the log, on the polling thread only (backend hook `Delayed::Job.silence_logging(&block)`).
@@ -36,6 +39,33 @@ Fixes and smaller changes:
 * `Job#name` is `Unknown` for a handler that isn't valid YAML, instead of raising, and is recomputed after `reload`.
 * `Delayed::Worker.reset` also resets `exit_on_complete`, `min_priority`, `max_priority` and `default_queue_name`. `Worker.after_fork` no longer reopens the pidfile.
 * Shared backend examples cover `reserve_batch`, and `locked_jobs` and `clear_locks!` with an array of names.
+
+4.2.0 - 2025-12-29
+=======================
+* Add dependencies for benchmark and logger which are moving out of stdlib.
+* Pull ActiveJob adapter from rails into DJ for future rails release.
+* Add Ruby 4.0 and Rails 8.1 to test matrix.
+
+4.1.13 - 2024-11-08
+=======================
+* Enable Rails 8
+
+4.1.12 - 2024-08-14
+=======================
+* Add missing require for extract_options
+* Fix rails 7.2 ActiveSupport::ProxyObject deprecation
+* Multiple contributors on current and legacy test suite improvements
+
+4.1.12.rc1 - 2024-08-13
+=======================
+* Validating trusted publishing release
+* Add missing require for extract_options
+* Fix rails 7.2 ActiveSupport::ProxyObject deprecation
+* Multiple contributors on current and legacy test suite improvements
+
+4.1.11 - 2022-09-28
+===================
+* Fix missing require for Rails 7.0.3+
 
 4.1.10 - 2022-01-17
 ===================

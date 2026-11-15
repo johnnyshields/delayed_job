@@ -126,6 +126,10 @@ module Delayed
         opt.on('--prefetch-dynamic', 'Scale the prefetch queue depth with demand: from 0, one level deeper after each poll that gets every job it asks for, back to 0 after one that gets fewer') do
           @options[:prefetch_dynamic] = true
         end
+        opt.on('--mold[=JOBS]', Array, 'Experimental, with --fork: once a child process has performed JOBS jobs (comma-separated for successive thresholds; default 1000), ' \
+                                       'refork every child process from it, sharing its warmed memory. SIGURG to the parent promotes one at any time.') do |jobs|
+          @options[:mold] = parse_mold(jobs)
+        end
         opt.on('--read-ahead N', 'Number of jobs from the queue to consider') do |n|
           @options[:read_ahead] = parse(:read_ahead, n)
         end
@@ -152,6 +156,12 @@ module Delayed
 
     def pool_parser
       @pool_parser ||= PoolParser.new
+    end
+
+    # --mold alone: the default threshold.
+    def parse_mold(jobs)
+      return true unless jobs
+      jobs.map { |n| LaunchOptions.parse_mold(n, '--mold') }
     end
 
     def parse(option, value, name = LaunchOptions::CLI_NAMES.fetch(option))

@@ -93,6 +93,7 @@ module Delayed
       @procline_name = options[:procline]
       @stopped = false
       @quit = false
+      @promoted = false
       @stop_requested_at = nil
 
       @mutex = Mutex.new
@@ -114,6 +115,7 @@ module Delayed
       @events = 0
       @thread_error = nil
       @failed_reserve_count = 0
+      @performed = 0 # Never reset, unlike the stats.
       reset_stats
     end
 
@@ -199,9 +201,52 @@ module Delayed
       @quit
     end
 
+    # Stops like #stop, then the launcher turns this process into a mold (see
+    # Launcher::Mold). No-op once stopping. Signal-trap safe.
+    def promote
+      return if stop?
+      @promotion_started = true
+      @promoted = true
+      stop
+    end
+
+    def promoted?
+      @promoted
+    end
+
+    # A signal (or the parent going away) overrides a promotion: the process
+    # then exits instead (see #promotion_cancelled?). Returns whether it was
+    # promoted. Signal-trap safe.
+    def cancel_promotion
+      promoted = @promoted
+      @promoted = false
+      promoted
+    end
+
+    # Promoted, then stopped by a signal (or its parent going away) instead.
+    def promotion_cancelled?
+      !!@promotion_started && !@promoted
+    end
+
+    # Jobs performed (succeeded or failed) since start.
+    def jobs_performed
+      synchronize { @performed }
+    end
+
+    def busy_threads
+      synchronize { busy_count }
+    end
+
+    # No job or heartbeat thread is left running (once stopped): safe to
+    # fork, as nothing is frozen mid-way in the child.
+    def cleanly_stopped?
+      @threads.none?(&:alive?) && !(@heartbeat && @heartbeat.alive?)
+    end
+
     # Process title, e.g. "delayed_job.0: 3/4 busy, queues=mail,sms".
     def procline
       state = if quit? then 'quitting, '
+      elsif promoted? then 'promoting, '
       elsif stop? then 'stopping, '
       end
       busy, held = synchronize { [busy_count, @slot_jobs.size] }
@@ -238,14 +283,14 @@ module Delayed
     # Worker.raise_signal_exceptions. QUIT: see #quit.
     def trap_signals
       trap('TERM') do
-        first = !stop?
+        first = cancel_promotion || !stop? # A promotion's stop wasn't the signal's.
         Thread.new { say 'Exiting...' } if first
         stop
         raise_signal('TERM') if first && Worker.raise_signal_exceptions
       end
 
       trap('INT') do
-        first = !stop?
+        first = cancel_promotion || !stop?
         Thread.new { say 'Exiting...' } if first
         stop
         raise_signal('INT') if first && Worker.raise_signal_exceptions && Worker.raise_signal_exceptions != :term
@@ -266,6 +311,7 @@ module Delayed
       Delayed.check_trappable!('QUIT')
       trap('QUIT') do
         Thread.new { say 'Received SIGQUIT: interrupting running jobs and exiting...' }
+        cancel_promotion
         quit
       end
     rescue ArgumentError => error
@@ -275,6 +321,7 @@ module Delayed
     # Like the trap, but raises no SignalException: nothing is running yet.
     def handle_pending_signal(signal)
       say "Received SIG#{signal} while starting", 'warn'
+      cancel_promotion
       signal == 'QUIT' ? quit : stop
     end
 
@@ -290,7 +337,9 @@ module Delayed
         # a poll that reserved it stops here instead of handing it to another
         # thread. Undispatched jobs (also after a signal exception) stay
         # locked until their worker's names are cleared on thread exit
-        # (ClearLocks, #clear_slot_locks).
+        # (ClearLocks, #clear_slot_locks); those reserved for a thread that
+        # already exited (its locks cleared) are released here.
+        release_reserved(reserved) if @thread_error
         raise_thread_error
         reserved.each { |slot, job| dispatch(slot, job, polled_at) }
         deeper = adjust_depth(free.size, reserved.size)
@@ -344,8 +393,9 @@ module Delayed
 
     # Re-parented (parent died): stops gracefully.
     def supervisor_gone?
-      return false unless supervisor_pid && Process.ppid != supervisor_pid
-      say "Parent process #{supervisor_pid} is gone; stopping", 'warn'
+      return false unless supervisor_pid && !ProcessUtil.parent_alive?(supervisor_pid)
+      say "Parent process #{Array(supervisor_pid).first} is gone; stopping", 'warn'
+      cancel_promotion
       stop
       true
     end
@@ -460,18 +510,27 @@ module Delayed
     # would otherwise hold its lock forever; now another worker may take it.
     def heartbeat_names
       now = monotonic_now
-      overrun = synchronize do
-        @jobs_started.select { |_worker, (_job, started, limit)| limit && now - started > limit }
+      # The stuck slots with the snapshot: a stuck job ending meanwhile would
+      # otherwise leave the next, healthy job's slot unrefreshed.
+      overrun, stuck = synchronize do
+        late = @jobs_started.select { |_worker, (_job, started, limit)| limit && now - started > limit }
+        [late, late.keys.map { |worker| @running_slot[worker] }]
       end
       overrun.each { |worker, (job, _, limit, label)| report_overrun(worker, job, limit, label) }
       return (workers - overrun.keys).map(&:name) if @prefetch.zero?
       # Release jobs queued behind a stuck one (none are added, see #free_slots).
       release_queued(overrun.keys.map { |worker| @inboxes[worker] }.compact, :stuck)
       # With prefetch, refresh the slots holding jobs, except overrun ones.
-      synchronize do
-        stuck = overrun.keys.map { |worker| @running_slot[worker] }
-        (@slot_jobs.keys - stuck).map(&:name)
-      end
+      synchronize { (@slot_jobs.keys - stuck).map(&:name) }
+    end
+
+    # Jobs a poll locked but won't dispatch (a thread crashed meanwhile):
+    # their slots were free, so their names hold nothing else.
+    def release_reserved(reserved)
+      return if reserved.empty?
+      with_executor { Delayed::Job.clear_locks!(reserved.map { |slot, _job| slot.name }) }
+    rescue StandardError => error
+      say "Could not release the jobs reserved for a crashed worker: #{error.class}: #{error.message}", 'error'
     end
 
     # Records the refresh for slots still holding the same job (see #lock_time_left).
@@ -604,19 +663,27 @@ module Delayed
       until (item = inbox.pop).equal?(Inbox::EOQ)
         slot, job, reserved_at = item
         discard_stale_interrupts
-        next release_unstarted(worker, slot, job) if past_shutdown_deadline? || (@prefetch > 0 && stop?)
         lock_left = lock_time_left(slot, reserved_at)
-        next release_unstarted(worker, slot, job, :lock_expired) if lock_left && lock_left <= 0
-        run_job(worker, slot, job, lock_left)
+        reason = start_job(worker, slot, job, lock_left)
+        reason ? release_unstarted(worker, slot, job, reason) : run_job(worker, slot, job, lock_left)
+      end
+    end
+
+    # Registers the job as running, unless it mustn't start: returns why not
+    # (see UNSTARTED_REASONS). Under the lock #stop_threads reads @running
+    # under, so a quit landing just before can't miss the job.
+    def start_job(worker, slot, job, lock_left)
+      synchronize do
+        next stop_reason if past_shutdown_deadline? || (@prefetch > 0 && stop?)
+        next :lock_expired if lock_left && lock_left <= 0
+        @running[Thread.current] = job
+        @running_slot[worker] = slot
+        nil
       end
     end
 
     # A job interrupted by shutdown is released.
     def run_job(worker, slot, job, lock_left)
-      synchronize do
-        @running[Thread.current] = job
-        @running_slot[worker] = slot
-      end
       result = with_reloader { untrack_job_after(worker) { worker.perform_job(job, lock_left) } }
       synchronize { @running.delete(Thread.current) }
       job_finished(worker, slot, result)
@@ -733,7 +800,7 @@ module Delayed
         # Defer a late signal until every inbox is closed: on JRuby one raised
         # in Queue#push surfaces as a ThreadError and leaves an inbox open.
         self.class.deferring_interrupts do
-          release_queued if @prefetch > 0
+          release_queued(@inboxes.values, stop_reason) if @prefetch > 0
           @inboxes.each_value(&:close)
         end
         raise_in_threads(error) if error.is_a?(SignalException)
@@ -746,16 +813,20 @@ module Delayed
         wait_for_threads
       end
       if shutdown_deadline
-        interrupt_threads(synchronize { @running.keys.select(&:alive?) })
+        # One grace for both: waiting it twice for a stuck job would let the
+        # parent's kill (SHUTDOWN_GRACE) beat this process's own exit.
+        grace_ends = monotonic_now + INTERRUPT_GRACE
+        interrupt_threads(synchronize { @running.keys.select(&:alive?) }, grace_ends)
         # Also join idle threads: they may be releasing a late job and must run
         # :execute callbacks (ClearLocks) before process exit kills them.
-        join_threads(monotonic_now + INTERRUPT_GRACE)
+        join_threads(grace_ends)
       end
       raise late_signal if late_signal
     end
 
     QUEUED_RELEASE_REASONS = {
       :shutdown => ['on shutdown', 'shutdown'],
+      :promotion => ['on promotion to mold', 'promotion'],
       :stuck => ['queued behind a job that overran its max_run_time', 'stuck job']
     }.freeze
 
@@ -766,7 +837,7 @@ module Delayed
       message, event_reason = QUEUED_RELEASE_REASONS.fetch(reason)
       names = queued.map { |slot, _job| slot.name }
       with_executor { Delayed::Job.clear_locks!(names) }
-      say "Released #{queued.size} queued job(s) #{message}", reason == :shutdown ? 'info' : 'warn'
+      say "Released #{queued.size} queued job(s) #{message}", reason == :stuck ? 'warn' : 'info'
       Delayed.instrument(:jobs_released, :workers => names, :count => queued.size, :reason => event_reason)
     rescue StandardError => error
       say "Could not release the queued jobs: #{error.class}: #{error.message}", 'error'
@@ -799,14 +870,14 @@ module Delayed
       end
     end
 
-    def interrupt_threads(busy)
+    def interrupt_threads(busy, deadline)
       return if busy.empty?
       reason = quit? ? 'Quitting' : format('Shutdown timeout of %gs exceeded', Worker.shutdown_timeout)
       say "#{reason}: interrupting #{busy.size} running job(s)", 'warn'
       Delayed.instrument(:jobs_interrupted, :dispatcher => name, :jobs => busy.size, :reason => reason)
       busy.each { |thread| thread.raise(ShutdownInterrupt, reason) }
-      deadline = monotonic_now + INTERRUPT_GRACE
-      busy.each { |thread| thread.join([deadline - monotonic_now, 0].max) }
+      # All interrupted before any is waited for.
+      busy.each { |thread| thread.join([deadline - monotonic_now, 0].max) } # rubocop:disable Style/CombinableLoops
       stuck = busy.count(&:alive?)
       return if stuck.zero?
       say format('%<stuck>d job(s) did not stop within %<grace>gs of being interrupted; ' \
@@ -824,7 +895,8 @@ module Delayed
     # records a failed attempt instead.
     def release_interrupted(worker, job, interrupt, slot)
       release_slot(worker, slot, 'shutdown') do
-        if Worker.count_shutdown_interrupts
+        # A promotion only saves memory: it never costs the job an attempt.
+        if Worker.count_shutdown_interrupts && !promoted?
           worker.job_say(job, 'interrupted by shutdown; counted as a failed attempt', 'warn')
           worker.fail_attempt(job, interrupt)
         else
@@ -853,6 +925,7 @@ module Delayed
 
     UNSTARTED_REASONS = {
       :shutdown => ['not started before shutdown', 'shutdown'],
+      :promotion => ['not started before promotion to mold', 'promotion'],
       :lock_expired => ['waited in its queue until its lock expired', 'lock expired in queue']
     }.freeze
 
@@ -863,6 +936,10 @@ module Delayed
       release_slot(worker, slot, event_reason) { worker.job_say(job, "#{message}; released for another worker", 'warn') }
     end
 
+    def stop_reason
+      promoted? ? :promotion : :shutdown
+    end
+
     def past_shutdown_deadline?
       deadline = stop? && shutdown_deadline
       deadline ? monotonic_now >= deadline : false
@@ -871,6 +948,7 @@ module Delayed
     def job_finished(worker, slot, result)
       synchronize do
         result ? @success += 1 : @failure += 1
+        @performed += 1
         @running_slot.delete(worker)
       end
       slots_done([slot])

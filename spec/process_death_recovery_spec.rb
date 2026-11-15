@@ -331,14 +331,14 @@ describe 'Recovering the jobs of a dead worker process' do
 
       it 'recovers the jobs of a crashed worker, then replaces it' do
         reap(crashed)
-        expect(launcher).to receive(:recover_jobs_of_worker).with('delayed_job.1', 99, options, crashed).ordered
+        expect(launcher).to receive(:recover_jobs_of_worker).with('delayed_job.1', 99, options, crashed, :promoted => false).ordered
         expect(launcher).to receive(:add_worker).with(options, :replaces_pid => 99, :delay => 0).ordered
         launcher.send(:run_loop)
       end
 
       it 'recovers the jobs of a SIGKILLed worker, then replaces it' do
         reap(killed)
-        expect(launcher).to receive(:recover_jobs_of_worker).with('delayed_job.1', 99, options, killed).ordered
+        expect(launcher).to receive(:recover_jobs_of_worker).with('delayed_job.1', 99, options, killed, :promoted => false).ordered
         expect(launcher).to receive(:add_worker).with(options, :replaces_pid => 99, :delay => 0).ordered
         expect(launcher).not_to receive(:shutdown)
         launcher.send(:run_loop)
@@ -392,20 +392,20 @@ describe 'Recovering the jobs of a dead worker process' do
     end
 
     describe '#kill' do
-      it 'recovers the jobs of the workers it kills' do
+      it 'only SIGKILLs: the run loop then reaps the workers and recovers their jobs, with an attempt' do
         launcher.send(:workers)[99] = ['delayed_job.1', {:threads => 2}]
         allow(Process).to receive(:kill)
-        allow(Process).to receive(:waitpid2).with(99).and_return([99, killed])
-        expect(launcher).to receive(:recover_jobs_of_worker).with('delayed_job.1', 99, {:threads => 2}, killed)
-        expect { launcher.kill(1, 'test') }.to raise_error(SystemExit)
-      end
+        recovered = []
+        allow(launcher).to receive(:recover_jobs_of_worker) { |*args| recovered << args }
+        launcher.kill('test')
+        expect(Process).to have_received(:kill).with('KILL', 99)
+        expect(launcher.send(:workers)).to have_key(99)
+        expect(recovered).to be_empty
 
-      it 'skips workers already reaped by the main thread' do
-        launcher.send(:workers)[99] = ['delayed_job.1', {}]
-        allow(Process).to receive(:kill)
-        allow(Process).to receive(:waitpid2).with(99).and_raise(Errno::ECHILD)
-        expect(launcher).not_to receive(:recover_jobs_of_worker)
-        expect { launcher.kill(1) }.to raise_error(SystemExit)
+        expect(launcher).not_to receive(:add_worker)
+        expect(launcher.send(:handle_exit, 99, killed)).to be true
+        expect(recovered).to eq [['delayed_job.1', 99, {:threads => 2}, killed, {:promoted => false}]]
+        expect(logger).not_to have_received(:warn).with(/was SIGKILLed/)
       end
     end
   end

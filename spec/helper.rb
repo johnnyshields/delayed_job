@@ -5,15 +5,13 @@ SimpleCov::Formatter::LcovFormatter.config do |c|
   c.report_with_single_file = true
   c.single_report_path = 'coverage/lcov.info'
 end
-SimpleCov.formatters = SimpleCov::Formatter::MultiFormatter.new(
-  [
-    SimpleCov::Formatter::HTMLFormatter,
-    SimpleCov::Formatter::LcovFormatter
-  ]
-)
+SimpleCov.formatters = [
+  SimpleCov::Formatter::HTMLFormatter,
+  SimpleCov::Formatter::LcovFormatter
+]
 
 SimpleCov.start do
-  add_filter '/spec/'
+  skip '/spec/'
 end
 
 require 'logger'
@@ -38,6 +36,10 @@ ENV['RAILS_ENV'] = 'test'
 
 # Trigger AR to initialize
 ActiveRecord::Base # rubocop:disable Lint/Void
+# Load Active Record up front, as Rails does in production: specs use it from
+# several threads, and TruffleRuby can let one thread see a class another is
+# still autoloading (e.g. ActiveRecord::PredicateBuilder, without #initialize).
+ActiveRecord.eager_load!
 
 module Rails
   def self.root
@@ -140,6 +142,33 @@ RSpec.configure do |config|
     Thread.list.each do |thread|
       next if thread == Thread.current || thread.status == 'sleep' || !thread.inspect.include?('launcher/forking.rb')
       thread.join(1)
+    end
+  end
+
+  # A hung example (a deadlock, a wait with no timeout) would otherwise run
+  # until CI's job timeout without a word on where it stuck. Past
+  # SPEC_TIMEOUT seconds (hooks included), print it and every thread's
+  # backtrace, then fail it; if it doesn't stop, end the run.
+  spec_timeout = Integer(ENV.fetch('SPEC_TIMEOUT', 180))
+  config.around(:each) do |example|
+    main = Thread.current
+    done = Queue.new
+    watchdog = Thread.new do
+      Thread.current.thread_variable_set(:fork_safe, true)
+      next unless done.pop(:timeout => spec_timeout).nil?
+      warn "\nExample still running after #{spec_timeout}s: #{example.location} #{example.full_description}"
+      (Thread.list - [Thread.current]).each { |thread| warn "#{thread.inspect}\n  #{thread.backtrace.to_a.join("\n  ")}" }
+      main.raise Timeout::Error, "example still running after #{spec_timeout}s (backtraces on stderr)"
+      next unless done.pop(:timeout => 30).nil?
+      warn 'The example did not stop; ending the run'
+      exit!(1)
+    end
+    watchdog.name = 'Spec watchdog'
+    begin
+      example.run
+    ensure
+      done << true
+      watchdog.join
     end
   end
 

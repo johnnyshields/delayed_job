@@ -33,6 +33,11 @@ namespace :jobs do
     %w[PREFETCH_DYNAMIC BATCH_RESERVE SILENCE_LOGGING COUNT_SHUTDOWN_INTERRUPTS].each do |variable|
       @options[variable.downcase.to_sym] = true if flag.call(variable)
     end
+    # MOLD=1000,2000 (thresholds), or MOLD=true for the default (1000).
+    if flag.call('MOLD')
+      mold = ENV['MOLD'].strip
+      @options[:mold] = mold =~ /\A(?:t|true|y|yes|on)\z/i ? true : mold.split(',').map { |n| Delayed::LaunchOptions.parse_mold(n, 'MOLD') }
+    end
     # PIDFILE=path, or PIDFILE=1 for tmp/pids/delayed_job.pid.
     if flag.call('PIDFILE')
       @options[:pid_file] = ENV['PIDFILE'] =~ /\A(?:1|t|true|y|yes|on)\z/i ? true : ENV['PIDFILE']
